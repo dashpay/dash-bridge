@@ -68,7 +68,7 @@ function renderKeyUploadSection(inputId: string): string {
 
 // Available options for key configuration
 const KEY_TYPES: KeyType[] = ['ECDSA_SECP256K1', 'ECDSA_HASH160'];
-const KEY_PURPOSES: KeyPurpose[] = ['AUTHENTICATION', 'ENCRYPTION', 'TRANSFER', 'VOTING', 'OWNER'];
+const KEY_PURPOSES: KeyPurpose[] = ['AUTHENTICATION', 'ENCRYPTION', 'DECRYPTION', 'TRANSFER', 'VOTING', 'OWNER'];
 const SECURITY_LEVELS: SecurityLevel[] = ['MASTER', 'CRITICAL', 'HIGH', 'MEDIUM'];
 
 /**
@@ -78,6 +78,9 @@ const SECURITY_LEVELS: SecurityLevel[] = ['MASTER', 'CRITICAL', 'HIGH', 'MEDIUM'
 function getAllowedSecurityLevels(purpose: KeyPurpose, includeMaster = true): SecurityLevel[] {
   if (purpose === 'TRANSFER') {
     return ['CRITICAL'];
+  }
+  if (purpose === 'ENCRYPTION' || purpose === 'DECRYPTION') {
+    return ['MEDIUM'];
   }
   return includeMaster ? SECURITY_LEVELS : SECURITY_LEVELS.filter(s => s !== 'MASTER');
 }
