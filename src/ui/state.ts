@@ -1166,9 +1166,10 @@ export function setContractIdentitySource(state: BridgeState, source: 'new' | 'e
 /**
  * Set contract identity fetching state
  */
-export function setContractIdentityFetching(state: BridgeState): BridgeState {
+export function setContractIdentityFetching(state: BridgeState, identityId: string): BridgeState {
   return {
     ...state,
+    targetIdentityId: identityId,
     contractIdentityFetching: true,
     contractIdentityFetchError: undefined,
     contractIdentityKeys: undefined,

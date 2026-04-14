@@ -1042,9 +1042,7 @@ function setupEventListeners(container: HTMLElement) {
       const identityId = contractIdentityIdInput.value.trim();
       if (!validateIdentityId(identityId)) return;
 
-      updateState(setContractIdentityFetching(
-        setTargetIdentityId(state, identityId)
-      ));
+      updateState(setContractIdentityFetching(state, identityId));
 
       try {
         const keys = await getIdentityPublicKeys(identityId, state.network);
@@ -1153,8 +1151,7 @@ function setupEventListeners(container: HTMLElement) {
     contractBackBtn.addEventListener('click', () => {
       switch (state.step) {
         case 'contract_choose_identity':
-          updateState(setMode(state, 'contract'));
-          updateState({ ...state, step: 'init', mode: 'contract' as BridgeState['mode'] });
+          updateState(createInitialState(state.network));
           break;
         case 'contract_enter_identity':
           updateState({ ...state, step: 'contract_choose_identity' });
@@ -1537,23 +1534,7 @@ async function startBridge() {
     downloadKeyBackup(state);
 
     // Auto-publish contract if this identity was created for contract registration
-    if (state.contractFromIdentityCreation && state.contractJson) {
-      try {
-        // Find first AUTHENTICATION key with HIGH/CRITICAL for contract signing
-        const authKey = state.identityKeys.find(
-          (k) => k.purpose === 'AUTHENTICATION' && (k.securityLevel === 'HIGH' || k.securityLevel === 'CRITICAL'),
-        );
-        if (authKey) {
-          state = { ...state, contractPrivateKeyWif: authKey.privateKeyWif, contractPublicKeyId: authKey.id, identityId: result.identityId };
-          await startContractRegistration();
-          return;
-        }
-      } catch (error) {
-        console.error('Contract auto-publish error:', error);
-        updateState(setError(state, toError(error)));
-        return;
-      }
-    }
+    if (await autoPublishContractIfNeeded(result.identityId)) return;
 
   } catch (error) {
     console.error('Bridge error:', error);
@@ -1678,16 +1659,7 @@ async function recheckDeposit() {
       downloadKeyBackup(state);
 
       // Auto-publish contract if applicable
-      if (state.contractFromIdentityCreation && state.contractJson) {
-        const authKey = state.identityKeys.find(
-          (k) => k.purpose === 'AUTHENTICATION' && (k.securityLevel === 'HIGH' || k.securityLevel === 'CRITICAL'),
-        );
-        if (authKey) {
-          state = { ...state, contractPrivateKeyWif: authKey.privateKeyWif, contractPublicKeyId: authKey.id, identityId: result.identityId };
-          await startContractRegistration();
-          return;
-        }
-      }
+      if (await autoPublishContractIfNeeded(result.identityId)) return;
     } else {
       throw new Error(`recheckDeposit: unexpected mode '${state.mode}'`);
     }
@@ -1701,6 +1673,24 @@ async function recheckDeposit() {
 // ============================================================================
 // Contract Registration Functions
 // ============================================================================
+
+/**
+ * Auto-publish contract after identity creation if the identity was created
+ * for contract registration. Finds the first suitable auth key and publishes.
+ * Returns true if contract publishing was initiated, false otherwise.
+ */
+async function autoPublishContractIfNeeded(identityId: string): Promise<boolean> {
+  if (!state.contractFromIdentityCreation || !state.contractJson) return false;
+
+  const authKey = state.identityKeys.find(
+    (k) => k.purpose === 'AUTHENTICATION' && (k.securityLevel === 'HIGH' || k.securityLevel === 'CRITICAL'),
+  );
+  if (!authKey) return false;
+
+  state = { ...state, contractPrivateKeyWif: authKey.privateKeyWif, contractPublicKeyId: authKey.id, identityId };
+  await startContractRegistration();
+  return true;
+}
 
 /**
  * Start contract registration (for existing identity route or post-identity-creation)

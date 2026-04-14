@@ -2042,6 +2042,25 @@ function renderManageCompleteStep(state: BridgeState): HTMLElement {
 // Contract Registration Steps
 // ============================================================================
 
+/**
+ * Render the fee breakdown table used by both the enter-contract and review steps.
+ */
+function renderFeeTable(estimate: NonNullable<BridgeState['contractEstimate']>): string {
+  const feeRows = estimate.lineItems.map(item =>
+    `<tr><td>${escapeHtml(item.label)}</td><td class="num">${item.count}</td><td class="num">${(item.totalCostCredits / 100_000_000_000).toFixed(2)}</td></tr>`
+  ).join('');
+  const totalDash = estimate.totalDash.toFixed(2);
+  return `
+    <div class="fee-breakdown">
+      <h4>Registration Fee</h4>
+      <table class="fee-table">
+        <thead><tr><th>Item</th><th class="num">Count</th><th class="num">Dash</th></tr></thead>
+        <tbody>${feeRows}</tbody>
+        <tfoot><tr class="total-row"><td><strong>Total</strong></td><td></td><td class="num"><strong>${totalDash} Dash</strong></td></tr></tfoot>
+      </table>
+    </div>`;
+}
+
 function renderContractChooseIdentityStep(_state: BridgeState): HTMLElement {
   const div = document.createElement('div');
   div.className = 'contract-choose-step';
@@ -2163,9 +2182,6 @@ function renderContractEnterContractStep(state: BridgeState): HTMLElement {
       keywordsHtml = `<div class="contract-section"><h4>Keywords</h4><p>${parsed.keywords.map(k => escapeHtml(k)).join(', ')}</p></div>`;
     }
 
-    const feeRows = estimate.lineItems.map(item =>
-      `<tr><td>${escapeHtml(item.label)}</td><td class="num">${item.count}</td><td class="num">${(item.totalCostCredits / 100_000_000_000).toFixed(2)}</td></tr>`
-    ).join('');
     const totalDash = estimate.totalDash.toFixed(2);
 
     let depositHtml = '';
@@ -2189,16 +2205,9 @@ function renderContractEnterContractStep(state: BridgeState): HTMLElement {
         ${docTypesHtml ? `<div class="contract-section"><h4>Document Types</h4>${docTypesHtml}</div>` : ''}
         ${tokensHtml}
         ${keywordsHtml}
-        <div class="fee-breakdown">
-          <h4>Registration Fee</h4>
-          <table class="fee-table">
-            <thead><tr><th>Item</th><th class="num">Count</th><th class="num">Dash</th></tr></thead>
-            <tbody>${feeRows}</tbody>
-            <tfoot><tr class="total-row"><td><strong>Total</strong></td><td></td><td class="num"><strong>${totalDash} Dash</strong></td></tr></tfoot>
-          </table>
-          ${depositHtml}
-          ${balanceWarningHtml}
-        </div>
+        ${renderFeeTable(estimate)}
+        ${depositHtml}
+        ${balanceWarningHtml}
       </div>
     `;
   }
@@ -2238,11 +2247,6 @@ function renderContractReviewStep(state: BridgeState): HTMLElement {
     return div;
   }
 
-  const totalDash = estimate.totalDash.toFixed(2);
-  const feeRows = estimate.lineItems.map(item =>
-    `<tr><td>${escapeHtml(item.label)}</td><td class="num">${item.count}</td><td class="num">${(item.totalCostCredits / 100_000_000_000).toFixed(2)}</td></tr>`
-  ).join('');
-
   const uniqueCount = parsed.documentTypes.reduce((s, dt) => s + dt.indexes.filter(i => i.unique && !i.contested).length, 0);
   const nonUniqueCount = parsed.documentTypes.reduce((s, dt) => s + dt.indexes.filter(i => !i.unique && !i.contested).length, 0);
   const contestedCount = parsed.documentTypes.reduce((s, dt) => s + dt.indexes.filter(i => i.contested).length, 0);
@@ -2272,14 +2276,7 @@ function renderContractReviewStep(state: BridgeState): HTMLElement {
         <li>${parsed.keywords.length} keyword${parsed.keywords.length !== 1 ? 's' : ''}</li>
       </ul>
     </div>
-    <div class="fee-breakdown">
-      <h4>Registration Fee</h4>
-      <table class="fee-table">
-        <thead><tr><th>Item</th><th class="num">Count</th><th class="num">Dash</th></tr></thead>
-        <tbody>${feeRows}</tbody>
-        <tfoot><tr class="total-row"><td><strong>Total</strong></td><td></td><td class="num"><strong>${totalDash} Dash</strong></td></tr></tfoot>
-      </table>
-    </div>
+    ${renderFeeTable(estimate)}
     ${actionHtml}
     <button id="contract-back-btn" class="back-btn">&larr; Back</button>
   `;
