@@ -269,7 +269,12 @@ function setupEventListeners(container: HTMLElement) {
   const backBtn = container.querySelector('#back-btn');
   if (backBtn) {
     backBtn.addEventListener('click', () => {
-      updateState(setStep(state, 'init'));
+      if (state.contractFromIdentityCreation) {
+        // Return to contract review instead of init
+        updateState({ ...state, mode: 'contract', step: 'contract_review' });
+      } else {
+        updateState(setStep(state, 'init'));
+      }
     });
   }
 
