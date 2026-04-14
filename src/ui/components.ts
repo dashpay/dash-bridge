@@ -2404,31 +2404,104 @@ function renderContractCompleteStep(state: BridgeState): HTMLElement {
 
   const contractId = state.contractRegisteredId || 'Unknown';
   const identityId = state.identityId || state.targetIdentityId || '';
+  const estimate = state.contractEstimate;
+  const parsed = state.contractParsed;
+  const isTestnet = state.network === 'testnet';
+  const explorerBase = isTestnet
+    ? 'https://platform-explorer.com/dataContract'
+    : 'https://platform-explorer.com/dataContract';
 
-  div.innerHTML = `
+  // Success header
+  const header = document.createElement('div');
+  header.className = 'contract-complete-header';
+  header.innerHTML = `
+    <div class="success-icon">&#10003;</div>
     <h2 class="complete-headline">Contract Published!</h2>
-    <p class="complete-subtitle">Your data contract has been registered on Dash Platform.</p>
+    <p class="complete-subtitle">Your data contract is now live on Dash Platform.</p>
+  `;
+  div.appendChild(header);
 
-    <div class="identity-info">
-      <label>Contract ID</label>
+  // Contract ID with copy
+  const contractInfo = document.createElement('div');
+  contractInfo.className = 'contract-id-section';
+  contractInfo.innerHTML = `
+    <label>Contract ID</label>
+    <div class="id-row">
       <code class="identity-id">${escapeHtml(contractId)}</code>
+      <button id="copy-contract-id-btn" class="tertiary-btn copy-btn" title="Copy Contract ID">Copy</button>
     </div>
+    <a href="${explorerBase}/${escapeHtml(contractId)}" target="_blank" rel="noopener" class="explorer-link">View on Platform Explorer &rarr;</a>
+  `;
+  div.appendChild(contractInfo);
 
-    ${identityId ? `
-    <div class="identity-info">
+  // Owner identity with copy
+  if (identityId) {
+    const ownerInfo = document.createElement('div');
+    ownerInfo.className = 'contract-id-section';
+    ownerInfo.innerHTML = `
       <label>Owner Identity</label>
-      <code class="identity-id">${escapeHtml(identityId)}</code>
-    </div>
-    ` : ''}
+      <div class="id-row">
+        <code class="identity-id">${escapeHtml(identityId)}</code>
+        <button id="copy-identity-id-btn" class="tertiary-btn copy-btn" title="Copy Identity ID">Copy</button>
+      </div>
+    `;
+    div.appendChild(ownerInfo);
+  }
 
-    ${state.contractFromIdentityCreation ? `
-    <div class="backup-section">
+  // Fee summary (what was paid)
+  if (estimate && parsed) {
+    const summaryDiv = document.createElement('div');
+    summaryDiv.className = 'contract-complete-summary';
+    summaryDiv.innerHTML = `
+      <div class="complete-stats">
+        <div class="stat"><span class="stat-value">${parsed.documentTypes.length}</span><span class="stat-label">doc types</span></div>
+        <div class="stat"><span class="stat-value">${parsed.documentTypes.reduce((s, dt) => s + dt.indexes.length, 0)}</span><span class="stat-label">indexes</span></div>
+        <div class="stat"><span class="stat-value">${parsed.tokens.length}</span><span class="stat-label">tokens</span></div>
+        <div class="stat"><span class="stat-value">${estimate.totalDash.toFixed(2)}</span><span class="stat-label">Dash fee</span></div>
+      </div>
+    `;
+    div.appendChild(summaryDiv);
+  }
+
+  // Key backup (for new identity route)
+  if (state.contractFromIdentityCreation) {
+    const backupSection = document.createElement('div');
+    backupSection.className = 'backup-section';
+    backupSection.innerHTML = `
       <button id="download-keys-btn" class="primary-btn">Download Key Backup</button>
       <p class="backup-warning">Keys cannot be recovered if lost.</p>
-    </div>
-    ` : ''}
+    `;
+    div.appendChild(backupSection);
+  }
 
-    <button id="retry-btn" class="secondary-btn">Start Over</button>
-  `;
+  // Start over
+  const startOverBtn = document.createElement('button');
+  startOverBtn.id = 'retry-btn';
+  startOverBtn.className = 'secondary-btn';
+  startOverBtn.textContent = 'Start Over';
+  div.appendChild(startOverBtn);
+
+  // Wire up copy buttons
+  setTimeout(() => {
+    const copyContractBtn = div.querySelector('#copy-contract-id-btn');
+    if (copyContractBtn) {
+      copyContractBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(contractId).then(() => {
+          copyContractBtn.textContent = 'Copied!';
+          setTimeout(() => { copyContractBtn.textContent = 'Copy'; }, 2000);
+        });
+      });
+    }
+    const copyIdentityBtn = div.querySelector('#copy-identity-id-btn');
+    if (copyIdentityBtn) {
+      copyIdentityBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(identityId).then(() => {
+          copyIdentityBtn.textContent = 'Copied!';
+          setTimeout(() => { copyIdentityBtn.textContent = 'Copy'; }, 2000);
+        });
+      });
+    }
+  }, 0);
+
   return div;
 }
