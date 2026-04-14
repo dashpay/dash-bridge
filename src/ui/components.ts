@@ -2408,7 +2408,7 @@ function renderContractCompleteStep(state: BridgeState): HTMLElement {
   const parsed = state.contractParsed;
   const isTestnet = state.network === 'testnet';
   const explorerBase = isTestnet
-    ? 'https://platform-explorer.com/dataContract'
+    ? 'https://testnet.platform-explorer.com/dataContract'
     : 'https://platform-explorer.com/dataContract';
 
   // Success header
