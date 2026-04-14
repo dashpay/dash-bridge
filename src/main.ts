@@ -1057,7 +1057,7 @@ function setupEventListeners(container: HTMLElement) {
 
   // DPNS key upload — fetch identity then validate key sequentially
   wireKeyUpload('dpns-key-upload', async (result) => {
-    updateState(setDpnsIdentityFetching(state, result.identityId));
+    updateState({ ...setDpnsIdentityFetching(state, result.identityId), dpnsPrivateKeyWif: result.privateKeyWif });
     try {
       const keys = await getIdentityPublicKeys(result.identityId, state.network);
       updateState(setDpnsIdentityFetched(state, keys));
@@ -1077,7 +1077,7 @@ function setupEventListeners(container: HTMLElement) {
 
   // Manage key upload — fetch identity then validate key sequentially
   wireKeyUpload('manage-key-upload', async (result) => {
-    updateState(setManageIdentityFetching(state, result.identityId));
+    updateState({ ...setManageIdentityFetching(state, result.identityId), managePrivateKeyWif: result.privateKeyWif });
     try {
       const keys = await getIdentityPublicKeys(result.identityId, state.network);
       updateState(setManageIdentityFetched(state, keys));
@@ -1095,9 +1095,14 @@ function setupEventListeners(container: HTMLElement) {
 
   // Contract key upload — fetch identity then validate key sequentially
   wireKeyUpload('contract-key-upload', async (result) => {
-    updateState(setContractIdentityFetching(
-      setTargetIdentityId(state, result.identityId), result.identityId,
-    ));
+    // Store the private key in state immediately so it shows in the input
+    const initialState = {
+      ...setContractIdentityFetching(
+        setTargetIdentityId(state, result.identityId), result.identityId,
+      ),
+      contractPrivateKeyWif: result.privateKeyWif,
+    };
+    updateState(initialState);
     try {
       const keys = await getIdentityPublicKeys(result.identityId, state.network);
       let balance: number | undefined;
@@ -1108,8 +1113,8 @@ function setupEventListeners(container: HTMLElement) {
         const br = await sdk.identities.balanceAndRevision(result.identityId);
         balance = Number(br?.balance ?? 0n);
       } catch { /* best-effort */ }
+      // Use module-level state (updated by updateState above)
       updateState(setContractIdentityFetched(state, keys, balance));
-      // Now validate the key against fetched keys
       const match = findMatchingKeyIndex(result.privateKeyWif, keys, state.network);
       if (match && isPurposeAllowedForDpns(match.purpose) && isSecurityLevelAllowedForDpns(match.securityLevel)) {
         updateState(setContractKeyValidated(state, match.keyId, result.privateKeyWif));
