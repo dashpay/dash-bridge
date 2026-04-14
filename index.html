@@ -2164,21 +2164,12 @@
       font-size: 0.8rem;
     }
     .key-upload-section {
-      margin-bottom: 16px;
-      border: 1px dashed rgba(255, 255, 255, 0.12);
-      border-radius: 8px;
-      padding: 14px;
-      text-align: center;
-      transition: all 0.15s;
-      cursor: pointer;
-    }
-    .key-upload-section:hover,
-    .key-upload-section.dragover {
-      border-color: #008de4;
-      background: rgba(0, 141, 228, 0.06);
+      margin-bottom: 12px;
     }
     .key-upload-label {
-      display: block;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
       cursor: pointer;
     }
     .key-upload-input {
@@ -2187,6 +2178,21 @@
     .key-upload-btn {
       color: #008de4;
       font-size: 0.85rem;
+      border: 1px dashed rgba(0, 141, 228, 0.3);
+      border-radius: 6px;
+      padding: 6px 14px;
+      transition: all 0.15s;
+    }
+    .key-upload-btn:hover {
+      background: rgba(0, 141, 228, 0.1);
+      border-color: #008de4;
+    }
+    /* Entire step becomes the drop zone */
+    [id$="-dropzone"].dragover {
+      outline: 2px dashed #008de4;
+      outline-offset: -2px;
+      background: rgba(0, 141, 228, 0.04);
+      border-radius: 8px;
     }
     .key-upload-status {
       font-size: 0.8rem;

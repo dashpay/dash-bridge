@@ -55,12 +55,12 @@ function renderIdSection(
  */
 function renderKeyUploadSection(inputId: string): string {
   return `
-    <div class="key-upload-section" id="${inputId}-dropzone">
+    <div class="key-upload-section">
       <label class="key-upload-label">
         <input type="file" id="${inputId}" accept=".json,application/json" class="key-upload-input" />
-        <span class="key-upload-btn">Drop key backup here or click to browse</span>
+        <span class="key-upload-btn">Upload Key Backup</span>
+        <span id="${inputId}-status" class="key-upload-status"></span>
       </label>
-      <p id="${inputId}-status" class="key-upload-status"></p>
     </div>
   `;
 }
@@ -1199,6 +1199,7 @@ function getSecurityLevelName(level: number): string {
 function renderDpnsEnterIdentityStep(state: BridgeState): HTMLElement {
   const div = document.createElement('div');
   div.className = 'dpns-enter-identity-step';
+  div.id = 'dpns-key-upload-dropzone';
 
   const headline = document.createElement('h2');
   headline.className = 'dpns-headline';
@@ -1697,6 +1698,7 @@ function getKeyPurposeName(purpose: number): string {
 function renderManageEnterIdentityStep(state: BridgeState): HTMLElement {
   const div = document.createElement('div');
   div.className = 'manage-enter-identity-step';
+  div.id = 'manage-key-upload-dropzone';
 
   const headline = document.createElement('h2');
   headline.className = 'manage-headline';
@@ -2153,6 +2155,7 @@ function renderContractChooseIdentityStep(_state: BridgeState): HTMLElement {
 function renderContractEnterIdentityStep(state: BridgeState): HTMLElement {
   const div = document.createElement('div');
   div.className = 'dpns-enter-identity-step';
+  div.id = 'contract-key-upload-dropzone';
 
   const headline = document.createElement('h2');
   headline.className = 'dpns-headline';
