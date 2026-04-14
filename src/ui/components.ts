@@ -2311,23 +2311,6 @@ function renderContractEnterContractStep(state: BridgeState): HTMLElement {
   `;
   div.appendChild(form);
 
-  // Deep link copy button (only when contract is valid)
-  if (parsed && json) {
-    const deepLinkSection = document.createElement('div');
-    deepLinkSection.className = 'contract-deep-link';
-    const copyLinkBtn = document.createElement('button');
-    copyLinkBtn.id = 'contract-copy-link-btn';
-    copyLinkBtn.className = 'tertiary-btn';
-    copyLinkBtn.textContent = 'Copy Deep Link';
-    copyLinkBtn.title = 'Copy a shareable URL that pre-fills this contract';
-    deepLinkSection.appendChild(copyLinkBtn);
-    const linkStatus = document.createElement('span');
-    linkStatus.id = 'contract-link-status';
-    linkStatus.className = 'link-status';
-    deepLinkSection.appendChild(linkStatus);
-    div.appendChild(deepLinkSection);
-  }
-
   const navButtons = document.createElement('div');
   navButtons.className = 'nav-buttons';
 
@@ -2336,6 +2319,16 @@ function renderContractEnterContractStep(state: BridgeState): HTMLElement {
   backBtn.className = 'secondary-btn';
   backBtn.textContent = 'Back';
   navButtons.appendChild(backBtn);
+
+  // Deep link copy button inline with nav (only when contract is valid)
+  if (parsed && json) {
+    const copyLinkBtn = document.createElement('button');
+    copyLinkBtn.id = 'contract-copy-link-btn';
+    copyLinkBtn.className = 'tertiary-btn';
+    copyLinkBtn.textContent = 'Copy Link';
+    copyLinkBtn.title = 'Copy a shareable URL that pre-fills this contract';
+    navButtons.appendChild(copyLinkBtn);
+  }
 
   const reviewBtn = document.createElement('button');
   reviewBtn.id = 'contract-review-btn';

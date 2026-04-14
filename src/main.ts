@@ -1154,11 +1154,8 @@ function setupEventListeners(container: HTMLElement) {
         url.searchParams.set('mode', 'contract');
         url.searchParams.set('contract', base64);
         navigator.clipboard.writeText(url.toString()).then(() => {
-          const status = document.getElementById('contract-link-status');
-          if (status) {
-            status.textContent = 'Copied!';
-            setTimeout(() => { status.textContent = ''; }, 2000);
-          }
+          contractCopyLinkBtn.textContent = 'Copied!';
+          setTimeout(() => { contractCopyLinkBtn.textContent = 'Copy Link'; }, 2000);
         });
       } catch {
         // Clipboard write failed silently
