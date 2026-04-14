@@ -1961,6 +1961,184 @@
     .deposit-method-section.collapsible .deposit-method-content:not(.collapsed) {
       padding-top: 20px;
     }
+
+    /* Contract Registration Styles */
+    .contract-textarea {
+      width: 100%;
+      min-height: 180px;
+      background: rgba(0, 0, 0, 0.2);
+      color: #e0e0e0;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 12px;
+      font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, monospace;
+      font-size: 0.85rem;
+      line-height: 1.5;
+      resize: vertical;
+      tab-size: 2;
+    }
+    .contract-textarea:focus {
+      outline: none;
+      border-color: #008de4;
+      box-shadow: 0 0 0 2px rgba(0, 141, 228, 0.2);
+    }
+    .contract-textarea::placeholder {
+      color: #666;
+    }
+    .contract-error {
+      color: #f44336;
+      font-size: 0.85rem;
+      padding: 8px 12px;
+      margin-top: 8px;
+      background: rgba(244, 67, 54, 0.08);
+      border-radius: 6px;
+    }
+    .contract-display {
+      margin-top: 16px;
+    }
+    .contract-section {
+      margin-bottom: 12px;
+    }
+    .contract-section h4 {
+      color: #b0b0b0;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 6px;
+    }
+    .contract-section p {
+      color: #e0e0e0;
+      font-size: 0.9rem;
+    }
+    .doc-type {
+      padding: 6px 0;
+      color: #e0e0e0;
+      font-size: 0.9rem;
+    }
+    .doc-type strong {
+      margin-right: 8px;
+    }
+    .index-badge {
+      display: inline-block;
+      font-size: 0.75rem;
+      padding: 2px 8px;
+      border-radius: 10px;
+      margin: 2px 4px 2px 0;
+    }
+    .badge-unique {
+      background: rgba(0, 141, 228, 0.15);
+      color: #4fc3f7;
+      border: 1px solid rgba(0, 141, 228, 0.3);
+    }
+    .badge-non-unique {
+      background: rgba(255, 255, 255, 0.06);
+      color: #999;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .badge-contested {
+      background: rgba(255, 152, 0, 0.15);
+      color: #ffb74d;
+      border: 1px solid rgba(255, 152, 0, 0.3);
+    }
+    .no-indexes {
+      color: #666;
+      font-style: italic;
+      font-size: 0.85rem;
+    }
+    .fee-breakdown {
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .fee-breakdown h4 {
+      color: #b0b0b0;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 8px;
+    }
+    .fee-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+    .fee-table th {
+      text-align: left;
+      color: #888;
+      font-weight: 500;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 6px 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .fee-table td {
+      padding: 5px 8px;
+      color: #e0e0e0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    }
+    .fee-table .num {
+      text-align: right;
+    }
+    .fee-table .total-row td {
+      border-top: 1px solid rgba(255, 255, 255, 0.15);
+      border-bottom: none;
+      padding-top: 8px;
+    }
+    .deposit-estimate {
+      margin-top: 12px;
+      padding: 10px 14px;
+      background: rgba(0, 141, 228, 0.1);
+      border: 1px solid rgba(0, 141, 228, 0.25);
+      border-radius: 8px;
+      color: #e0e0e0;
+      font-size: 0.9rem;
+    }
+    .deposit-detail {
+      color: #888;
+      font-size: 0.8rem;
+    }
+    .balance-warning {
+      margin-top: 12px;
+      padding: 10px 14px;
+      background: rgba(244, 67, 54, 0.1);
+      border: 1px solid rgba(244, 67, 54, 0.3);
+      border-radius: 8px;
+      color: #f44336;
+      font-size: 0.85rem;
+    }
+    .review-summary ul {
+      list-style: none;
+      padding: 0;
+      margin: 0 0 16px 0;
+    }
+    .review-summary li {
+      color: #b0b0b0;
+      padding: 3px 0;
+      font-size: 0.9rem;
+    }
+    .review-summary li::before {
+      content: "\2022";
+      color: #008de4;
+      margin-right: 8px;
+    }
+    .review-note {
+      color: #b0b0b0;
+      font-size: 0.9rem;
+      margin: 16px 0;
+      line-height: 1.5;
+    }
+    .review-note code {
+      font-size: 0.8rem;
+      background: rgba(0, 0, 0, 0.3);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .identity-balance {
+      color: #4CAF50;
+      font-size: 0.85rem;
+      margin-left: 8px;
+    }
   </style>
 </head>
 <body>

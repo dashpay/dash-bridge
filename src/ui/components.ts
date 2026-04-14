@@ -2063,87 +2063,130 @@ function renderFeeTable(estimate: NonNullable<BridgeState['contractEstimate']>):
 
 function renderContractChooseIdentityStep(_state: BridgeState): HTMLElement {
   const div = document.createElement('div');
-  div.className = 'contract-choose-step';
-  div.innerHTML = `
-    <h2>Register a Data Contract</h2>
-    <p class="step-description">Publish a data contract on Dash Platform. You'll need an identity to own the contract.</p>
-    <div class="identity-choice-buttons">
-      <button id="contract-choose-new-btn" class="primary-btn">
-        <span class="btn-label">Create New Identity</span>
-        <span class="btn-desc">We'll create one for you with the exact funds needed</span>
-      </button>
-      <button id="contract-choose-existing-btn" class="secondary-btn">
-        <span class="btn-label">Use Existing Identity</span>
-        <span class="btn-desc">Use an identity you already have</span>
-      </button>
-    </div>
-    <button id="contract-back-btn" class="back-btn">&larr; Back</button>
+  div.className = 'dpns-choose-identity-step';
+
+  const headline = document.createElement('h2');
+  headline.className = 'dpns-headline';
+  headline.textContent = 'Register a Data Contract';
+  div.appendChild(headline);
+
+  const subtitle = document.createElement('p');
+  subtitle.className = 'dpns-subtitle';
+  subtitle.textContent = 'Publish a data contract on Dash Platform. You\'ll need an identity to own the contract.';
+  div.appendChild(subtitle);
+
+  const choiceButtons = document.createElement('div');
+  choiceButtons.className = 'dpns-choice-buttons';
+  choiceButtons.innerHTML = `
+    <button id="contract-choose-new-btn" class="mode-btn primary-btn">
+      <span class="mode-label">Create New Identity</span>
+      <span class="mode-desc">We'll create one for you with the exact funds needed</span>
+    </button>
+    <button id="contract-choose-existing-btn" class="mode-btn secondary-btn">
+      <span class="mode-label">Use Existing Identity</span>
+      <span class="mode-desc">Use an identity you already have</span>
+    </button>
   `;
+  div.appendChild(choiceButtons);
+
+  const navButtons = document.createElement('div');
+  navButtons.className = 'nav-buttons';
+  const backBtn = document.createElement('button');
+  backBtn.id = 'contract-back-btn';
+  backBtn.className = 'secondary-btn';
+  backBtn.textContent = 'Back';
+  navButtons.appendChild(backBtn);
+  div.appendChild(navButtons);
+
   return div;
 }
 
 function renderContractEnterIdentityStep(state: BridgeState): HTMLElement {
   const div = document.createElement('div');
-  div.className = 'contract-enter-identity-step';
+  div.className = 'dpns-enter-identity-step';
 
-  const identityId = state.targetIdentityId || '';
-  const privateKey = state.contractPrivateKeyWif || '';
-  const isFetching = state.contractIdentityFetching;
-  const fetchError = state.contractIdentityFetchError;
-  const keyError = state.contractKeyValidationError;
-  const keyValidated = state.contractKeyValidated;
-  const balance = state.contractIdentityBalance;
+  const headline = document.createElement('h2');
+  headline.className = 'dpns-headline';
+  headline.textContent = 'Enter Your Identity';
+  div.appendChild(headline);
 
-  let balanceHtml = '';
-  if (balance !== undefined) {
-    const balanceDash = (balance / 100_000_000_000).toFixed(4);
-    balanceHtml = `<span class="identity-balance">Balance: ${balanceDash} Dash</span>`;
-  }
+  const isFetching = state.contractIdentityFetching === true;
+  const hasFetched = state.contractIdentityKeys !== undefined;
+  const hasFetchError = state.contractIdentityFetchError !== undefined;
+  const hasValidatedKey = state.contractKeyValidated === true;
+  const hasKeyError = state.contractKeyValidationError !== undefined;
 
-  let statusHtml = '';
+  let identityStatusHtml = '';
   if (isFetching) {
-    statusHtml = '<span class="fetch-status fetching">Fetching identity...</span>';
-  } else if (fetchError) {
-    statusHtml = `<span class="fetch-status error">${escapeHtml(fetchError)}</span>`;
-  } else if (state.contractIdentityKeys) {
-    statusHtml = `<span class="fetch-status success">Identity found (${state.contractIdentityKeys.length} keys)</span>${balanceHtml}`;
+    identityStatusHtml = '<p class="identity-status loading">Fetching identity...</p>';
+  } else if (hasFetchError) {
+    identityStatusHtml = `<p class="identity-status error">${escapeHtml(state.contractIdentityFetchError!)}</p>`;
+  } else if (hasFetched) {
+    const keyCount = state.contractIdentityKeys!.length;
+    const balanceStr = state.contractIdentityBalance !== undefined
+      ? ` &mdash; Balance: ${(state.contractIdentityBalance / 100_000_000_000).toFixed(4)} Dash`
+      : '';
+    identityStatusHtml = `<p class="identity-status success">Identity found with ${keyCount} key${keyCount !== 1 ? 's' : ''}${balanceStr}</p>`;
   }
 
-  let keyStatusHtml = '';
-  if (keyError) {
-    keyStatusHtml = `<span class="key-status error">${escapeHtml(keyError)}</span>`;
-  } else if (keyValidated) {
-    keyStatusHtml = '<span class="key-status success">Key validated</span>';
+  let keyValidationHtml = '';
+  if (hasValidatedKey) {
+    keyValidationHtml = '<p class="key-status success">Key validated</p>';
+  } else if (hasKeyError) {
+    keyValidationHtml = `<p class="key-status error">${escapeHtml(state.contractKeyValidationError!)}</p>`;
   }
 
-  const canContinue = keyValidated && state.contractIdentityKeys && !isFetching;
-
-  div.innerHTML = `
-    <h2>Enter Identity</h2>
-    <p class="step-description">Provide the identity that will own this contract and a private key to sign the transaction.</p>
-
+  const form = document.createElement('div');
+  form.className = 'dpns-identity-form';
+  form.innerHTML = `
     <div class="input-group">
-      <label for="contract-identity-id-input">Identity ID</label>
-      <input type="text" id="contract-identity-id-input" class="text-input"
-             placeholder="Base58-encoded identity ID" value="${escapeHtml(identityId)}"
-             spellcheck="false" autocomplete="off" />
-      ${statusHtml}
+      <label class="input-label">Identity ID</label>
+      <input
+        type="text"
+        id="contract-identity-id-input"
+        class="dpns-input"
+        placeholder="Your 44-character identity ID..."
+        value="${state.targetIdentityId || ''}"
+        ${isFetching ? 'disabled' : ''}
+      />
+      <p class="input-hint">The Base58 identifier for your identity</p>
+      ${identityStatusHtml}
     </div>
 
     <div class="input-group">
-      <label for="contract-private-key-input">Private Key (WIF)</label>
-      <input type="password" id="contract-private-key-input" class="text-input"
-             placeholder="Authentication key (HIGH or CRITICAL level)"
-             value="${escapeHtml(privateKey)}" spellcheck="false" autocomplete="off" />
-      ${keyStatusHtml}
-      <p class="input-hint">Must be an AUTHENTICATION key with at least HIGH security level.</p>
-    </div>
-
-    <div class="step-actions">
-      <button id="contract-back-btn" class="back-btn">&larr; Back</button>
-      <button id="contract-identity-continue-btn" class="primary-btn" ${canContinue ? '' : 'disabled'}>Continue</button>
+      <label class="input-label">Private Key (WIF)</label>
+      <input
+        type="password"
+        id="contract-private-key-input"
+        class="dpns-input"
+        placeholder="Your private key in WIF format..."
+        value="${state.contractPrivateKeyWif || ''}"
+      />
+      <p class="input-hint">An AUTHENTICATION key with CRITICAL or HIGH security level</p>
+      ${keyValidationHtml}
     </div>
   `;
+  div.appendChild(form);
+
+  const navButtons = document.createElement('div');
+  navButtons.className = 'nav-buttons';
+
+  const backBtn = document.createElement('button');
+  backBtn.id = 'contract-back-btn';
+  backBtn.className = 'secondary-btn';
+  backBtn.textContent = 'Back';
+  navButtons.appendChild(backBtn);
+
+  const continueBtn = document.createElement('button');
+  continueBtn.id = 'contract-identity-continue-btn';
+  continueBtn.className = 'primary-btn';
+  continueBtn.textContent = 'Continue';
+  if (!hasValidatedKey) {
+    continueBtn.setAttribute('disabled', 'true');
+  }
+  navButtons.appendChild(continueBtn);
+
+  div.appendChild(navButtons);
   return div;
 }
 
@@ -2215,23 +2258,45 @@ function renderContractEnterContractStep(state: BridgeState): HTMLElement {
 
   const canContinue = parsed && estimate && !parseError;
 
-  div.innerHTML = `
-    <h2>Enter Contract</h2>
-    <p class="step-description">Paste your data contract JSON below. The registration fee will be calculated automatically.</p>
+  const headline = document.createElement('h2');
+  headline.className = 'dpns-headline';
+  headline.textContent = 'Enter Contract';
+  div.appendChild(headline);
 
+  const subtitle = document.createElement('p');
+  subtitle.className = 'dpns-subtitle';
+  subtitle.textContent = 'Paste your data contract JSON below. The registration fee will be calculated automatically.';
+  div.appendChild(subtitle);
+
+  const form = document.createElement('div');
+  form.className = 'dpns-identity-form';
+  form.innerHTML = `
     <div class="input-group">
-      <label for="contract-json-input">Contract JSON</label>
-      <textarea id="contract-json-input" class="text-input contract-textarea"
+      <label class="input-label">Contract JSON</label>
+      <textarea id="contract-json-input" class="dpns-input contract-textarea"
                 spellcheck="false" placeholder='{ "documentSchemas": { ... } }'>${escapeHtml(json)}</textarea>
     </div>
-
     ${contractDisplayHtml}
-
-    <div class="step-actions">
-      <button id="contract-back-btn" class="back-btn">&larr; Back</button>
-      <button id="contract-review-btn" class="primary-btn" ${canContinue ? '' : 'disabled'}>Review &amp; Publish</button>
-    </div>
   `;
+  div.appendChild(form);
+
+  const navButtons = document.createElement('div');
+  navButtons.className = 'nav-buttons';
+
+  const backBtn = document.createElement('button');
+  backBtn.id = 'contract-back-btn';
+  backBtn.className = 'secondary-btn';
+  backBtn.textContent = 'Back';
+  navButtons.appendChild(backBtn);
+
+  const reviewBtn = document.createElement('button');
+  reviewBtn.id = 'contract-review-btn';
+  reviewBtn.className = 'primary-btn';
+  reviewBtn.textContent = 'Review & Publish';
+  if (!canContinue) reviewBtn.setAttribute('disabled', 'true');
+  navButtons.appendChild(reviewBtn);
+
+  div.appendChild(navButtons);
   return div;
 }
 
@@ -2267,8 +2332,13 @@ function renderContractReviewStep(state: BridgeState): HTMLElement {
     `;
   }
 
-  div.innerHTML = `
-    <h2>Review Contract</h2>
+  const headline = document.createElement('h2');
+  headline.className = 'dpns-headline';
+  headline.textContent = 'Review Contract';
+  div.appendChild(headline);
+
+  const summaryDiv = document.createElement('div');
+  summaryDiv.innerHTML = `
     <div class="review-summary">
       <ul>
         <li>${parsed.documentTypes.length} document type${parsed.documentTypes.length !== 1 ? 's' : ''}</li>
@@ -2279,8 +2349,18 @@ function renderContractReviewStep(state: BridgeState): HTMLElement {
     </div>
     ${renderFeeTable(estimate)}
     ${actionHtml}
-    <button id="contract-back-btn" class="back-btn">&larr; Back</button>
   `;
+  div.appendChild(summaryDiv);
+
+  const navButtons = document.createElement('div');
+  navButtons.className = 'nav-buttons';
+  const backBtn = document.createElement('button');
+  backBtn.id = 'contract-back-btn';
+  backBtn.className = 'secondary-btn';
+  backBtn.textContent = 'Back';
+  navButtons.appendChild(backBtn);
+  div.appendChild(navButtons);
+
   return div;
 }
 
