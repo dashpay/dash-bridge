@@ -1134,6 +1134,33 @@ function setupEventListeners(container: HTMLElement) {
     });
   }
 
+  // Contract copy deep link button
+  const contractCopyLinkBtn = container.querySelector('#contract-copy-link-btn');
+  if (contractCopyLinkBtn) {
+    contractCopyLinkBtn.addEventListener('click', () => {
+      if (!state.contractJson) return;
+      try {
+        // Minify the JSON and base64url encode it
+        const minified = JSON.stringify(JSON.parse(state.contractJson));
+        const base64 = btoa(minified).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        const url = new URL(window.location.href);
+        url.search = '';
+        url.searchParams.set('network', state.network);
+        url.searchParams.set('mode', 'contract');
+        url.searchParams.set('contract', base64);
+        navigator.clipboard.writeText(url.toString()).then(() => {
+          const status = document.getElementById('contract-link-status');
+          if (status) {
+            status.textContent = 'Copied!';
+            setTimeout(() => { status.textContent = ''; }, 2000);
+          }
+        });
+      } catch {
+        // Clipboard write failed silently
+      }
+    });
+  }
+
   // Contract review button
   const contractReviewBtn = container.querySelector('#contract-review-btn');
   if (contractReviewBtn) {
