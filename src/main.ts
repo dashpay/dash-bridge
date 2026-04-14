@@ -71,6 +71,19 @@ import {
   resetManageState,
   resetManageStateAndRefresh,
   setManageBackToEntry,
+  // Contract registration state functions
+  setContractIdentitySource,
+  setContractIdentityFetching,
+  setContractIdentityFetched,
+  setContractIdentityFetchError,
+  setContractKeyValidated,
+  setContractKeyValidationError,
+  setContractJson,
+  setContractReview,
+  setContractRegistering,
+  setContractComplete,
+  setModeContractFromIdentity,
+  setContractStartBridge,
   // Faucet state functions
   setFaucetSolvingPow,
   setFaucetRequesting,
@@ -95,6 +108,8 @@ import {
   getPurposeName,
   generateIdentityKey,
 } from './crypto/keys.js';
+import { publishContract, extractDocumentSchemas } from './platform/contract.js';
+import { estimateContractFee, parseContractJson } from 'dash-contract-fee-estimator';
 import type { KeyType, KeyPurpose, SecurityLevel, ManageNewKeyConfig } from './types.js';
 import type { BridgeState } from './types.js';
 
@@ -131,6 +146,24 @@ function init() {
   if (addressParam && validatePlatformAddress(addressParam, network)) {
     state = setMode(state, 'send_to_address');
     state = setRecipientPlatformAddress(state, addressParam);
+  }
+
+  // Deep-link: ?mode=contract opens contract registration mode
+  const modeParam = urlParams.get('mode');
+  if (modeParam === 'contract') {
+    state = setMode(state, 'contract');
+    const contractParam = urlParams.get('contract');
+    if (contractParam) {
+      try {
+        const jsonStr = atob(contractParam.replace(/-/g, '+').replace(/_/g, '/'));
+        const json = JSON.parse(jsonStr);
+        const parsed = parseContractJson(json);
+        const estimate = estimateContractFee(parsed);
+        state = setContractJson(state, JSON.stringify(json, null, 2), parsed, estimate, undefined);
+      } catch {
+        // Invalid contract param, ignore
+      }
+    }
   }
 
   // Render UI
@@ -966,6 +999,182 @@ function setupEventListeners(container: HTMLElement) {
       updateState(resetManageState(state));
     });
   }
+
+  // ============================================================================
+  // Contract Registration Event Listeners
+  // ============================================================================
+
+  // Contract mode button (init page)
+  const modeContractBtn = container.querySelector('#mode-contract-btn');
+  if (modeContractBtn) {
+    modeContractBtn.addEventListener('click', () => {
+      updateState(setMode(state, 'contract'));
+    });
+  }
+
+  // Contract choose identity buttons
+  const contractChooseNewBtn = container.querySelector('#contract-choose-new-btn');
+  if (contractChooseNewBtn) {
+    contractChooseNewBtn.addEventListener('click', () => {
+      updateState(setContractIdentitySource(state, 'new'));
+    });
+  }
+
+  const contractChooseExistingBtn = container.querySelector('#contract-choose-existing-btn');
+  if (contractChooseExistingBtn) {
+    contractChooseExistingBtn.addEventListener('click', () => {
+      updateState(setContractIdentitySource(state, 'existing'));
+    });
+  }
+
+  // Contract from identity creation complete
+  const contractFromIdentityBtn = container.querySelector('#contract-from-identity-btn');
+  if (contractFromIdentityBtn) {
+    contractFromIdentityBtn.addEventListener('click', () => {
+      updateState(setModeContractFromIdentity(state));
+    });
+  }
+
+  // Contract identity ID input (existing identity route)
+  const contractIdentityIdInput = container.querySelector<HTMLInputElement>('#contract-identity-id-input');
+  if (contractIdentityIdInput) {
+    const fetchContractIdentity = async () => {
+      const identityId = contractIdentityIdInput.value.trim();
+      if (!validateIdentityId(identityId)) return;
+
+      updateState(setContractIdentityFetching(
+        setTargetIdentityId(state, identityId)
+      ));
+
+      try {
+        const keys = await getIdentityPublicKeys(identityId, state.network);
+        updateState(setContractIdentityFetched(state, keys));
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        updateState(setContractIdentityFetchError(state, msg));
+      }
+    };
+
+    contractIdentityIdInput.addEventListener('blur', fetchContractIdentity);
+    contractIdentityIdInput.addEventListener('paste', () => setTimeout(fetchContractIdentity, 50));
+  }
+
+  // Contract private key input (existing identity route)
+  const contractPrivateKeyInput = container.querySelector<HTMLInputElement>('#contract-private-key-input');
+  if (contractPrivateKeyInput) {
+    const validateContractPrivateKey = async () => {
+      const privateKeyWif = contractPrivateKeyInput.value.trim();
+      if (!privateKeyWif || !state.contractIdentityKeys) return;
+
+      try {
+        const match = findMatchingKeyIndex(privateKeyWif, state.contractIdentityKeys, state.network);
+        if (!match) {
+          updateState(setContractKeyValidationError(state, 'Key does not match any identity key'));
+          return;
+        }
+        // Must be AUTHENTICATION with HIGH or CRITICAL
+        if (!isPurposeAllowedForDpns(match.purpose)) {
+          updateState(setContractKeyValidationError(state, `Key purpose must be AUTHENTICATION, got ${getPurposeName(match.purpose)}`));
+          return;
+        }
+        if (!isSecurityLevelAllowedForDpns(match.securityLevel)) {
+          updateState(setContractKeyValidationError(state, `Security level must be HIGH or CRITICAL, got ${getSecurityLevelName(match.securityLevel)}`));
+          return;
+        }
+        updateState(setContractKeyValidated(state, match.keyId, privateKeyWif));
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        updateState(setContractKeyValidationError(state, msg));
+      }
+    };
+
+    contractPrivateKeyInput.addEventListener('blur', validateContractPrivateKey);
+    contractPrivateKeyInput.addEventListener('paste', () => setTimeout(validateContractPrivateKey, 50));
+  }
+
+  // Contract identity continue button
+  const contractIdentityContinueBtn = container.querySelector('#contract-identity-continue-btn');
+  if (contractIdentityContinueBtn) {
+    contractIdentityContinueBtn.addEventListener('click', () => {
+      updateState({ ...state, step: 'contract_enter_contract' });
+    });
+  }
+
+  // Contract JSON textarea (debounced live parse)
+  const contractJsonInput = container.querySelector<HTMLTextAreaElement>('#contract-json-input');
+  if (contractJsonInput) {
+    let contractDebounceTimer: ReturnType<typeof setTimeout>;
+    contractJsonInput.addEventListener('input', () => {
+      clearTimeout(contractDebounceTimer);
+      contractDebounceTimer = setTimeout(() => {
+        const raw = contractJsonInput.value.trim();
+        if (!raw) {
+          updateState(setContractJson(state, '', undefined, undefined, undefined));
+          return;
+        }
+        try {
+          const json = JSON.parse(raw);
+          const parsed = parseContractJson(json);
+          const estimate = estimateContractFee(parsed);
+          updateState(setContractJson(state, raw, parsed, estimate, undefined));
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          updateState(setContractJson(state, raw, undefined, undefined, msg));
+        }
+      }, 300);
+    });
+  }
+
+  // Contract review button
+  const contractReviewBtn = container.querySelector('#contract-review-btn');
+  if (contractReviewBtn) {
+    contractReviewBtn.addEventListener('click', () => {
+      updateState(setContractReview(state));
+    });
+  }
+
+  // Contract start bridge button (new identity route: from review → create mode)
+  const contractStartBridgeBtn = container.querySelector('#contract-start-bridge-btn');
+  if (contractStartBridgeBtn) {
+    contractStartBridgeBtn.addEventListener('click', () => {
+      updateState(setContractStartBridge(state));
+    });
+  }
+
+  // Contract publish button (existing identity or post-identity-creation)
+  const contractPublishBtn = container.querySelector('#contract-publish-btn');
+  if (contractPublishBtn) {
+    contractPublishBtn.addEventListener('click', startContractRegistration);
+  }
+
+  // Contract back buttons
+  const contractBackBtn = container.querySelector('#contract-back-btn');
+  if (contractBackBtn) {
+    contractBackBtn.addEventListener('click', () => {
+      switch (state.step) {
+        case 'contract_choose_identity':
+          updateState(setMode(state, 'contract'));
+          updateState({ ...state, step: 'init', mode: 'contract' as BridgeState['mode'] });
+          break;
+        case 'contract_enter_identity':
+          updateState({ ...state, step: 'contract_choose_identity' });
+          break;
+        case 'contract_enter_contract':
+          if (state.contractIdentitySource === 'existing') {
+            updateState({ ...state, step: 'contract_enter_identity' });
+          } else {
+            updateState({ ...state, step: 'contract_choose_identity' });
+          }
+          break;
+        case 'contract_review':
+          updateState({ ...state, step: 'contract_enter_contract' });
+          break;
+        default:
+          updateState(createInitialState(state.network));
+          break;
+      }
+    });
+  }
 }
 
 /**
@@ -1026,7 +1235,7 @@ async function startTopUp() {
     // Step 2: Wait for deposit
     updateState(setStep(stateWithKeys, 'detecting_deposit'));
 
-    const minAmount = 300000; // 0.003 DASH minimum
+    const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
     const depositResult = await insightClient.waitForUtxo(
       depositAddress,
       minAmount,
@@ -1133,7 +1342,7 @@ async function startSendToAddress() {
     // Step 2: Wait for deposit
     updateState(setStep(stateWithKeys, 'detecting_deposit'));
 
-    const minAmount = 300000; // 0.003 DASH minimum
+    const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
     const depositResult = await insightClient.waitForUtxo(
       depositAddress,
       minAmount,
@@ -1243,7 +1452,7 @@ async function startBridge() {
     // Step 2: Wait for deposit
     updateState(setStep(state, 'detecting_deposit'));
 
-    const minAmount = 300000; // 0.003 DASH minimum
+    const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
     const depositResult = await insightClient.waitForUtxo(
       depositAddress,
       minAmount,
@@ -1327,6 +1536,25 @@ async function startBridge() {
     // (Earlier download at deposit step used pending filename)
     downloadKeyBackup(state);
 
+    // Auto-publish contract if this identity was created for contract registration
+    if (state.contractFromIdentityCreation && state.contractJson) {
+      try {
+        // Find first AUTHENTICATION key with HIGH/CRITICAL for contract signing
+        const authKey = state.identityKeys.find(
+          (k) => k.purpose === 'AUTHENTICATION' && (k.securityLevel === 'HIGH' || k.securityLevel === 'CRITICAL'),
+        );
+        if (authKey) {
+          state = { ...state, contractPrivateKeyWif: authKey.privateKeyWif, contractPublicKeyId: authKey.id, identityId: result.identityId };
+          await startContractRegistration();
+          return;
+        }
+      } catch (error) {
+        console.error('Contract auto-publish error:', error);
+        updateState(setError(state, toError(error)));
+        return;
+      }
+    }
+
   } catch (error) {
     console.error('Bridge error:', error);
     updateState(setError(state, toError(error)));
@@ -1345,7 +1573,7 @@ async function recheckDeposit() {
   // Reset timeout state and start polling again
   updateState(setDepositTimedOut(state, false, 0));
 
-  const minAmount = 300000; // 0.003 DASH minimum
+  const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
   const depositResult = await insightClient.waitForUtxo(
     state.depositAddress,
     minAmount,
@@ -1448,12 +1676,63 @@ async function recheckDeposit() {
       updateState(setIdentityRegistered(state, result.identityId));
       // Auto-download final key backup on "Save your keys" page
       downloadKeyBackup(state);
+
+      // Auto-publish contract if applicable
+      if (state.contractFromIdentityCreation && state.contractJson) {
+        const authKey = state.identityKeys.find(
+          (k) => k.purpose === 'AUTHENTICATION' && (k.securityLevel === 'HIGH' || k.securityLevel === 'CRITICAL'),
+        );
+        if (authKey) {
+          state = { ...state, contractPrivateKeyWif: authKey.privateKeyWif, contractPublicKeyId: authKey.id, identityId: result.identityId };
+          await startContractRegistration();
+          return;
+        }
+      }
     } else {
       throw new Error(`recheckDeposit: unexpected mode '${state.mode}'`);
     }
 
   } catch (error) {
     console.error('Bridge error:', error);
+    updateState(setError(state, toError(error)));
+  }
+}
+
+// ============================================================================
+// Contract Registration Functions
+// ============================================================================
+
+/**
+ * Start contract registration (for existing identity route or post-identity-creation)
+ */
+async function startContractRegistration() {
+  try {
+    const identityId = state.identityId || state.targetIdentityId;
+    const privateKeyWif = state.contractPrivateKeyWif;
+    const publicKeyId = state.contractPublicKeyId ?? 0;
+
+    if (!identityId || !privateKeyWif || !state.contractJson) {
+      throw new Error('Missing required data for contract registration');
+    }
+
+    updateState(setContractRegistering(state));
+
+    const contractJson = JSON.parse(state.contractJson);
+    const documentSchemas = extractDocumentSchemas(contractJson);
+    const tokens = contractJson.tokens;
+
+    const result = await publishContract(
+      identityId,
+      documentSchemas,
+      tokens,
+      publicKeyId,
+      privateKeyWif,
+      state.network,
+    );
+
+    updateState(setContractComplete(state, result.contractId));
+  } catch (error) {
+    console.error('Contract registration error:', error);
     updateState(setError(state, toError(error)));
   }
 }
@@ -1668,7 +1947,7 @@ async function requestFaucetFunds() {
 
       try {
         const utxos = await insightClient.getUTXOs(addressToCheck);
-        const minAmount = 300000; // 0.003 DASH minimum
+        const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
         const sufficientUtxo = utxos.find(u => u.satoshis >= minAmount);
         if (sufficientUtxo && state.step === 'detecting_deposit') {
           updateState(setUtxoDetected(state, sufficientUtxo));

@@ -158,6 +158,26 @@ export function render(state: BridgeState, container: HTMLElement): void {
     case 'manage_complete':
       content.appendChild(renderManageCompleteStep(state));
       break;
+
+    // Contract registration steps
+    case 'contract_choose_identity':
+      content.appendChild(renderContractChooseIdentityStep(state));
+      break;
+    case 'contract_enter_identity':
+      content.appendChild(renderContractEnterIdentityStep(state));
+      break;
+    case 'contract_enter_contract':
+      content.appendChild(renderContractEnterContractStep(state));
+      break;
+    case 'contract_review':
+      content.appendChild(renderContractReviewStep(state));
+      break;
+    case 'contract_registering':
+      content.appendChild(renderProcessingStep(state));
+      break;
+    case 'contract_complete':
+      content.appendChild(renderContractCompleteStep(state));
+      break;
   }
 
   wrapper.appendChild(content);
@@ -221,6 +241,10 @@ function renderInitStep(state: BridgeState): HTMLElement {
     <button id="mode-manage-btn" class="mode-btn secondary-btn">
       <span class="mode-label">Manage Identity Keys</span>
       <span class="mode-desc">Add or disable keys on an existing identity</span>
+    </button>
+    <button id="mode-contract-btn" class="mode-btn secondary-btn">
+      <span class="mode-label">Register Data Contract</span>
+      <span class="mode-desc">Publish a data contract on Dash Platform</span>
     </button>
   `;
   div.appendChild(modeButtons);
@@ -442,15 +466,23 @@ function renderDepositStep(state: BridgeState): HTMLElement {
       : state.targetIdentityId;
     headline.innerHTML = `Top up <code class="inline-id">${truncatedId}</code>`;
   } else {
-    headline.innerHTML = 'Send at least <strong>0.003 DASH</strong>';
+    const minDash = state.minimumDeposit
+      ? (state.minimumDeposit / 100_000_000).toFixed(4)
+      : '0.003';
+    headline.innerHTML = state.minimumDeposit
+      ? `Send exactly <strong>${minDash} DASH</strong>`
+      : 'Send at least <strong>0.003 DASH</strong>';
   }
   div.appendChild(headline);
 
   // Amount instruction for top-up mode (separate line)
   if (isTopUp) {
+    const minDash = state.minimumDeposit
+      ? (state.minimumDeposit / 100_000_000).toFixed(4)
+      : '0.003';
     const amountInstruction = document.createElement('p');
     amountInstruction.className = 'deposit-instruction';
-    amountInstruction.innerHTML = 'Send at least <strong>0.003 DASH</strong>';
+    amountInstruction.innerHTML = `Send at least <strong>${minDash} DASH</strong>`;
     div.appendChild(amountInstruction);
   }
 
@@ -788,8 +820,20 @@ function renderCompleteStep(state: BridgeState): HTMLElement {
     div.appendChild(txInfo);
   }
 
-  // DPNS prompt (only for create mode, not top-up or send_to_address)
-  if (!isTopUp && !isSendToAddress && state.identityId) {
+  // Contract prompt (when user came from contract flow)
+  if (!isTopUp && !isSendToAddress && state.identityId && state.contractFromIdentityCreation) {
+    const contractPrompt = document.createElement('div');
+    contractPrompt.className = 'dpns-prompt';
+    contractPrompt.innerHTML = `
+      <h3>Publish your contract</h3>
+      <p>Continue to publish your data contract using this identity.</p>
+      <button id="contract-from-identity-btn" class="primary-btn">Publish Contract</button>
+    `;
+    div.appendChild(contractPrompt);
+  }
+
+  // DPNS prompt (only for create mode, not top-up or send_to_address, not contract flow)
+  if (!isTopUp && !isSendToAddress && state.identityId && !state.contractFromIdentityCreation) {
     const dpnsPrompt = document.createElement('div');
     dpnsPrompt.className = 'dpns-prompt';
     dpnsPrompt.innerHTML = `
@@ -1991,5 +2035,288 @@ function renderManageCompleteStep(state: BridgeState): HTMLElement {
 
   div.appendChild(actionButtons);
 
+  return div;
+}
+
+// ============================================================================
+// Contract Registration Steps
+// ============================================================================
+
+function renderContractChooseIdentityStep(_state: BridgeState): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'contract-choose-step';
+  div.innerHTML = `
+    <h2>Register a Data Contract</h2>
+    <p class="step-description">Publish a data contract on Dash Platform. You'll need an identity to own the contract.</p>
+    <div class="identity-choice-buttons">
+      <button id="contract-choose-new-btn" class="primary-btn">
+        <span class="btn-label">Create New Identity</span>
+        <span class="btn-desc">We'll create one for you with the exact funds needed</span>
+      </button>
+      <button id="contract-choose-existing-btn" class="secondary-btn">
+        <span class="btn-label">Use Existing Identity</span>
+        <span class="btn-desc">Use an identity you already have</span>
+      </button>
+    </div>
+    <button id="contract-back-btn" class="back-btn">&larr; Back</button>
+  `;
+  return div;
+}
+
+function renderContractEnterIdentityStep(state: BridgeState): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'contract-enter-identity-step';
+
+  const identityId = state.targetIdentityId || '';
+  const privateKey = state.contractPrivateKeyWif || '';
+  const isFetching = state.contractIdentityFetching;
+  const fetchError = state.contractIdentityFetchError;
+  const keyError = state.contractKeyValidationError;
+  const keyValidated = state.contractKeyValidated;
+  const balance = state.contractIdentityBalance;
+
+  let balanceHtml = '';
+  if (balance !== undefined) {
+    const balanceDash = (balance / 100_000_000_000).toFixed(4);
+    balanceHtml = `<span class="identity-balance">Balance: ${balanceDash} Dash</span>`;
+  }
+
+  let statusHtml = '';
+  if (isFetching) {
+    statusHtml = '<span class="fetch-status fetching">Fetching identity...</span>';
+  } else if (fetchError) {
+    statusHtml = `<span class="fetch-status error">${escapeHtml(fetchError)}</span>`;
+  } else if (state.contractIdentityKeys) {
+    statusHtml = `<span class="fetch-status success">Identity found (${state.contractIdentityKeys.length} keys)</span>${balanceHtml}`;
+  }
+
+  let keyStatusHtml = '';
+  if (keyError) {
+    keyStatusHtml = `<span class="key-status error">${escapeHtml(keyError)}</span>`;
+  } else if (keyValidated) {
+    keyStatusHtml = '<span class="key-status success">Key validated</span>';
+  }
+
+  const canContinue = keyValidated && state.contractIdentityKeys && !isFetching;
+
+  div.innerHTML = `
+    <h2>Enter Identity</h2>
+    <p class="step-description">Provide the identity that will own this contract and a private key to sign the transaction.</p>
+
+    <div class="input-group">
+      <label for="contract-identity-id-input">Identity ID</label>
+      <input type="text" id="contract-identity-id-input" class="text-input"
+             placeholder="Base58-encoded identity ID" value="${escapeHtml(identityId)}"
+             spellcheck="false" autocomplete="off" />
+      ${statusHtml}
+    </div>
+
+    <div class="input-group">
+      <label for="contract-private-key-input">Private Key (WIF)</label>
+      <input type="password" id="contract-private-key-input" class="text-input"
+             placeholder="Authentication key (HIGH or CRITICAL level)"
+             value="${escapeHtml(privateKey)}" spellcheck="false" autocomplete="off" />
+      ${keyStatusHtml}
+      <p class="input-hint">Must be an AUTHENTICATION key with at least HIGH security level.</p>
+    </div>
+
+    <div class="step-actions">
+      <button id="contract-back-btn" class="back-btn">&larr; Back</button>
+      <button id="contract-identity-continue-btn" class="primary-btn" ${canContinue ? '' : 'disabled'}>Continue</button>
+    </div>
+  `;
+  return div;
+}
+
+function renderContractEnterContractStep(state: BridgeState): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'contract-enter-step';
+
+  const json = state.contractJson || '';
+  const parseError = state.contractParseError;
+  const parsed = state.contractParsed;
+  const estimate = state.contractEstimate;
+  const isNew = state.contractIdentitySource === 'new';
+
+  let contractDisplayHtml = '';
+  if (parseError) {
+    contractDisplayHtml = `<div class="contract-error">${escapeHtml(parseError)}</div>`;
+  } else if (parsed && estimate) {
+    let docTypesHtml = '';
+    if (parsed.documentTypes.length > 0) {
+      docTypesHtml = parsed.documentTypes.map(dt => {
+        const indexBadges = dt.indexes.map(idx => {
+          const type = idx.contested ? 'contested' : idx.unique ? 'unique' : 'non-unique';
+          return `<span class="index-badge badge-${type}">${escapeHtml(idx.name)} (${type})</span>`;
+        }).join(' ');
+        return `<div class="doc-type"><strong>${escapeHtml(dt.name)}</strong> ${indexBadges || '<span class="no-indexes">no indexes</span>'}</div>`;
+      }).join('');
+    }
+
+    let tokensHtml = '';
+    if (parsed.tokens.length > 0) {
+      tokensHtml = `<div class="contract-section"><h4>Tokens</h4><p>${parsed.tokens.length} token${parsed.tokens.length !== 1 ? 's' : ''}</p></div>`;
+    }
+
+    let keywordsHtml = '';
+    if (parsed.keywords.length > 0) {
+      keywordsHtml = `<div class="contract-section"><h4>Keywords</h4><p>${parsed.keywords.map(k => escapeHtml(k)).join(', ')}</p></div>`;
+    }
+
+    const feeRows = estimate.lineItems.map(item =>
+      `<tr><td>${escapeHtml(item.label)}</td><td class="num">${item.count}</td><td class="num">${(item.totalCostCredits / 100_000_000_000).toFixed(2)}</td></tr>`
+    ).join('');
+    const totalDash = estimate.totalDash.toFixed(2);
+
+    let depositHtml = '';
+    if (isNew) {
+      const feeSatoshis = Math.ceil(estimate.totalCredits / 1000);
+      const depositSatoshis = feeSatoshis + 10_000_000 + 1000;
+      const depositDash = (depositSatoshis / 100_000_000).toFixed(4);
+      depositHtml = `<div class="deposit-estimate"><strong>Deposit needed:</strong> ${depositDash} DASH <span class="deposit-detail">(${totalDash} fee + 0.1 buffer + tx fee)</span></div>`;
+    }
+
+    let balanceWarningHtml = '';
+    if (!isNew && state.contractIdentityBalance !== undefined) {
+      if (state.contractIdentityBalance < estimate.totalCredits) {
+        const shortfall = ((estimate.totalCredits - state.contractIdentityBalance) / 100_000_000_000).toFixed(4);
+        balanceWarningHtml = `<div class="balance-warning">Insufficient balance. Need ${shortfall} more Dash in credits.</div>`;
+      }
+    }
+
+    contractDisplayHtml = `
+      <div class="contract-display">
+        ${docTypesHtml ? `<div class="contract-section"><h4>Document Types</h4>${docTypesHtml}</div>` : ''}
+        ${tokensHtml}
+        ${keywordsHtml}
+        <div class="fee-breakdown">
+          <h4>Registration Fee</h4>
+          <table class="fee-table">
+            <thead><tr><th>Item</th><th class="num">Count</th><th class="num">Dash</th></tr></thead>
+            <tbody>${feeRows}</tbody>
+            <tfoot><tr class="total-row"><td><strong>Total</strong></td><td></td><td class="num"><strong>${totalDash} Dash</strong></td></tr></tfoot>
+          </table>
+          ${depositHtml}
+          ${balanceWarningHtml}
+        </div>
+      </div>
+    `;
+  }
+
+  const canContinue = parsed && estimate && !parseError;
+
+  div.innerHTML = `
+    <h2>Enter Contract</h2>
+    <p class="step-description">Paste your data contract JSON below. The registration fee will be calculated automatically.</p>
+
+    <div class="input-group">
+      <label for="contract-json-input">Contract JSON</label>
+      <textarea id="contract-json-input" class="text-input contract-textarea"
+                spellcheck="false" placeholder='{ "documentSchemas": { ... } }'>${escapeHtml(json)}</textarea>
+    </div>
+
+    ${contractDisplayHtml}
+
+    <div class="step-actions">
+      <button id="contract-back-btn" class="back-btn">&larr; Back</button>
+      <button id="contract-review-btn" class="primary-btn" ${canContinue ? '' : 'disabled'}>Review &amp; Publish</button>
+    </div>
+  `;
+  return div;
+}
+
+function renderContractReviewStep(state: BridgeState): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'contract-review-step';
+
+  const estimate = state.contractEstimate;
+  const parsed = state.contractParsed;
+  const isNew = state.contractIdentitySource === 'new';
+
+  if (!estimate || !parsed) {
+    div.innerHTML = '<p>No contract data available.</p>';
+    return div;
+  }
+
+  const totalDash = estimate.totalDash.toFixed(2);
+  const feeRows = estimate.lineItems.map(item =>
+    `<tr><td>${escapeHtml(item.label)}</td><td class="num">${item.count}</td><td class="num">${(item.totalCostCredits / 100_000_000_000).toFixed(2)}</td></tr>`
+  ).join('');
+
+  const uniqueCount = parsed.documentTypes.reduce((s, dt) => s + dt.indexes.filter(i => i.unique && !i.contested).length, 0);
+  const nonUniqueCount = parsed.documentTypes.reduce((s, dt) => s + dt.indexes.filter(i => !i.unique && !i.contested).length, 0);
+  const contestedCount = parsed.documentTypes.reduce((s, dt) => s + dt.indexes.filter(i => i.contested).length, 0);
+
+  let actionHtml = '';
+  if (isNew && !state.contractFromIdentityCreation) {
+    const depositDash = state.minimumDeposit ? (state.minimumDeposit / 100_000_000).toFixed(4) : '?';
+    actionHtml = `
+      <p class="review-note">A new identity will be created with a deposit of <strong>${depositDash} DASH</strong>. After identity creation, the contract will be published automatically.</p>
+      <button id="contract-start-bridge-btn" class="primary-btn">Continue to Deposit</button>
+    `;
+  } else {
+    const idLabel = state.identityId || state.targetIdentityId || '';
+    actionHtml = `
+      <p class="review-note">The contract will be published using identity <code>${escapeHtml(idLabel)}</code>.</p>
+      <button id="contract-publish-btn" class="primary-btn">Publish Contract</button>
+    `;
+  }
+
+  div.innerHTML = `
+    <h2>Review Contract</h2>
+    <div class="review-summary">
+      <ul>
+        <li>${parsed.documentTypes.length} document type${parsed.documentTypes.length !== 1 ? 's' : ''}</li>
+        <li>${uniqueCount + nonUniqueCount + contestedCount} indexes (${[uniqueCount && `${uniqueCount} unique`, nonUniqueCount && `${nonUniqueCount} non-unique`, contestedCount && `${contestedCount} contested`].filter(Boolean).join(', ') || 'none'})</li>
+        <li>${parsed.tokens.length} token${parsed.tokens.length !== 1 ? 's' : ''}</li>
+        <li>${parsed.keywords.length} keyword${parsed.keywords.length !== 1 ? 's' : ''}</li>
+      </ul>
+    </div>
+    <div class="fee-breakdown">
+      <h4>Registration Fee</h4>
+      <table class="fee-table">
+        <thead><tr><th>Item</th><th class="num">Count</th><th class="num">Dash</th></tr></thead>
+        <tbody>${feeRows}</tbody>
+        <tfoot><tr class="total-row"><td><strong>Total</strong></td><td></td><td class="num"><strong>${totalDash} Dash</strong></td></tr></tfoot>
+      </table>
+    </div>
+    ${actionHtml}
+    <button id="contract-back-btn" class="back-btn">&larr; Back</button>
+  `;
+  return div;
+}
+
+function renderContractCompleteStep(state: BridgeState): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'complete-step';
+
+  const contractId = state.contractRegisteredId || 'Unknown';
+  const identityId = state.identityId || state.targetIdentityId || '';
+
+  div.innerHTML = `
+    <h2 class="complete-headline">Contract Published!</h2>
+    <p class="complete-subtitle">Your data contract has been registered on Dash Platform.</p>
+
+    <div class="identity-info">
+      <label>Contract ID</label>
+      <code class="identity-id">${escapeHtml(contractId)}</code>
+    </div>
+
+    ${identityId ? `
+    <div class="identity-info">
+      <label>Owner Identity</label>
+      <code class="identity-id">${escapeHtml(identityId)}</code>
+    </div>
+    ` : ''}
+
+    ${state.contractFromIdentityCreation ? `
+    <div class="backup-section">
+      <button id="download-keys-btn" class="primary-btn">Download Key Backup</button>
+      <p class="backup-warning">Keys cannot be recovered if lost.</p>
+    </div>
+    ` : ''}
+
+    <button id="retry-btn" class="secondary-btn">Start Over</button>
+  `;
   return div;
 }
