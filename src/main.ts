@@ -1055,44 +1055,73 @@ function setupEventListeners(container: HTMLElement) {
     }
   }
 
-  // DPNS key upload
-  wireKeyUpload('dpns-key-upload', (result) => {
-    let s = setTargetIdentityId(state, result.identityId);
-    s = { ...s, dpnsPrivateKeyWif: result.privateKeyWif };
-    updateState(s);
-    // Trigger identity fetch + key validation by simulating the blur handlers
-    const idInput = document.querySelector<HTMLInputElement>('#dpns-identity-id-input');
-    if (idInput) { idInput.value = result.identityId; idInput.dispatchEvent(new Event('blur')); }
-    setTimeout(() => {
-      const keyInput = document.querySelector<HTMLInputElement>('#dpns-private-key-input');
-      if (keyInput) { keyInput.value = result.privateKeyWif; keyInput.dispatchEvent(new Event('blur')); }
-    }, 100);
+  // DPNS key upload — fetch identity then validate key sequentially
+  wireKeyUpload('dpns-key-upload', async (result) => {
+    updateState(setDpnsIdentityFetching(state, result.identityId));
+    try {
+      const keys = await getIdentityPublicKeys(result.identityId, state.network);
+      updateState(setDpnsIdentityFetched(state, keys));
+      const match = findMatchingKeyIndex(result.privateKeyWif, keys, state.network);
+      if (match && isPurposeAllowedForDpns(match.purpose) && isSecurityLevelAllowedForDpns(match.securityLevel)) {
+        updateState(setDpnsKeyValidated(state, match.keyId, result.privateKeyWif));
+      } else if (match) {
+        updateState(setDpnsKeyValidationError(state, `Key must be AUTHENTICATION with HIGH or CRITICAL level`));
+      } else {
+        updateState(setDpnsKeyValidationError(state, 'Key does not match any identity key'));
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      updateState(setDpnsIdentityFetchError(state, msg));
+    }
   });
 
-  // Manage key upload
-  wireKeyUpload('manage-key-upload', (result) => {
-    let s = setTargetIdentityId(state, result.identityId);
-    s = { ...s, managePrivateKeyWif: result.privateKeyWif };
-    updateState(s);
-    const idInput = document.querySelector<HTMLInputElement>('#manage-identity-id-input');
-    if (idInput) { idInput.value = result.identityId; idInput.dispatchEvent(new Event('blur')); }
-    setTimeout(() => {
-      const keyInput = document.querySelector<HTMLInputElement>('#manage-private-key-input');
-      if (keyInput) { keyInput.value = result.privateKeyWif; keyInput.dispatchEvent(new Event('blur')); }
-    }, 100);
+  // Manage key upload — fetch identity then validate key sequentially
+  wireKeyUpload('manage-key-upload', async (result) => {
+    updateState(setManageIdentityFetching(state, result.identityId));
+    try {
+      const keys = await getIdentityPublicKeys(result.identityId, state.network);
+      updateState(setManageIdentityFetched(state, keys));
+      const match = findMatchingKeyIndex(result.privateKeyWif, keys, state.network);
+      if (match) {
+        updateState(setManageKeyValidated(state, match.keyId, match.securityLevel, result.privateKeyWif));
+      } else {
+        updateState(setManageKeyValidationError(state, 'Key does not match any identity key'));
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      updateState(setManageIdentityFetchError(state, msg));
+    }
   });
 
-  // Contract key upload
-  wireKeyUpload('contract-key-upload', (result) => {
-    let s = setTargetIdentityId(state, result.identityId);
-    s = { ...s, contractPrivateKeyWif: result.privateKeyWif };
-    updateState(s);
-    const idInput = document.querySelector<HTMLInputElement>('#contract-identity-id-input');
-    if (idInput) { idInput.value = result.identityId; idInput.dispatchEvent(new Event('blur')); }
-    setTimeout(() => {
-      const keyInput = document.querySelector<HTMLInputElement>('#contract-private-key-input');
-      if (keyInput) { keyInput.value = result.privateKeyWif; keyInput.dispatchEvent(new Event('blur')); }
-    }, 100);
+  // Contract key upload — fetch identity then validate key sequentially
+  wireKeyUpload('contract-key-upload', async (result) => {
+    updateState(setContractIdentityFetching(
+      setTargetIdentityId(state, result.identityId), result.identityId,
+    ));
+    try {
+      const keys = await getIdentityPublicKeys(result.identityId, state.network);
+      let balance: number | undefined;
+      try {
+        const { EvoSDK } = await import('@dashevo/evo-sdk');
+        const sdk = state.network === 'mainnet' ? EvoSDK.mainnetTrusted() : EvoSDK.testnetTrusted();
+        await sdk.connect();
+        const br = await sdk.identities.balanceAndRevision(result.identityId);
+        balance = Number(br?.balance ?? 0n);
+      } catch { /* best-effort */ }
+      updateState(setContractIdentityFetched(state, keys, balance));
+      // Now validate the key against fetched keys
+      const match = findMatchingKeyIndex(result.privateKeyWif, keys, state.network);
+      if (match && isPurposeAllowedForDpns(match.purpose) && isSecurityLevelAllowedForDpns(match.securityLevel)) {
+        updateState(setContractKeyValidated(state, match.keyId, result.privateKeyWif));
+      } else if (match) {
+        updateState(setContractKeyValidationError(state, `Key must be AUTHENTICATION with HIGH or CRITICAL level`));
+      } else {
+        updateState(setContractKeyValidationError(state, 'Key does not match any identity key'));
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      updateState(setContractIdentityFetchError(state, msg));
+    }
   });
 
   // ============================================================================
