@@ -1,5 +1,6 @@
-import { EvoSDK, IdentitySigner, DataContract } from '@dashevo/evo-sdk';
+import { IdentitySigner, DataContract } from '@dashevo/evo-sdk';
 import { withRetry, type RetryOptions } from '../utils/retry.js';
+import { fetchIdentityWithSdk, withConnectedPlatformSdk } from './client.js';
 
 /**
  * Publish a data contract on Dash Platform.
@@ -20,55 +21,47 @@ export async function publishContract(
   network: 'testnet' | 'mainnet',
   retryOptions?: RetryOptions,
 ): Promise<{ contractId: string }> {
-  const sdk = network === 'mainnet'
-    ? EvoSDK.mainnetTrusted()
-    : EvoSDK.testnetTrusted();
+  return withConnectedPlatformSdk(network, async (sdk) => {
+    const identity = await fetchIdentityWithSdk(sdk, identityId, retryOptions);
+    if (!identity) {
+      throw new Error('Identity not found');
+    }
 
-  console.log(`Connecting to ${network} for contract publishing...`);
-  await withRetry(() => sdk.connect(), retryOptions);
+    const identityKey = identity.getPublicKeyById(publicKeyId);
+    if (!identityKey) {
+      throw new Error(`Identity key ${publicKeyId} not found`);
+    }
 
-  const identity = await withRetry(
-    () => sdk.identities.fetch(identityId),
-    retryOptions,
-  );
-  if (!identity) {
-    throw new Error('Identity not found');
-  }
+    const signer = new IdentitySigner();
+    signer.addKeyFromWif(privateKeyWif);
 
-  const identityKey = identity.getPublicKeyById(publicKeyId);
-  if (!identityKey) {
-    throw new Error(`Identity key ${publicKeyId} not found`);
-  }
+    console.log('Creating data contract...');
+    const contractOptions = {
+      ownerId: identityId,
+      identityNonce: 0n, // Placeholder: SDK's put_to_platform_and_wait_for_response fetches the real nonce
+      schemas: documentSchemas as Record<string, object>,
+      fullValidation: true,
+      ...(tokens && Object.keys(tokens).length > 0 ? { tokens } : {}),
+    };
 
-  const signer = new IdentitySigner();
-  signer.addKeyFromWif(privateKeyWif);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const dataContract = new DataContract(contractOptions as any);
 
-  console.log('Creating data contract...');
-  const contractOptions = {
-    ownerId: identityId,
-    identityNonce: 0n, // Placeholder: SDK's put_to_platform_and_wait_for_response fetches the real nonce
-    schemas: documentSchemas as Record<string, object>,
-    fullValidation: true,
-    ...(tokens && Object.keys(tokens).length > 0 ? { tokens } : {}),
-  };
+    console.log('Publishing contract...');
+    const published = await withRetry(
+      () => sdk.contracts.publish({
+        dataContract,
+        identityKey,
+        signer,
+      }),
+      retryOptions,
+    );
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const dataContract = new DataContract(contractOptions as any);
+    const contractId = published.id.toString();
+    console.log('Contract published:', contractId);
 
-  console.log('Publishing contract...');
-  const published = await withRetry(
-    () => sdk.contracts.publish({
-      dataContract,
-      identityKey,
-      signer,
-    }),
-    retryOptions,
-  );
-
-  const contractId = published.id.toString();
-  console.log('Contract published:', contractId);
-
-  return { contractId };
+    return { contractId };
+  }, retryOptions);
 }
 
 /**

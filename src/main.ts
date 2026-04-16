@@ -109,6 +109,7 @@ import {
   generateIdentityKey,
 } from './crypto/keys.js';
 import { publishContract, extractDocumentSchemas } from './platform/contract.js';
+import { getIdentityBalanceAndRevision } from './platform/client.js';
 import { estimateContractFee, parseContractJson } from 'dash-contract-fee-estimator';
 import type { KeyType, KeyPurpose, SecurityLevel, ManageNewKeyConfig } from './types.js';
 import type { BridgeState } from './types.js';
@@ -1104,11 +1105,8 @@ function setupEventListeners(container: HTMLElement) {
       const keys = await getIdentityPublicKeys(result.identityId, state.network);
       let balance: number | undefined;
       try {
-        const { EvoSDK } = await import('@dashevo/evo-sdk');
-        const sdk = state.network === 'mainnet' ? EvoSDK.mainnetTrusted() : EvoSDK.testnetTrusted();
-        await sdk.connect();
-        const br = await sdk.identities.balanceAndRevision(result.identityId);
-        balance = Number(br?.balance ?? 0n);
+        const identityState = await getIdentityBalanceAndRevision(result.identityId, state.network);
+        balance = identityState.balance;
       } catch { /* best-effort */ }
       // Build final state: fetched + key WIF + validation — single updateState call
       let finalState = setContractIdentityFetched(state, keys, balance);
@@ -1174,11 +1172,8 @@ function setupEventListeners(container: HTMLElement) {
         // Also fetch balance for the existing identity credit check
         let balance: number | undefined;
         try {
-          const { EvoSDK } = await import('@dashevo/evo-sdk');
-          const sdk = state.network === 'mainnet' ? EvoSDK.mainnetTrusted() : EvoSDK.testnetTrusted();
-          await sdk.connect();
-          const result = await sdk.identities.balanceAndRevision(identityId);
-          balance = Number(result?.balance ?? 0n);
+          const identityState = await getIdentityBalanceAndRevision(identityId, state.network);
+          balance = identityState.balance;
         } catch {
           // Balance fetch is best-effort; continue without it
         }
