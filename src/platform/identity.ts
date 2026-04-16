@@ -41,6 +41,32 @@ function base64ToBytes(base64: string): Uint8Array {
   return bytes;
 }
 
+const PLATFORM_REQUEST_SETTINGS = {
+  connectTimeoutMs: 10000,
+  // wait_for_state_transition_result uses a 30s server-side wait window,
+  // so client-side request timeout must exceed that on runtimes that honor it.
+  timeoutMs: 40000,
+  retries: 2,
+  banFailedAddress: true,
+} as const;
+
+const PLATFORM_PUT_SETTINGS = {
+  ...PLATFORM_REQUEST_SETTINGS,
+  // Browser wasm transport currently needs an outer watchdog because fetch-level
+  // timeouts are not wired through by the SDK transport.
+  waitTimeoutMs: 45000,
+} as const;
+
+function createPlatformSdk(network: 'testnet' | 'mainnet'): EvoSDK {
+  const options = { settings: PLATFORM_REQUEST_SETTINGS };
+
+  if (network === 'mainnet') {
+    return EvoSDK.mainnetTrusted(options);
+  }
+
+  return EvoSDK.testnetTrusted(options);
+}
+
 /**
  * Identity key types as defined by Dash Platform
  */
@@ -150,9 +176,7 @@ export async function registerIdentity(
   retryOptions?: RetryOptions
 ): Promise<{ identityId: string; balance: number; revision: number }> {
   // Initialize SDK for the target network
-  const sdk = network === 'mainnet'
-    ? EvoSDK.mainnetTrusted()
-    : EvoSDK.testnetTrusted();
+  const sdk = createPlatformSdk(network);
 
   // Connect to the network with retry
   console.log(`Connecting to ${network}...`);
@@ -195,6 +219,7 @@ export async function registerIdentity(
       assetLockProof: proof,
       assetLockPrivateKey,
       signer,
+      settings: PLATFORM_PUT_SETTINGS,
     }),
     retryOptions
   );
@@ -231,9 +256,7 @@ export async function topUpIdentity(
   retryOptions?: RetryOptions
 ): Promise<{ success: boolean; balance?: number }> {
   // Initialize SDK for the target network (trusted mode required for identity fetch)
-  const sdk = network === 'mainnet'
-    ? EvoSDK.mainnetTrusted()
-    : EvoSDK.testnetTrusted();
+  const sdk = createPlatformSdk(network);
 
   // Connect to the network with retry
   console.log(`Connecting to ${network}...`);
@@ -261,6 +284,7 @@ export async function topUpIdentity(
       identity,
       assetLockProof: proof,
       assetLockPrivateKey,
+      settings: PLATFORM_PUT_SETTINGS,
     }),
     retryOptions
   );
@@ -309,9 +333,7 @@ export async function updateIdentity(
   retryOptions?: RetryOptions
 ): Promise<{ success: boolean; error?: string }> {
   // Initialize SDK for the target network (trusted mode required for identity fetch)
-  const sdk = network === 'mainnet'
-    ? EvoSDK.mainnetTrusted()
-    : EvoSDK.testnetTrusted();
+  const sdk = createPlatformSdk(network);
 
   console.log(`Connecting to ${network}...`);
   await withRetry(() => sdk.connect(), retryOptions);
@@ -378,6 +400,7 @@ export async function updateIdentity(
         disablePublicKeys: disablePublicKeyIds.length > 0
           ? disablePublicKeyIds
           : undefined,
+        settings: PLATFORM_PUT_SETTINGS,
       }),
       retryOptions
     );
@@ -412,9 +435,7 @@ export async function sendToPlatformAddress(
   network: 'testnet' | 'mainnet',
   retryOptions?: RetryOptions
 ): Promise<{ success: boolean; recipientAddress: string }> {
-  const sdk = network === 'mainnet'
-    ? EvoSDK.mainnet()
-    : EvoSDK.testnet();
+  const sdk = createPlatformSdk(network);
 
   console.log(`Connecting to ${network}...`);
   await withRetry(() => sdk.connect(), retryOptions);
@@ -444,6 +465,7 @@ export async function sendToPlatformAddress(
       outputs: [{ address: recipientAddress }] as any,
       signer,
       feeStrategy: [{ type: 'reduceOutput', index: 0 }] as any,
+      settings: PLATFORM_PUT_SETTINGS,
     }),
     retryOptions
   );
