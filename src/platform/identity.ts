@@ -52,10 +52,32 @@ const PLATFORM_REQUEST_SETTINGS = {
 
 const PLATFORM_PUT_SETTINGS = {
   ...PLATFORM_REQUEST_SETTINGS,
-  // Browser wasm transport currently needs an outer watchdog because fetch-level
-  // timeouts are not wired through by the SDK transport.
-  waitTimeoutMs: 45000,
 } as const;
+
+const PLATFORM_OPERATION_TIMEOUT_MS = 45000;
+
+async function withOperationTimeout<T>(
+  promise: Promise<T>,
+  action: string,
+  timeoutMs: number = PLATFORM_OPERATION_TIMEOUT_MS
+): Promise<T> {
+  let timeoutId: number | undefined;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeoutId = window.setTimeout(() => {
+          reject(new Error(`Timed out while ${action}`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+    }
+  }
+}
 
 function createPlatformSdk(network: 'testnet' | 'mainnet'): EvoSDK {
   const options = { settings: PLATFORM_REQUEST_SETTINGS };
@@ -213,15 +235,18 @@ export async function registerIdentity(
   const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);
 
   console.log('Creating identity with', identityKeys.length, 'keys...');
-  await withRetry(
-    () => sdk.identities.create({
-      identity,
-      assetLockProof: proof,
-      assetLockPrivateKey,
-      signer,
-      settings: PLATFORM_PUT_SETTINGS,
-    }),
-    retryOptions
+  await withOperationTimeout(
+    withRetry(
+      () => sdk.identities.create({
+        identity,
+        assetLockProof: proof,
+        assetLockPrivateKey,
+        signer,
+        settings: PLATFORM_PUT_SETTINGS,
+      }),
+      retryOptions
+    ),
+    'waiting for identity creation confirmation'
   );
 
   const balanceAndRevision = await withRetry(
@@ -279,14 +304,17 @@ export async function topUpIdentity(
   const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);
 
   console.log('Topping up identity:', identityId);
-  const result = await withRetry(
-    () => sdk.identities.topUp({
-      identity,
-      assetLockProof: proof,
-      assetLockPrivateKey,
-      settings: PLATFORM_PUT_SETTINGS,
-    }),
-    retryOptions
+  const result = await withOperationTimeout(
+    withRetry(
+      () => sdk.identities.topUp({
+        identity,
+        assetLockProof: proof,
+        assetLockPrivateKey,
+        settings: PLATFORM_PUT_SETTINGS,
+      }),
+      retryOptions
+    ),
+    'waiting for identity top-up confirmation'
   );
 
   console.log('Top-up result:', result);
@@ -390,19 +418,22 @@ export async function updateIdentity(
 
     console.log('Formatted keys to add:', JSON.stringify(formattedAddKeys, null, 2));
 
-    await withRetry(
-      () => sdk.identities.update({
-        identity,
-        signer,
-        addPublicKeys: formattedAddKeys.length > 0
-          ? formattedAddKeys
-          : undefined,
-        disablePublicKeys: disablePublicKeyIds.length > 0
-          ? disablePublicKeyIds
-          : undefined,
-        settings: PLATFORM_PUT_SETTINGS,
-      }),
-      retryOptions
+    await withOperationTimeout(
+      withRetry(
+        () => sdk.identities.update({
+          identity,
+          signer,
+          addPublicKeys: formattedAddKeys.length > 0
+            ? formattedAddKeys
+            : undefined,
+          disablePublicKeys: disablePublicKeyIds.length > 0
+            ? disablePublicKeyIds
+            : undefined,
+          settings: PLATFORM_PUT_SETTINGS,
+        }),
+        retryOptions
+      ),
+      'waiting for identity update confirmation'
     );
 
     console.log('Update completed');
@@ -458,16 +489,19 @@ export async function sendToPlatformAddress(
 
   // Pass output as a plain object — the WASM serde deserializer expects
   // { address: string } not a PlatformAddressOutput WASM instance
-  const result = await withRetry(
-    () => sdk.addresses.fundFromAssetLock({
-      assetLockProof,
-      assetLockPrivateKey,
-      outputs: [{ address: recipientAddress }] as any,
-      signer,
-      feeStrategy: [{ type: 'reduceOutput', index: 0 }] as any,
-      settings: PLATFORM_PUT_SETTINGS,
-    }),
-    retryOptions
+  const result = await withOperationTimeout(
+    withRetry(
+      () => sdk.addresses.fundFromAssetLock({
+        assetLockProof,
+        assetLockPrivateKey,
+        outputs: [{ address: recipientAddress }] as any,
+        signer,
+        feeStrategy: [{ type: 'reduceOutput', index: 0 }] as any,
+        settings: PLATFORM_PUT_SETTINGS,
+      }),
+      retryOptions
+    ),
+    'waiting for platform address funding confirmation'
   );
 
   console.log('Send to address result:', result);
