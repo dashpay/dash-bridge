@@ -1,5 +1,4 @@
 import {
-  EvoSDK,
   AssetLockProof,
   Identity,
   IdentityPublicKey,
@@ -12,6 +11,13 @@ import { sha256 } from '@noble/hashes/sha256';
 import { ripemd160 } from '@noble/hashes/ripemd160';
 import type { PublicKeyInfo, IdentityKeyConfig, AssetLockProofData } from '../types.js';
 import { withRetry, type RetryOptions } from '../utils/retry.js';
+import {
+  PLATFORM_PUT_SETTINGS,
+  fetchIdentityWithSdk,
+  getIdentityBalanceAndRevisionWithSdk,
+  withConnectedPlatformSdk,
+  withPlatformOperationTimeout,
+} from './client.js';
 
 /**
  * Compute hash160 (RIPEMD160(SHA256(data))) of a buffer
@@ -40,55 +46,6 @@ function base64ToBytes(base64: string): Uint8Array {
   }
   return bytes;
 }
-
-const PLATFORM_REQUEST_SETTINGS = {
-  connectTimeoutMs: 10000,
-  // wait_for_state_transition_result uses a 30s server-side wait window,
-  // so client-side request timeout must exceed that on runtimes that honor it.
-  timeoutMs: 40000,
-  retries: 2,
-  banFailedAddress: true,
-} as const;
-
-const PLATFORM_PUT_SETTINGS = {
-  ...PLATFORM_REQUEST_SETTINGS,
-} as const;
-
-const PLATFORM_OPERATION_TIMEOUT_MS = 45000;
-
-async function withOperationTimeout<T>(
-  promise: Promise<T>,
-  action: string,
-  timeoutMs: number = PLATFORM_OPERATION_TIMEOUT_MS
-): Promise<T> {
-  let timeoutId: number | undefined;
-
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_, reject) => {
-        timeoutId = window.setTimeout(() => {
-          reject(new Error(`Timed out while ${action}`));
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timeoutId !== undefined) {
-      window.clearTimeout(timeoutId);
-    }
-  }
-}
-
-function createPlatformSdk(network: 'testnet' | 'mainnet'): EvoSDK {
-  const options = { settings: PLATFORM_REQUEST_SETTINGS };
-
-  if (network === 'mainnet') {
-    return EvoSDK.mainnetTrusted(options);
-  }
-
-  return EvoSDK.testnetTrusted(options);
-}
-
 /**
  * Identity key types as defined by Dash Platform
  */
@@ -197,70 +154,65 @@ export async function registerIdentity(
   network: 'testnet' | 'mainnet',
   retryOptions?: RetryOptions
 ): Promise<{ identityId: string; balance: number; revision: number }> {
-  // Initialize SDK for the target network
-  const sdk = createPlatformSdk(network);
+  return withConnectedPlatformSdk(network, async (sdk) => {
+    // Build typed AssetLockProof from raw components
+    const proof = AssetLockProof.createInstantAssetLockProof(
+      assetLockProofData.instantLockBytes,
+      assetLockProofData.transactionBytes,
+      assetLockProofData.outputIndex
+    );
+    const identityId = proof.createIdentityId().toString();
+    const identity = new Identity(identityId);
+    const signer = new IdentitySigner();
 
-  // Connect to the network with retry
-  console.log(`Connecting to ${network}...`);
-  await withRetry(() => sdk.connect(), retryOptions);
-  console.log('Connected to Platform');
+    for (const key of identityKeys) {
+      const keyBytes = key.keyType === 'ECDSA_HASH160'
+        ? hash160(key.publicKey)
+        : key.publicKey;
 
-  // Build typed AssetLockProof from raw components
-  const proof = AssetLockProof.createInstantAssetLockProof(
-    assetLockProofData.instantLockBytes,
-    assetLockProofData.transactionBytes,
-    assetLockProofData.outputIndex
-  );
-  const identityId = proof.createIdentityId().toString();
-  const identity = new Identity(identityId);
-  const signer = new IdentitySigner();
+      const publicKey = new IdentityPublicKey({
+        keyId: key.id,
+        purpose: key.purpose,
+        securityLevel: key.securityLevel,
+        keyType: key.keyType,
+        isReadOnly: false,
+        data: keyBytes,
+      });
+      identity.addPublicKey(publicKey);
+      signer.addKeyFromWif(key.privateKeyWif);
+    }
 
-  for (const key of identityKeys) {
-    const keyBytes = key.keyType === 'ECDSA_HASH160'
-      ? hash160(key.publicKey)
-      : key.publicKey;
+    const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);
 
-    const publicKey = new IdentityPublicKey({
-      keyId: key.id,
-      purpose: key.purpose,
-      securityLevel: key.securityLevel,
-      keyType: key.keyType,
-      isReadOnly: false,
-      data: keyBytes,
-    });
-    identity.addPublicKey(publicKey);
-    signer.addKeyFromWif(key.privateKeyWif);
-  }
+    console.log('Creating identity with', identityKeys.length, 'keys...');
+    await withPlatformOperationTimeout(
+      withRetry(
+        () => sdk.identities.create({
+          identity,
+          assetLockProof: proof,
+          assetLockPrivateKey,
+          signer,
+          settings: PLATFORM_PUT_SETTINGS,
+        }),
+        retryOptions
+      ),
+      'waiting for identity creation confirmation'
+    );
 
-  const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);
-
-  console.log('Creating identity with', identityKeys.length, 'keys...');
-  await withOperationTimeout(
-    withRetry(
-      () => sdk.identities.create({
-        identity,
-        assetLockProof: proof,
-        assetLockPrivateKey,
-        signer,
-        settings: PLATFORM_PUT_SETTINGS,
-      }),
+    const balanceAndRevision = await getIdentityBalanceAndRevisionWithSdk(
+      sdk,
+      identityId,
       retryOptions
-    ),
-    'waiting for identity creation confirmation'
-  );
+    );
 
-  const balanceAndRevision = await withRetry(
-    () => sdk.identities.balanceAndRevision(identityId),
-    retryOptions
-  );
+    console.log('Identity created:', identityId);
 
-  console.log('Identity created:', identityId);
-
-  return {
-    identityId,
-    balance: Number(balanceAndRevision?.balance ?? 0n),
-    revision: Number(balanceAndRevision?.revision ?? 0n),
-  };
+    return {
+      identityId,
+      balance: balanceAndRevision.balance,
+      revision: balanceAndRevision.revision,
+    };
+  }, retryOptions);
 }
 
 /**
@@ -280,49 +232,40 @@ export async function topUpIdentity(
   network: 'testnet' | 'mainnet',
   retryOptions?: RetryOptions
 ): Promise<{ success: boolean; balance?: number }> {
-  // Initialize SDK for the target network (trusted mode required for identity fetch)
-  const sdk = createPlatformSdk(network);
+  return withConnectedPlatformSdk(network, async (sdk) => {
+    const identity = await fetchIdentityWithSdk(sdk, identityId, retryOptions);
+    if (!identity) {
+      throw new Error(`Identity not found: ${identityId}`);
+    }
 
-  // Connect to the network with retry
-  console.log(`Connecting to ${network}...`);
-  await withRetry(() => sdk.connect(), retryOptions);
-  console.log('Connected to Platform');
+    const proof = AssetLockProof.createInstantAssetLockProof(
+      assetLockProofData.instantLockBytes,
+      assetLockProofData.transactionBytes,
+      assetLockProofData.outputIndex
+    );
+    const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);
 
-  const identity = await withRetry(
-    () => sdk.identities.fetch(identityId),
-    retryOptions
-  );
-  if (!identity) {
-    throw new Error(`Identity not found: ${identityId}`);
-  }
+    console.log('Topping up identity:', identityId);
+    const result = await withPlatformOperationTimeout(
+      withRetry(
+        () => sdk.identities.topUp({
+          identity,
+          assetLockProof: proof,
+          assetLockPrivateKey,
+          settings: PLATFORM_PUT_SETTINGS,
+        }),
+        retryOptions
+      ),
+      'waiting for identity top-up confirmation'
+    );
 
-  const proof = AssetLockProof.createInstantAssetLockProof(
-    assetLockProofData.instantLockBytes,
-    assetLockProofData.transactionBytes,
-    assetLockProofData.outputIndex
-  );
-  const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);
+    console.log('Top-up result:', result);
 
-  console.log('Topping up identity:', identityId);
-  const result = await withOperationTimeout(
-    withRetry(
-      () => sdk.identities.topUp({
-        identity,
-        assetLockProof: proof,
-        assetLockPrivateKey,
-        settings: PLATFORM_PUT_SETTINGS,
-      }),
-      retryOptions
-    ),
-    'waiting for identity top-up confirmation'
-  );
-
-  console.log('Top-up result:', result);
-
-  return {
-    success: true,
-    balance: Number(result),
-  };
+    return {
+      success: true,
+      balance: Number(result),
+    };
+  }, retryOptions);
 }
 
 /**
@@ -360,96 +303,88 @@ export async function updateIdentity(
   network: 'testnet' | 'mainnet',
   retryOptions?: RetryOptions
 ): Promise<{ success: boolean; error?: string }> {
-  // Initialize SDK for the target network (trusted mode required for identity fetch)
-  const sdk = createPlatformSdk(network);
+  return withConnectedPlatformSdk(network, async (sdk) => {
+    try {
+      console.log('Updating identity:', identityId);
+      console.log('Adding', addPublicKeys.length, 'keys, disabling', disablePublicKeyIds.length, 'keys');
 
-  console.log(`Connecting to ${network}...`);
-  await withRetry(() => sdk.connect(), retryOptions);
-  console.log('Connected to Platform');
-
-  try {
-    console.log('Updating identity:', identityId);
-    console.log('Adding', addPublicKeys.length, 'keys, disabling', disablePublicKeyIds.length, 'keys');
-
-    const identity = await withRetry(
-      () => sdk.identities.fetch(identityId),
-      retryOptions
-    );
-    if (!identity) {
-      throw new Error(`Identity not found: ${identityId}`);
-    }
-
-    const signer = new IdentitySigner();
-    signer.addKeyFromWif(privateKeyWif);
-
-    // Add private keys for new keys being added (SDK needs them to sign the transition)
-    for (const key of addPublicKeys) {
-      if (key.privateKeyWif) {
-        signer.addKeyFromWif(key.privateKeyWif);
-      }
-    }
-
-    const existingKeys = identity.publicKeys;
-    const maxKeyId = existingKeys.reduce((max: number, key: { keyId: number }) => Math.max(max, key.keyId), -1);
-
-    const formattedAddKeys: IdentityPublicKeyInCreation[] = addPublicKeys.map((key, index) => {
-      const isHash160Type = key.keyType === 'ECDSA_HASH160';
-      let keyDataBytes: Uint8Array;
-
-      if (isHash160Type && key.publicKeyHex) {
-        keyDataBytes = hash160(hexToBytes(key.publicKeyHex));
-      } else if (key.publicKeyHex) {
-        keyDataBytes = hexToBytes(key.publicKeyHex);
-      } else if (key.publicKeyBase64) {
-        keyDataBytes = base64ToBytes(key.publicKeyBase64);
-      } else {
-        throw new Error('Missing key data for identity update');
+      const identity = await fetchIdentityWithSdk(sdk, identityId, retryOptions);
+      if (!identity) {
+        throw new Error(`Identity not found: ${identityId}`);
       }
 
-      return new IdentityPublicKeyInCreation({
-        keyId: maxKeyId + index + 1,
-        purpose: key.purpose,
-        securityLevel: key.securityLevel,
-        keyType: key.keyType,
-        isReadOnly: false,
-        data: keyDataBytes,
+      const signer = new IdentitySigner();
+      signer.addKeyFromWif(privateKeyWif);
+
+      // Add private keys for new keys being added (SDK needs them to sign the transition)
+      for (const key of addPublicKeys) {
+        if (key.privateKeyWif) {
+          signer.addKeyFromWif(key.privateKeyWif);
+        }
+      }
+
+      const existingKeys = identity.publicKeys;
+      const maxKeyId = existingKeys.reduce((max: number, key: { keyId: number }) => Math.max(max, key.keyId), -1);
+
+      const formattedAddKeys: IdentityPublicKeyInCreation[] = addPublicKeys.map((key, index) => {
+        const isHash160Type = key.keyType === 'ECDSA_HASH160';
+        let keyDataBytes: Uint8Array;
+
+        if (isHash160Type && key.publicKeyHex) {
+          keyDataBytes = hash160(hexToBytes(key.publicKeyHex));
+        } else if (key.publicKeyHex) {
+          keyDataBytes = hexToBytes(key.publicKeyHex);
+        } else if (key.publicKeyBase64) {
+          keyDataBytes = base64ToBytes(key.publicKeyBase64);
+        } else {
+          throw new Error('Missing key data for identity update');
+        }
+
+        return new IdentityPublicKeyInCreation({
+          keyId: maxKeyId + index + 1,
+          purpose: key.purpose,
+          securityLevel: key.securityLevel,
+          keyType: key.keyType,
+          isReadOnly: false,
+          data: keyDataBytes,
+        });
       });
-    });
 
-    console.log('Formatted keys to add:', JSON.stringify(formattedAddKeys, null, 2));
+      console.log('Formatted keys to add:', JSON.stringify(formattedAddKeys, null, 2));
 
-    await withOperationTimeout(
-      withRetry(
-        () => sdk.identities.update({
-          identity,
-          signer,
-          addPublicKeys: formattedAddKeys.length > 0
-            ? formattedAddKeys
-            : undefined,
-          disablePublicKeys: disablePublicKeyIds.length > 0
-            ? disablePublicKeyIds
-            : undefined,
-          settings: PLATFORM_PUT_SETTINGS,
-        }),
-        retryOptions
-      ),
-      'waiting for identity update confirmation'
-    );
+      await withPlatformOperationTimeout(
+        withRetry(
+          () => sdk.identities.update({
+            identity,
+            signer,
+            addPublicKeys: formattedAddKeys.length > 0
+              ? formattedAddKeys
+              : undefined,
+            disablePublicKeys: disablePublicKeyIds.length > 0
+              ? disablePublicKeyIds
+              : undefined,
+            settings: PLATFORM_PUT_SETTINGS,
+          }),
+          retryOptions
+        ),
+        'waiting for identity update confirmation'
+      );
 
-    console.log('Update completed');
+      console.log('Update completed');
 
-    return { success: true };
-  } catch (error) {
-    console.error('Identity update error:', error);
-    // WasmSdkError is not a standard Error, so check for message property
-    const errorMessage = (error && typeof error === 'object' && 'message' in error)
-      ? String((error as { message: unknown }).message)
-      : (error instanceof Error ? error.message : String(error));
-    return {
-      success: false,
-      error: errorMessage,
-    };
-  }
+      return { success: true };
+    } catch (error) {
+      console.error('Identity update error:', error);
+      // WasmSdkError is not a standard Error, so check for message property
+      const errorMessage = (error && typeof error === 'object' && 'message' in error)
+        ? String((error as { message: unknown }).message)
+        : (error instanceof Error ? error.message : String(error));
+      return {
+        success: false,
+        error: errorMessage,
+      };
+    }
+  }, retryOptions);
 }
 
 /**
@@ -466,65 +401,60 @@ export async function sendToPlatformAddress(
   network: 'testnet' | 'mainnet',
   retryOptions?: RetryOptions
 ): Promise<{ success: boolean; recipientAddress: string }> {
-  const sdk = createPlatformSdk(network);
+  return withConnectedPlatformSdk(network, async (sdk) => {
+    // Build typed AssetLockProof from raw components
+    const assetLockProof = AssetLockProof.createInstantAssetLockProof(
+      assetLockProofData.instantLockBytes,
+      assetLockProofData.transactionBytes,
+      assetLockProofData.outputIndex
+    );
 
-  console.log(`Connecting to ${network}...`);
-  await withRetry(() => sdk.connect(), retryOptions);
-  console.log('Connected to Platform');
+    // Build the asset lock private key
+    const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);
 
-  // Build typed AssetLockProof from raw components
-  const assetLockProof = AssetLockProof.createInstantAssetLockProof(
-    assetLockProofData.instantLockBytes,
-    assetLockProofData.transactionBytes,
-    assetLockProofData.outputIndex
-  );
+    // Empty signer — recipient does not need to sign for receiving
+    const signer = new PlatformAddressSigner();
 
-  // Build the asset lock private key
-  const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);
+    console.log('Sending to platform address:', recipientAddress);
 
-  // Empty signer — recipient does not need to sign for receiving
-  const signer = new PlatformAddressSigner();
+    // Pass output as a plain object — the WASM serde deserializer expects
+    // { address: string } not a PlatformAddressOutput WASM instance
+    const result = await withPlatformOperationTimeout(
+      withRetry(
+        () => sdk.addresses.fundFromAssetLock({
+          assetLockProof,
+          assetLockPrivateKey,
+          outputs: [{ address: recipientAddress }] as any,
+          signer,
+          feeStrategy: [{ type: 'reduceOutput', index: 0 }] as any,
+          settings: PLATFORM_PUT_SETTINGS,
+        }),
+        retryOptions
+      ),
+      'waiting for platform address funding confirmation'
+    );
 
-  console.log('Sending to platform address:', recipientAddress);
-
-  // Pass output as a plain object — the WASM serde deserializer expects
-  // { address: string } not a PlatformAddressOutput WASM instance
-  const result = await withOperationTimeout(
-    withRetry(
-      () => sdk.addresses.fundFromAssetLock({
-        assetLockProof,
-        assetLockPrivateKey,
-        outputs: [{ address: recipientAddress }] as any,
-        signer,
-        feeStrategy: [{ type: 'reduceOutput', index: 0 }] as any,
-        settings: PLATFORM_PUT_SETTINGS,
-      }),
-      retryOptions
-    ),
-    'waiting for platform address funding confirmation'
-  );
-
-  console.log('Send to address result:', result);
-  if (result == null) {
-    throw new Error('Failed to send to platform address: fundFromAssetLock returned no result');
-  }
-  if (typeof result === 'object') {
-    const maybeResult = result as {
-      success?: unknown;
-      error?: unknown;
-    };
-
-    if (
-      maybeResult.success === false
-      || maybeResult.error !== undefined
-    ) {
-      const details = maybeResult.error ?? 'unknown error';
-      throw new Error(`Failed to send to platform address: ${String(details)}`);
+    console.log('Send to address result:', result);
+    if (result == null) {
+      throw new Error('Failed to send to platform address: fundFromAssetLock returned no result');
     }
-  }
+    if (typeof result === 'object') {
+      const maybeResult = result as {
+        success?: unknown;
+        error?: unknown;
+      };
 
-  return {
-    success: true,
-    recipientAddress,
-  };
+      if (
+        maybeResult.success === false
+        || maybeResult.error !== undefined
+      ) {
+        const details = maybeResult.error ?? 'unknown error';
+        throw new Error(`Failed to send to platform address: ${String(details)}`);
+      }
+    }
+    return {
+      success: true,
+      recipientAddress,
+    };
+  }, retryOptions);
 }
