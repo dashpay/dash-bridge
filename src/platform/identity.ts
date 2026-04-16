@@ -43,13 +43,17 @@ function base64ToBytes(base64: string): Uint8Array {
 
 const PLATFORM_REQUEST_SETTINGS = {
   connectTimeoutMs: 10000,
-  timeoutMs: 20000,
+  // wait_for_state_transition_result uses a 30s server-side wait window,
+  // so client-side request timeout must exceed that on runtimes that honor it.
+  timeoutMs: 40000,
   retries: 2,
   banFailedAddress: true,
 } as const;
 
 const PLATFORM_PUT_SETTINGS = {
   ...PLATFORM_REQUEST_SETTINGS,
+  // Browser wasm transport currently needs an outer watchdog because fetch-level
+  // timeouts are not wired through by the SDK transport.
   waitTimeoutMs: 45000,
 } as const;
 
