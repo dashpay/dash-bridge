@@ -5,6 +5,7 @@ export interface NetworkConfig {
   wifPrefix: number;
   minFee: number;
   dustThreshold: number;
+  platformHrp: string;
   faucetBaseUrl?: string;
 }
 
@@ -15,6 +16,7 @@ export const TESTNET: NetworkConfig = {
   wifPrefix: 239,     // 0xef
   minFee: 1000,       // 0.00001 DASH
   dustThreshold: 546,
+  platformHrp: 'tdash',
   faucetBaseUrl: 'https://faucet.thepasta.org',
 };
 
@@ -25,6 +27,7 @@ export const MAINNET: NetworkConfig = {
   wifPrefix: 204,     // 0xcc
   minFee: 1000,
   dustThreshold: 546,
+  platformHrp: 'dash',
 };
 
 export function getNetwork(name: 'testnet' | 'mainnet'): NetworkConfig {

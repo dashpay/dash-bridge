@@ -23,7 +23,7 @@ test.describe('Deterministic UI E2E (mock mode)', () => {
     await page.evaluate(() => (window as { __e2eMockAdvance?: () => void }).__e2eMockAdvance?.());
 
     await expect(page.getByText('Save your keys')).toBeVisible();
-    await expect(page.locator('.identity-id')).toHaveText(E2E_MOCK_IDENTITY_ID);
+    await expect(page.locator('.contract-id-section', { hasText: 'Your Identity ID' }).locator('.identity-id')).toHaveText(E2E_MOCK_IDENTITY_ID);
 
     await page.click('#dpns-from-identity-btn');
     await expect(page.getByText('Choose Your Usernames')).toBeVisible();
@@ -63,7 +63,7 @@ test.describe('Deterministic UI E2E (mock mode)', () => {
     await page.evaluate(() => (window as { __e2eMockAdvance?: () => void }).__e2eMockAdvance?.());
 
     await expect(page.getByText('Top-up complete!')).toBeVisible();
-    await expect(page.locator('.identity-id')).toHaveText(E2E_MOCK_IDENTITY_ID);
+    await expect(page.locator('.contract-id-section', { hasText: 'Identity ID' }).locator('.identity-id')).toHaveText(E2E_MOCK_IDENTITY_ID);
   });
 
   test('manage identity flow validates key and applies changes', async ({ page }) => {

@@ -20,6 +20,71 @@ import { generateNewMnemonic } from '../crypto/hd.js';
 import { createEmptyUsernameEntry, createUsernameEntry } from '../platform/dpns.js';
 
 /**
+ * Error codes for user-facing display.
+ * Each code maps to a specific failure category so users can report issues
+ * with a reference that helps identify what went wrong.
+ */
+export const ErrorCodes = {
+  UNKNOWN:          'ERR-1000',
+  KEY_GEN:          'ERR-1001',
+  TX_BUILD:         'ERR-1002',
+  TX_SIGN:          'ERR-1003',
+  BROADCAST:        'ERR-1004',
+  ISLOCK:           'ERR-1005',
+  REGISTER:         'ERR-1006',
+  TOPUP:            'ERR-1007',
+  SEND_ADDRESS:     'ERR-1008',
+  DPNS_CHECK:       'ERR-1009',
+  DPNS_REGISTER:    'ERR-1010',
+  IDENTITY_UPDATE:  'ERR-1011',
+  CONFIG:           'ERR-1012',
+  CONTRACT_REGISTER: 'ERR-1013',
+} as const;
+
+/** Human-readable labels for error codes */
+export const ErrorCodeLabels: Record<string, string> = {
+  [ErrorCodes.UNKNOWN]:         'Unknown error',
+  [ErrorCodes.KEY_GEN]:         'Key generation failed',
+  [ErrorCodes.TX_BUILD]:        'Transaction build failed',
+  [ErrorCodes.TX_SIGN]:         'Transaction signing failed',
+  [ErrorCodes.BROADCAST]:       'Transaction broadcast failed',
+  [ErrorCodes.ISLOCK]:          'InstantSend lock failed',
+  [ErrorCodes.REGISTER]:        'Identity registration failed',
+  [ErrorCodes.TOPUP]:           'Identity top-up failed',
+  [ErrorCodes.SEND_ADDRESS]:    'Send to address failed',
+  [ErrorCodes.DPNS_CHECK]:      'Username availability check failed',
+  [ErrorCodes.DPNS_REGISTER]:   'Username registration failed',
+  [ErrorCodes.IDENTITY_UPDATE]: 'Identity update failed',
+  [ErrorCodes.CONFIG]:          'Configuration error',
+  [ErrorCodes.CONTRACT_REGISTER]: 'Contract registration failed',
+};
+
+/** Map a processing step to its error code */
+const StepErrorCodes: Partial<Record<BridgeStep, string>> = {
+  generating_keys:      ErrorCodes.KEY_GEN,
+  building_transaction: ErrorCodes.TX_BUILD,
+  signing_transaction:  ErrorCodes.TX_SIGN,
+  broadcasting:         ErrorCodes.BROADCAST,
+  waiting_islock:       ErrorCodes.ISLOCK,
+  registering_identity: ErrorCodes.REGISTER,
+  topping_up:           ErrorCodes.TOPUP,
+  sending_to_address:   ErrorCodes.SEND_ADDRESS,
+  dpns_checking:        ErrorCodes.DPNS_CHECK,
+  dpns_registering:     ErrorCodes.DPNS_REGISTER,
+  manage_updating:      ErrorCodes.IDENTITY_UPDATE,
+  contract_registering: ErrorCodes.CONTRACT_REGISTER,
+};
+
+/** Coerce an unknown caught value into an Error */
+export function toError(value: unknown): Error {
+  if (value instanceof Error) return value;
+  if (value && typeof value === 'object' && 'message' in value) {
+    return new Error(String((value as { message: unknown }).message));
+  }
+  return new Error(String(value));
+}
+
+/**
  * Create initial bridge state (mode selection)
  * Keys are generated when mode is selected, not at init
  */
@@ -56,15 +121,17 @@ export function setKeyPairs(
  * Set bridge mode and transition to appropriate initial step
  */
 export function setMode(state: BridgeState, mode: BridgeMode): BridgeState {
+  const clearedState = clearModeSensitiveFields(state, mode);
+
   if (mode === 'create') {
     // Create mode: generate mnemonic and identity keys
     const mnemonic = generateNewMnemonic(128);
     return {
-      ...state,
+      ...clearedState,
       step: 'configure_keys',
       mode,
       mnemonic,
-      identityKeys: generateDefaultIdentityKeysHD(state.network, mnemonic),
+      identityKeys: generateDefaultIdentityKeysHD(clearedState.network, mnemonic),
       // Clear any top-up state
       targetIdentityId: undefined,
       isOneTimeKey: undefined,
@@ -72,17 +139,28 @@ export function setMode(state: BridgeState, mode: BridgeMode): BridgeState {
   } else if (mode === 'topup') {
     // Top-up mode: no mnemonic, no identity keys
     return {
-      ...state,
+      ...clearedState,
       step: 'enter_identity',
       mode,
       mnemonic: undefined,
       identityKeys: [],
       isOneTimeKey: true,
     };
+  } else if (mode === 'send_to_address') {
+    // Send to platform address mode: user enters recipient bech32m address
+    return {
+      ...clearedState,
+      step: 'enter_recipient_address',
+      mode,
+      mnemonic: undefined,
+      identityKeys: [],
+      isOneTimeKey: true,
+      recipientPlatformAddress: undefined,
+    };
   } else if (mode === 'dpns') {
     // DPNS mode: go to identity source selection
     return {
-      ...state,
+      ...clearedState,
       step: 'dpns_choose_identity',
       mode,
       dpnsUsernames: [],
@@ -90,10 +168,33 @@ export function setMode(state: BridgeState, mode: BridgeMode): BridgeState {
       dpnsFromIdentityCreation: false,
       dpnsContestedWarningAcknowledged: false,
     };
+  } else if (mode === 'contract') {
+    // Contract mode: go to identity source selection
+    return {
+      ...clearedState,
+      step: 'contract_choose_identity',
+      mode,
+      contractIdentitySource: undefined,
+      contractJson: undefined,
+      contractParsed: undefined,
+      contractEstimate: undefined,
+      contractParseError: undefined,
+      contractFromIdentityCreation: false,
+      contractPrivateKeyWif: undefined,
+      contractPublicKeyId: undefined,
+      contractIdentityKeys: undefined,
+      contractIdentityFetching: undefined,
+      contractIdentityFetchError: undefined,
+      contractKeyValidated: undefined,
+      contractKeyValidationError: undefined,
+      contractRegisteredId: undefined,
+      contractIdentityBalance: undefined,
+      minimumDeposit: undefined,
+    };
   } else {
     // Manage mode: go to identity entry
     return {
-      ...state,
+      ...clearedState,
       step: 'manage_enter_identity',
       mode,
       // Clear any previous manage state
@@ -108,6 +209,13 @@ export function setMode(state: BridgeState, mode: BridgeMode): BridgeState {
       manageKeyValidationError: undefined,
     };
   }
+}
+
+function clearModeSensitiveFields(state: BridgeState, mode: BridgeMode): BridgeState {
+  return {
+    ...state,
+    recipientPlatformAddress: mode === 'send_to_address' ? state.recipientPlatformAddress : undefined,
+  };
 }
 
 /**
@@ -145,6 +253,29 @@ export function setTopUpComplete(state: BridgeState): BridgeState {
     ...state,
     step: 'complete',
     identityId: state.targetIdentityId, // Use target identity ID on completion
+  };
+}
+
+/**
+ * Set recipient platform address for send_to_address mode
+ */
+export function setRecipientPlatformAddress(
+  state: BridgeState,
+  recipientPlatformAddress: string
+): BridgeState {
+  return {
+    ...state,
+    recipientPlatformAddress,
+  };
+}
+
+/**
+ * Set send to address complete
+ */
+export function setSendToAddressComplete(state: BridgeState): BridgeState {
+  return {
+    ...state,
+    step: 'complete',
   };
 }
 
@@ -317,11 +448,13 @@ export function setIdentityRegistered(
   };
 }
 
-export function setError(state: BridgeState, error: Error): BridgeState {
+export function setError(state: BridgeState, error: Error, errorCode?: string): BridgeState {
   return {
     ...state,
     step: 'error',
     error,
+    errorCode: errorCode ?? StepErrorCodes[state.step] ?? ErrorCodes.UNKNOWN,
+    errorStep: state.step,
   };
 }
 
@@ -396,6 +529,8 @@ export function getStepDescription(step: BridgeStep): string {
     waiting_islock: 'Confirming...',
     registering_identity: 'Creating identity...',
     topping_up: 'Adding credits...',
+    enter_recipient_address: 'Send to platform address',
+    sending_to_address: 'Sending to address...',
     complete: 'Complete',
     error: 'Something went wrong',
     // DPNS steps
@@ -411,6 +546,13 @@ export function getStepDescription(step: BridgeStep): string {
     manage_view_keys: 'Manage keys',
     manage_updating: 'Updating identity...',
     manage_complete: 'Update complete',
+    // Contract registration steps
+    contract_choose_identity: 'Register contract',
+    contract_enter_identity: 'Enter identity',
+    contract_enter_contract: 'Enter contract',
+    contract_review: 'Review contract',
+    contract_registering: 'Publishing contract...',
+    contract_complete: 'Contract registered',
   };
   return descriptions[step];
 }
@@ -432,6 +574,8 @@ export function getStepProgress(step: BridgeStep): number {
     waiting_islock: 80,
     registering_identity: 90,
     topping_up: 90,
+    enter_recipient_address: 10,
+    sending_to_address: 90,
     complete: 100,
     error: 0,
     // DPNS steps
@@ -447,6 +591,13 @@ export function getStepProgress(step: BridgeStep): number {
     manage_view_keys: 40,
     manage_updating: 70,
     manage_complete: 100,
+    // Contract registration steps
+    contract_choose_identity: 10,
+    contract_enter_identity: 20,
+    contract_enter_contract: 40,
+    contract_review: 60,
+    contract_registering: 80,
+    contract_complete: 100,
   };
   return progress[step];
 }
@@ -464,11 +615,14 @@ export function isProcessingStep(step: BridgeStep): boolean {
     'waiting_islock',
     'registering_identity',
     'topping_up',
+    'sending_to_address',
     // DPNS processing steps
     'dpns_checking',
     'dpns_registering',
     // Identity Management processing steps
     'manage_updating',
+    // Contract registration processing steps
+    'contract_registering',
   ];
   return processingSteps.includes(step);
 }
@@ -982,6 +1136,192 @@ export function setManageBackToEntry(state: BridgeState): BridgeState {
     manageKeyValidationError: undefined,
     manageKeysToAdd: [],
     manageKeyIdsToDisable: [],
+  };
+}
+
+// ============================================================================
+// Contract Registration State Functions
+// ============================================================================
+
+/**
+ * Set contract identity source and transition accordingly
+ */
+export function setContractIdentitySource(state: BridgeState, source: 'new' | 'existing'): BridgeState {
+  if (source === 'new') {
+    // New identity: go to contract entry first (need fee estimate before deposit)
+    return {
+      ...state,
+      step: 'contract_enter_contract',
+      contractIdentitySource: 'new',
+    };
+  }
+  // Existing identity: go to identity entry
+  return {
+    ...state,
+    step: 'contract_enter_identity',
+    contractIdentitySource: 'existing',
+  };
+}
+
+/**
+ * Set contract identity fetching state
+ */
+export function setContractIdentityFetching(state: BridgeState, identityId: string): BridgeState {
+  return {
+    ...state,
+    targetIdentityId: identityId,
+    contractIdentityFetching: true,
+    contractIdentityFetchError: undefined,
+    contractIdentityKeys: undefined,
+    contractIdentityBalance: undefined,
+  };
+}
+
+/**
+ * Set contract identity fetched with keys and optional balance
+ */
+export function setContractIdentityFetched(
+  state: BridgeState,
+  keys: IdentityPublicKeyInfo[],
+  balance?: number,
+): BridgeState {
+  return {
+    ...state,
+    contractIdentityFetching: false,
+    contractIdentityKeys: keys,
+    contractIdentityBalance: balance,
+    contractIdentityFetchError: undefined,
+  };
+}
+
+/**
+ * Set contract identity fetch error
+ */
+export function setContractIdentityFetchError(state: BridgeState, error: string): BridgeState {
+  return {
+    ...state,
+    contractIdentityFetching: false,
+    contractIdentityFetchError: error,
+    contractIdentityKeys: undefined,
+  };
+}
+
+/**
+ * Set contract key validated
+ */
+export function setContractKeyValidated(state: BridgeState, keyId: number, privateKeyWif: string): BridgeState {
+  return {
+    ...state,
+    contractKeyValidated: true,
+    contractPublicKeyId: keyId,
+    contractPrivateKeyWif: privateKeyWif,
+    contractKeyValidationError: undefined,
+  };
+}
+
+/**
+ * Set contract key validation error
+ */
+export function setContractKeyValidationError(state: BridgeState, error: string): BridgeState {
+  return {
+    ...state,
+    contractKeyValidated: false,
+    contractKeyValidationError: error,
+    contractPrivateKeyWif: undefined,
+    contractPublicKeyId: undefined,
+  };
+}
+
+/**
+ * Update contract JSON with live parse/estimate results
+ */
+export function setContractJson(
+  state: BridgeState,
+  json: string,
+  parsed?: BridgeState['contractParsed'],
+  estimate?: BridgeState['contractEstimate'],
+  parseError?: string,
+): BridgeState {
+  return {
+    ...state,
+    contractJson: json,
+    contractParsed: parsed,
+    contractEstimate: estimate,
+    contractParseError: parseError,
+  };
+}
+
+/**
+ * Transition to contract review step, calculating deposit for new-identity route
+ */
+export function setContractReview(state: BridgeState): BridgeState {
+  let minimumDeposit = state.minimumDeposit;
+  if (state.contractIdentitySource === 'new' && state.contractEstimate) {
+    const CREDITS_PER_SATOSHI = 1000; // 1 Dash = 100M satoshis = 100B credits
+    const feeCredits = state.contractEstimate.totalCredits;
+    const feeSatoshis = Math.ceil(feeCredits / CREDITS_PER_SATOSHI);
+    const excessSatoshis = 10_000_000; // 0.1 Dash buffer
+    const txFee = 1000;
+    minimumDeposit = feeSatoshis + excessSatoshis + txFee;
+  }
+  return {
+    ...state,
+    step: 'contract_review',
+    minimumDeposit,
+  };
+}
+
+/**
+ * Transition to contract registering step
+ */
+export function setContractRegistering(state: BridgeState): BridgeState {
+  return { ...state, step: 'contract_registering' };
+}
+
+/**
+ * Set contract registration complete
+ */
+export function setContractComplete(state: BridgeState, contractId: string): BridgeState {
+  return {
+    ...state,
+    step: 'contract_complete',
+    contractRegisteredId: contractId,
+  };
+}
+
+/**
+ * Transition from identity creation complete screen to contract entry.
+ * Preserves identity info (identityId, mnemonic, keys) for contract publishing.
+ */
+export function setModeContractFromIdentity(state: BridgeState): BridgeState {
+  // Find first AUTHENTICATION key with HIGH or CRITICAL security level
+  const authKey = state.identityKeys.find(
+    (k) => k.purpose === 'AUTHENTICATION' && (k.securityLevel === 'HIGH' || k.securityLevel === 'CRITICAL'),
+  );
+  return {
+    ...state,
+    step: 'contract_enter_contract',
+    mode: 'contract',
+    contractIdentitySource: 'new',
+    contractFromIdentityCreation: true,
+    contractPrivateKeyWif: authKey?.privateKeyWif,
+    contractPublicKeyId: authKey?.id,
+  };
+}
+
+/**
+ * Start contract bridge flow for new identity route (from review step).
+ * Generates mnemonic and identity keys, sets up for deposit.
+ */
+export function setContractStartBridge(state: BridgeState): BridgeState {
+  const mnemonic = generateNewMnemonic(128);
+  return {
+    ...state,
+    mode: 'create' as BridgeMode,
+    step: 'configure_keys',
+    mnemonic,
+    identityKeys: generateDefaultIdentityKeysHD(state.network, mnemonic),
+    contractFromIdentityCreation: true,
   };
 }
 

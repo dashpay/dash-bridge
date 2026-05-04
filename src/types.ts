@@ -66,7 +66,7 @@ export interface IdentityKeyConfig {
 /**
  * Bridge operation mode
  */
-export type BridgeMode = 'create' | 'topup' | 'dpns' | 'manage';
+export type BridgeMode = 'create' | 'topup' | 'send_to_address' | 'dpns' | 'manage' | 'contract';
 
 /**
  * DPNS identity source for standalone mode
@@ -158,6 +158,8 @@ export type BridgeStep =
   | 'waiting_islock'
   | 'registering_identity'
   | 'topping_up'          // Top-up: calling sdk.identities.topUp()
+  | 'enter_recipient_address' // Send to address: user enters recipient bech32m address
+  | 'sending_to_address'      // Send to address: calling sdk.addresses.fundFromAssetLock()
   | 'complete'
   | 'error'
   // DPNS username registration steps
@@ -172,7 +174,14 @@ export type BridgeStep =
   | 'manage_enter_identity'   // Enter identity ID + private key WIF
   | 'manage_view_keys'        // Display current keys, configure changes
   | 'manage_updating'         // Update transition in progress
-  | 'manage_complete';        // Update complete
+  | 'manage_complete'         // Update complete
+  // Contract registration steps
+  | 'contract_choose_identity'  // Choose: create new or use existing
+  | 'contract_enter_identity'   // Enter existing identity ID + private key
+  | 'contract_enter_contract'   // Paste contract JSON, see fee estimate
+  | 'contract_review'           // Review contract + fees before publishing
+  | 'contract_registering'      // Publishing contract on platform
+  | 'contract_complete';        // Contract registered
 
 /**
  * Status of network retry attempts
@@ -215,14 +224,21 @@ export interface BridgeState {
   assetLockProof?: AssetLockProofData;
   identityId?: string;
   error?: Error;
+  /** Error code for user-facing display (e.g., "ERR-1006") */
+  errorCode?: string;
+  /** The step that was active when the error occurred */
+  errorStep?: BridgeStep;
   /** True when deposit detection timed out and needs manual recheck */
   depositTimedOut?: boolean;
   /** Current detected deposit amount (may be below minimum) */
   detectedDepositAmount?: number;
   /** Target identity ID for top-up (user-provided) */
   targetIdentityId?: string;
-  /** Whether asset lock key is a one-time random key (for top-up) vs HD-derived */
+  /** Whether asset lock key is a one-time random key (for top-up/send_to_address) vs HD-derived */
   isOneTimeKey?: boolean;
+
+  /** Send to address: recipient bech32m platform address */
+  recipientPlatformAddress?: string;
 
   // DPNS username registration fields
   /** DPNS: usernames to register */
@@ -271,6 +287,41 @@ export interface BridgeState {
   manageUpdateResult?: { success: boolean; error?: string };
   /** Manage: key validation error message */
   manageKeyValidationError?: string;
+
+  // Contract registration fields
+  /** Contract: identity source (new or existing) */
+  contractIdentitySource?: 'new' | 'existing';
+  /** Contract: raw JSON string from user input */
+  contractJson?: string;
+  /** Contract: parsed contract structure (from fee estimator) */
+  contractParsed?: { documentTypes: { name: string; indexes: { name: string; unique: boolean; contested: boolean }[] }[]; tokens: { position: string; hasPerpetualDistribution: boolean; hasPreProgrammedDistribution: boolean }[]; keywords: string[] };
+  /** Contract: fee estimate (from fee estimator) */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  contractEstimate?: { totalCredits: number; totalDash: number; lineItems: { label: string; description: string; count: number; unitCostCredits: number; totalCostCredits: number }[]; constants: any };
+  /** Contract: parse error message */
+  contractParseError?: string;
+  /** Contract: whether user came from identity creation */
+  contractFromIdentityCreation?: boolean;
+  /** Contract: private key WIF for existing identity */
+  contractPrivateKeyWif?: string;
+  /** Contract: public key ID for signing */
+  contractPublicKeyId?: number;
+  /** Contract: fetched identity keys */
+  contractIdentityKeys?: IdentityPublicKeyInfo[];
+  /** Contract: whether identity is being fetched */
+  contractIdentityFetching?: boolean;
+  /** Contract: identity fetch error */
+  contractIdentityFetchError?: string;
+  /** Contract: whether key is validated */
+  contractKeyValidated?: boolean;
+  /** Contract: key validation error */
+  contractKeyValidationError?: string;
+  /** Contract: published contract ID */
+  contractRegisteredId?: string;
+  /** Contract: identity credit balance (for existing identity) */
+  contractIdentityBalance?: number;
+  /** Minimum deposit amount in satoshis (overrides default 300,000 for contract mode) */
+  minimumDeposit?: number;
 
   // Faucet request state
   /** Current status of faucet request */

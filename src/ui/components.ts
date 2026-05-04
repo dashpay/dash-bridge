@@ -1,11 +1,69 @@
 import type { BridgeState, KeyType, KeyPurpose, SecurityLevel } from '../types.js';
-import { getStepProgress } from './state.js';
+import { getStepProgress, getStepDescription, ErrorCodes, ErrorCodeLabels } from './state.js';
 import { shouldShowContestedWarning, countUsernameStatuses } from '../platform/dpns.js';
 import { generateQRCodeDataUrl } from './qrcode.js';
 import { privateKeyToWif } from '../utils/wif.js';
 import { bytesToHex } from '../utils/hex.js';
 import { getNetwork } from '../config.js';
 import { getAssetLockDerivationPath } from '../crypto/hd.js';
+
+/**
+ * Build a Platform Explorer URL for a given entity.
+ */
+function explorerUrl(network: 'testnet' | 'mainnet', type: 'identity' | 'dataContract', id: string): string {
+  const base = network === 'testnet' ? 'https://testnet.platform-explorer.com' : 'https://platform-explorer.com';
+  return `${base}/${type}/${id}`;
+}
+
+/**
+ * Render an ID section with copy button and optional explorer link.
+ * Returns an HTMLElement ready to append.
+ */
+function renderIdSection(
+  label: string,
+  id: string,
+  options?: { explorerHref?: string; copyBtnId?: string },
+): HTMLElement {
+  const section = document.createElement('div');
+  section.className = 'contract-id-section';
+  const copyId = options?.copyBtnId || `copy-${label.toLowerCase().replace(/\s+/g, '-')}-btn`;
+  section.innerHTML = `
+    <label>${escapeHtml(label)}</label>
+    <div class="id-row">
+      <code class="identity-id">${escapeHtml(id)}</code>
+      <button id="${copyId}" class="tertiary-btn copy-btn" title="Copy">Copy</button>
+    </div>
+    ${options?.explorerHref ? `<a href="${options.explorerHref}" target="_blank" rel="noopener" class="explorer-link">View on Platform Explorer &rarr;</a>` : ''}
+  `;
+  // Wire copy on next tick (after DOM attach)
+  setTimeout(() => {
+    const btn = section.querySelector(`#${copyId}`);
+    if (btn) {
+      btn.addEventListener('click', () => {
+        navigator.clipboard.writeText(id).then(() => {
+          btn.textContent = 'Copied!';
+          setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+        });
+      });
+    }
+  }, 0);
+  return section;
+}
+
+/**
+ * Render a key backup file upload section for identity entry forms.
+ */
+function renderKeyUploadSection(inputId: string): string {
+  return `
+    <div class="key-upload-section">
+      <label class="key-upload-label">
+        <input type="file" id="${inputId}" accept=".json,application/json" class="key-upload-input" />
+        <span class="key-upload-btn">Upload Key Backup</span>
+        <span id="${inputId}-status" class="key-upload-status"></span>
+      </label>
+    </div>
+  `;
+}
 
 // Available options for key configuration
 const KEY_TYPES: KeyType[] = ['ECDSA_SECP256K1', 'ECDSA_HASH160'];
@@ -86,6 +144,10 @@ export function render(state: BridgeState, container: HTMLElement): void {
       content.appendChild(renderEnterIdentityStep(state));
       break;
 
+    case 'enter_recipient_address':
+      content.appendChild(renderEnterRecipientAddressStep(state));
+      break;
+
     case 'awaiting_deposit':
     case 'detecting_deposit':
       content.appendChild(renderDepositStep(state));
@@ -97,6 +159,7 @@ export function render(state: BridgeState, container: HTMLElement): void {
     case 'waiting_islock':
     case 'registering_identity':
     case 'topping_up':
+    case 'sending_to_address':
       content.appendChild(renderProcessingStep(state));
       break;
 
@@ -153,6 +216,26 @@ export function render(state: BridgeState, container: HTMLElement): void {
     case 'manage_complete':
       content.appendChild(renderManageCompleteStep(state));
       break;
+
+    // Contract registration steps
+    case 'contract_choose_identity':
+      content.appendChild(renderContractChooseIdentityStep(state));
+      break;
+    case 'contract_enter_identity':
+      content.appendChild(renderContractEnterIdentityStep(state));
+      break;
+    case 'contract_enter_contract':
+      content.appendChild(renderContractEnterContractStep(state));
+      break;
+    case 'contract_review':
+      content.appendChild(renderContractReviewStep(state));
+      break;
+    case 'contract_registering':
+      content.appendChild(renderProcessingStep(state));
+      break;
+    case 'contract_complete':
+      content.appendChild(renderContractCompleteStep(state));
+      break;
   }
 
   wrapper.appendChild(content);
@@ -205,6 +288,10 @@ function renderInitStep(state: BridgeState): HTMLElement {
       <span class="mode-label">Top Up Existing Identity</span>
       <span class="mode-desc">Add credits to an identity you already own</span>
     </button>
+    <button id="mode-send-to-address-btn" class="mode-btn secondary-btn">
+      <span class="mode-label">Send to Platform Address</span>
+      <span class="mode-desc">Send DASH to any Platform address</span>
+    </button>
     <button id="mode-dpns-btn" class="mode-btn secondary-btn">
       <span class="mode-label">Register Username</span>
       <span class="mode-desc">Get a DPNS username for your identity</span>
@@ -212,6 +299,10 @@ function renderInitStep(state: BridgeState): HTMLElement {
     <button id="mode-manage-btn" class="mode-btn secondary-btn">
       <span class="mode-label">Manage Identity Keys</span>
       <span class="mode-desc">Add or disable keys on an existing identity</span>
+    </button>
+    <button id="mode-contract-btn" class="mode-btn secondary-btn">
+      <span class="mode-label">Register Data Contract</span>
+      <span class="mode-desc">Publish a data contract on Dash Platform</span>
     </button>
   `;
   div.appendChild(modeButtons);
@@ -343,32 +434,113 @@ function renderEnterIdentityStep(state: BridgeState): HTMLElement {
   return div;
 }
 
+function renderEnterRecipientAddressStep(state: BridgeState): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'enter-identity-step enter-recipient-address-step';
+
+  const headline = document.createElement('h2');
+  headline.textContent = 'Send to Platform Address';
+  div.appendChild(headline);
+
+  // Recipient address input
+  const inputSection = document.createElement('div');
+  inputSection.className = 'identity-input-section recipient-address-input-section';
+
+  const addrGroup = document.createElement('div');
+  addrGroup.className = 'input-group';
+
+  const hrp = getNetwork(state.network).platformHrp;
+  const prefix = `${hrp}1...`;
+  const prefixShort = `${hrp}1`;
+  addrGroup.innerHTML = '<label class="input-label">Recipient Platform Address</label>';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.id = 'recipient-address-input';
+  input.className = 'identity-id-input recipient-address-input';
+  input.placeholder = prefix;
+  input.value = state.recipientPlatformAddress || '';
+  addrGroup.appendChild(input);
+
+  const hint = document.createElement('p');
+  hint.className = 'input-hint';
+  hint.textContent = `A bech32m platform address (starts with ${prefixShort})`;
+  addrGroup.appendChild(hint);
+
+  inputSection.appendChild(addrGroup);
+  div.appendChild(inputSection);
+
+  // Validation message placeholder
+  const validationMsg = document.createElement('p');
+  validationMsg.id = 'recipient-address-validation-msg';
+  validationMsg.className = 'validation-msg hidden';
+  div.appendChild(validationMsg);
+
+  // Navigation buttons
+  const navButtons = document.createElement('div');
+  navButtons.className = 'nav-buttons';
+
+  const backBtn = document.createElement('button');
+  backBtn.id = 'back-btn';
+  backBtn.className = 'secondary-btn';
+  backBtn.textContent = 'Back';
+  navButtons.appendChild(backBtn);
+
+  const continueBtn = document.createElement('button');
+  continueBtn.id = 'continue-send-to-address-btn';
+  continueBtn.className = 'primary-btn';
+  continueBtn.textContent = 'Continue';
+  if (!state.recipientPlatformAddress) {
+    continueBtn.setAttribute('disabled', 'true');
+  }
+  navButtons.appendChild(continueBtn);
+
+  div.appendChild(navButtons);
+
+  return div;
+}
+
 function renderDepositStep(state: BridgeState): HTMLElement {
   const div = document.createElement('div');
-  div.className = `deposit-step ${state.mode === 'topup' ? 'topup-deposit' : ''}`;
+  const isSendToAddress = state.mode === 'send_to_address';
+  div.className = `deposit-step ${(state.mode === 'topup' || isSendToAddress) ? 'topup-deposit' : ''}`;
 
   const address = state.depositAddress || '';
-  const isTopUp = state.mode === 'topup';
+  const isTopUp = state.mode === 'topup' || isSendToAddress;
 
   // Primary instruction - mode-aware headline
   const headline = document.createElement('h2');
   headline.className = 'deposit-headline';
-  if (isTopUp && state.targetIdentityId) {
+  if (isSendToAddress && state.recipientPlatformAddress) {
+    // Send to address mode: show truncated recipient address
+    const truncatedAddr = state.recipientPlatformAddress.length > 20
+      ? `${state.recipientPlatformAddress.slice(0, 12)}...${state.recipientPlatformAddress.slice(-6)}`
+      : state.recipientPlatformAddress;
+    headline.innerHTML = `Send to <code class="inline-id">${escapeHtml(truncatedAddr)}</code>`;
+  } else if (isTopUp && state.targetIdentityId) {
     // Truncate identity ID for display
     const truncatedId = state.targetIdentityId.length > 12
       ? `${state.targetIdentityId.slice(0, 8)}...${state.targetIdentityId.slice(-4)}`
       : state.targetIdentityId;
     headline.innerHTML = `Top up <code class="inline-id">${truncatedId}</code>`;
   } else {
-    headline.innerHTML = 'Send at least <strong>0.003 DASH</strong>';
+    const minDash = state.minimumDeposit
+      ? (state.minimumDeposit / 100_000_000).toFixed(4)
+      : '0.003';
+    headline.innerHTML = state.minimumDeposit
+      ? `Send exactly <strong>${minDash} DASH</strong>`
+      : 'Send at least <strong>0.003 DASH</strong>';
   }
   div.appendChild(headline);
 
   // Amount instruction for top-up mode (separate line)
   if (isTopUp) {
+    const minDash = state.minimumDeposit
+      ? (state.minimumDeposit / 100_000_000).toFixed(4)
+      : '0.003';
     const amountInstruction = document.createElement('p');
     amountInstruction.className = 'deposit-instruction';
-    amountInstruction.innerHTML = 'Send at least <strong>0.003 DASH</strong>';
+    amountInstruction.innerHTML = `Send at least <strong>${minDash} DASH</strong>`;
     div.appendChild(amountInstruction);
   }
 
@@ -556,7 +728,7 @@ function renderDepositStep(state: BridgeState): HTMLElement {
   }
 
   // Mode-specific note at bottom
-  if (state.mode === 'topup') {
+  if (state.mode === 'topup' || state.mode === 'send_to_address') {
     // One-time key warning for top-up
     const keyWarning = document.createElement('div');
     keyWarning.className = 'key-warning';
@@ -580,19 +752,24 @@ function renderProcessingStep(state: BridgeState): HTMLElement {
   const div = document.createElement('div');
   div.className = 'processing-step';
   const isTopUp = state.mode === 'topup';
+  const isSendToAddress = state.mode === 'send_to_address';
 
   // Headline
   const headline = document.createElement('h2');
   headline.className = 'processing-headline';
-  headline.textContent = isTopUp ? 'Processing top-up' : 'Creating your identity';
+  headline.textContent = isSendToAddress
+    ? 'Sending to platform address'
+    : isTopUp ? 'Processing top-up' : 'Creating your identity';
   div.appendChild(headline);
 
   // Subtitle
   const subtitle = document.createElement('p');
   subtitle.className = 'processing-subtitle';
-  subtitle.textContent = isTopUp
-    ? 'Adding credits to your identity on Dash Platform.'
-    : 'Registering your identity on Dash Platform. This may take a moment.';
+  subtitle.textContent = isSendToAddress
+    ? 'Sending credits to the platform address.'
+    : isTopUp
+      ? 'Adding credits to your identity on Dash Platform.'
+      : 'Registering your identity on Dash Platform. This may take a moment.';
   div.appendChild(subtitle);
 
   const spinner = document.createElement('div');
@@ -640,22 +817,27 @@ function renderProcessingStep(state: BridgeState): HTMLElement {
 function renderCompleteStep(state: BridgeState): HTMLElement {
   const div = document.createElement('div');
   const isTopUp = state.mode === 'topup';
-  div.className = `complete-step ${isTopUp ? 'topup-complete' : ''}`;
+  const isSendToAddress = state.mode === 'send_to_address';
+  div.className = `complete-step ${(isTopUp || isSendToAddress) ? 'topup-complete' : ''}`;
 
   // Lead with mode-specific headline
   const headline = document.createElement('h2');
   headline.className = 'complete-headline';
-  headline.textContent = isTopUp ? 'Top-up complete!' : 'Save your keys';
+  headline.textContent = isSendToAddress
+    ? 'Send complete!'
+    : isTopUp ? 'Top-up complete!' : 'Save your keys';
   div.appendChild(headline);
 
   const subtitle = document.createElement('p');
   subtitle.className = 'complete-subtitle';
-  subtitle.textContent = isTopUp
-    ? 'Credits have been added to your identity.'
-    : 'Your identity was created. Download your keys to access it.';
+  subtitle.textContent = isSendToAddress
+    ? 'Credits have been sent to the platform address.'
+    : isTopUp
+      ? 'Credits have been added to your identity.'
+      : 'Your identity was created. Download your keys to access it.';
   div.appendChild(subtitle);
 
-  if (!isTopUp) {
+  if (!isTopUp && !isSendToAddress) {
     // Primary action - key backup (only for create mode)
     const backupSection = document.createElement('div');
     backupSection.className = 'backup-section';
@@ -666,28 +848,42 @@ function renderCompleteStep(state: BridgeState): HTMLElement {
     div.appendChild(backupSection);
   }
 
-  // Identity ID info
-  const identityInfo = document.createElement('div');
-  identityInfo.className = 'identity-info';
-  identityInfo.innerHTML = `
-    <label>${isTopUp ? 'Identity ID' : 'Your Identity ID'}</label>
-    <code class="identity-id">${state.identityId || state.targetIdentityId || 'Unknown'}</code>
-  `;
-  div.appendChild(identityInfo);
-
-  // Transaction ID (for top-up mode)
-  if (isTopUp && state.txid) {
-    const txInfo = document.createElement('div');
-    txInfo.className = 'tx-info';
-    txInfo.innerHTML = `
-      <label>Transaction ID</label>
-      <code class="txid">${state.txid}</code>
-    `;
-    div.appendChild(txInfo);
+  // Identity/address info with copy + explorer link
+  if (isSendToAddress && state.recipientPlatformAddress) {
+    div.appendChild(renderIdSection('Recipient Address', state.recipientPlatformAddress, {
+      copyBtnId: 'copy-address-btn',
+    }));
+  } else {
+    const idValue = state.identityId || state.targetIdentityId || 'Unknown';
+    div.appendChild(renderIdSection(
+      isTopUp ? 'Identity ID' : 'Your Identity ID',
+      idValue,
+      {
+        explorerHref: idValue !== 'Unknown' ? explorerUrl(state.network, 'identity', idValue) : undefined,
+        copyBtnId: 'copy-identity-btn',
+      },
+    ));
   }
 
-  // DPNS prompt (only for create mode, not top-up)
-  if (!isTopUp && state.identityId) {
+  // Transaction ID (for top-up/send_to_address mode)
+  if ((isTopUp || isSendToAddress) && state.txid) {
+    div.appendChild(renderIdSection('Transaction ID', state.txid, { copyBtnId: 'copy-txid-btn' }));
+  }
+
+  // Contract prompt (when user came from contract flow)
+  if (!isTopUp && !isSendToAddress && state.identityId && state.contractFromIdentityCreation) {
+    const contractPrompt = document.createElement('div');
+    contractPrompt.className = 'dpns-prompt';
+    contractPrompt.innerHTML = `
+      <h3>Publish your contract</h3>
+      <p>Continue to publish your data contract using this identity.</p>
+      <button id="contract-from-identity-btn" class="primary-btn">Publish Contract</button>
+    `;
+    div.appendChild(contractPrompt);
+  }
+
+  // DPNS prompt (only for create mode, not top-up or send_to_address, not contract flow)
+  if (!isTopUp && !isSendToAddress && state.identityId && !state.contractFromIdentityCreation) {
     const dpnsPrompt = document.createElement('div');
     dpnsPrompt.className = 'dpns-prompt';
     dpnsPrompt.innerHTML = `
@@ -708,16 +904,133 @@ function renderCompleteStep(state: BridgeState): HTMLElement {
   return div;
 }
 
+/** Build a full diagnostic object from the error state for dev troubleshooting */
+function buildErrorDiagnostics(state: BridgeState): Record<string, unknown> {
+  const errorCode = state.errorCode ?? ErrorCodes.UNKNOWN;
+  const diag: Record<string, unknown> = {
+    errorCode,
+    errorLabel: ErrorCodeLabels[errorCode] ?? 'Unknown error',
+    errorStep: state.errorStep ?? null,
+    message: state.error?.message ?? 'An unknown error occurred',
+    stack: state.error?.stack ?? null,
+    network: state.network,
+    mode: state.mode,
+    timestamp: new Date().toISOString(),
+  };
+
+  // Transaction context — critical for tracking on-chain state
+  // NOTE: signedTxHex is intentionally excluded — if the error occurred before
+  // broadcast, a signed tx in a bug report lets anyone steal the user's funds.
+  // txid + UTXO data is sufficient for on-chain lookup.
+  if (state.depositAddress) diag.depositAddress = state.depositAddress;
+  if (state.txid) diag.txid = state.txid;
+  if (state.depositAmount !== undefined) diag.depositAmount = String(state.depositAmount);
+  if (state.detectedUtxo) {
+    diag.utxo = {
+      txid: state.detectedUtxo.txid,
+      vout: state.detectedUtxo.vout,
+      satoshis: state.detectedUtxo.satoshis,
+    };
+  }
+
+  // Identity context
+  if (state.identityId) diag.identityId = state.identityId;
+  if (state.targetIdentityId) diag.targetIdentityId = state.targetIdentityId;
+  if (state.recipientPlatformAddress) diag.recipientPlatformAddress = state.recipientPlatformAddress;
+
+  // DPNS context
+  if (state.dpnsUsernames?.length) {
+    diag.dpnsUsernames = state.dpnsUsernames.map(u => ({
+      label: u.label,
+      status: u.status,
+      isAvailable: u.isAvailable ?? null,
+      isContested: u.isContested ?? null,
+    }));
+  }
+  if (state.dpnsPublicKeyId !== undefined) diag.dpnsPublicKeyId = state.dpnsPublicKeyId;
+  if (state.dpnsRegistrationProgress !== undefined) diag.dpnsRegistrationProgress = state.dpnsRegistrationProgress;
+  if (state.dpnsResults?.length) {
+    diag.dpnsResults = state.dpnsResults.map(r => ({
+      label: r.label,
+      success: r.success,
+      error: r.error ?? null,
+      isContested: r.isContested,
+    }));
+  }
+
+  // Identity management context
+  if (state.manageSigningKeyInfo) diag.manageSigningKeyInfo = state.manageSigningKeyInfo;
+  // Count only — ManageNewKeyConfig objects contain private key material
+  if (state.manageKeysToAdd?.length) diag.manageKeysToAddCount = state.manageKeysToAdd.length;
+  if (state.manageKeyIdsToDisable?.length) diag.manageKeyIdsToDisable = state.manageKeyIdsToDisable;
+
+  // Retry state
+  if (state.retryStatus) diag.retryStatus = state.retryStatus;
+
+  // Identity keys count (not the keys themselves)
+  if (state.identityKeys.length) diag.identityKeysCount = state.identityKeys.length;
+
+  return diag;
+}
+
 function renderErrorStep(state: BridgeState): HTMLElement {
   const div = document.createElement('div');
   div.className = 'error-step';
 
+  const diag = buildErrorDiagnostics(state);
+  const errorCode = String(diag.errorCode);
+  const errorLabel = String(diag.errorLabel);
+  const errorMessage = String(diag.message);
+  const failedStep = state.errorStep ? getStepDescription(state.errorStep) : undefined;
+
+  const failedStepHtml = failedStep
+    ? `<p class="error-failed-step">Failed during: ${escapeHtml(failedStep)}</p>`
+    : '';
+
+  // Build a concise technical summary from the diagnostic object
+  const techLines: string[] = [];
+  if (diag.errorStep) techLines.push(`Step: ${diag.errorStep}`);
+  if (diag.depositAddress) techLines.push(`Deposit: ${diag.depositAddress}`);
+  if (diag.txid) techLines.push(`TxID: ${diag.txid}`);
+  if (diag.identityId) techLines.push(`Identity: ${diag.identityId}`);
+  if (diag.targetIdentityId) techLines.push(`Target Identity: ${diag.targetIdentityId}`);
+  if (diag.recipientPlatformAddress) techLines.push(`Recipient: ${diag.recipientPlatformAddress}`);
+  if (diag.stack) techLines.push(`\nStack Trace:\n${diag.stack}`);
+
+  const techDetailsHtml = techLines.length > 0 ? `
+    <details class="error-technical">
+      <summary>Technical Details</summary>
+      <pre class="error-technical-content">${escapeHtml(techLines.join('\n'))}</pre>
+    </details>
+  ` : '';
+
   div.innerHTML = `
     <div class="error-icon">❌</div>
     <h2>Error</h2>
-    <p class="error-message">${state.error?.message || 'An unknown error occurred'}</p>
-    <button id="retry-btn" class="secondary-btn">Try Again</button>
+    <div class="error-code-badge">${escapeHtml(errorCode)}</div>
+    <p class="error-label">${escapeHtml(errorLabel)}</p>
+    ${failedStepHtml}
+    <p class="error-message">${escapeHtml(errorMessage)}</p>
+    ${techDetailsHtml}
+    <div class="error-actions">
+      <button id="retry-btn" class="secondary-btn">Try Again</button>
+      <button id="copy-error-btn" class="secondary-btn">Copy Error Details</button>
+    </div>
   `;
+
+  const copyBtn = div.querySelector('#copy-error-btn');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', () => {
+      const copyText = JSON.stringify(diag, null, 2);
+      navigator.clipboard.writeText(copyText).then(() => {
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => { copyBtn.textContent = 'Copy Error Details'; }, 2000);
+      }).catch(() => {
+        copyBtn.textContent = 'Copy failed';
+        setTimeout(() => { copyBtn.textContent = 'Copy Error Details'; }, 2000);
+      });
+    });
+  }
 
   return div;
 }
@@ -728,6 +1041,7 @@ function renderErrorStep(state: BridgeState): HTMLElement {
 export function createKeyBackup(state: BridgeState): string {
   const network = getNetwork(state.network);
   const isTopUp = state.mode === 'topup';
+  const isSendToAddress = state.mode === 'send_to_address';
 
   const backup: Record<string, unknown> = {
     network: state.network,
@@ -737,8 +1051,13 @@ export function createKeyBackup(state: BridgeState): string {
     txid: state.txid,
   };
 
+  // For send_to_address: include recipient address
+  if (isSendToAddress) {
+    backup.recipientPlatformAddress = state.recipientPlatformAddress;
+  }
+
   // For create mode: include mnemonic and identity keys
-  if (!isTopUp) {
+  if (!isTopUp && !isSendToAddress) {
     backup.mnemonic = state.mnemonic;
     backup.identityId = state.identityId;
     backup.identityKeys = state.identityKeys.map((key) => ({
@@ -782,10 +1101,14 @@ export function downloadKeyBackup(state: BridgeState): void {
   const blob = new Blob([backup], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const isTopUp = state.mode === 'topup';
+  const isSendToAddress = state.mode === 'send_to_address';
 
   // Generate descriptive filename based on mode and available data
   let filename: string;
-  if (isTopUp && state.targetIdentityId) {
+  if (isSendToAddress && state.recipientPlatformAddress) {
+    const addrShort = state.recipientPlatformAddress.slice(-8);
+    filename = `dash-send-to-address-${addrShort}-recovery.json`;
+  } else if (isTopUp && state.targetIdentityId) {
     // Top-up mode: include target identity ID for reference
     const idShort = state.targetIdentityId.slice(0, 8);
     filename = `dash-topup-${idShort}-recovery.json`;
@@ -794,7 +1117,7 @@ export function downloadKeyBackup(state: BridgeState): void {
   } else if (state.depositAddress) {
     // Use first/last chars of address for recognizability
     const addr = state.depositAddress;
-    const prefix = isTopUp ? 'dash-topup' : 'dash-keys';
+    const prefix = isSendToAddress ? 'dash-send' : isTopUp ? 'dash-topup' : 'dash-keys';
     filename = `${prefix}-${addr.slice(0, 6)}-${addr.slice(-4)}-pending.json`;
   } else {
     filename = `dash-keys-${Date.now()}.json`;
@@ -876,6 +1199,7 @@ function getSecurityLevelName(level: number): string {
 function renderDpnsEnterIdentityStep(state: BridgeState): HTMLElement {
   const div = document.createElement('div');
   div.className = 'dpns-enter-identity-step';
+  div.id = 'dpns-key-upload-dropzone';
 
   const headline = document.createElement('h2');
   headline.className = 'dpns-headline';
@@ -912,8 +1236,9 @@ function renderDpnsEnterIdentityStep(state: BridgeState): HTMLElement {
     keyValidationHtml = `<p class="key-status error">${escapeHtml(state.dpnsKeyValidationError!)}</p>`;
   }
 
-  // Always show both input fields
   form.innerHTML = `
+    ${renderKeyUploadSection('dpns-key-upload')}
+
     <div class="input-group">
       <label class="input-label">Identity ID</label>
       <input
@@ -1306,14 +1631,12 @@ function renderDpnsCompleteStep(state: BridgeState): HTMLElement {
 
   div.appendChild(resultsSection);
 
-  // Identity info
-  const identityInfo = document.createElement('div');
-  identityInfo.className = 'identity-info';
-  identityInfo.innerHTML = `
-    <label>Identity ID</label>
-    <code class="identity-id">${state.identityId || state.targetIdentityId || 'Unknown'}</code>
-  `;
-  div.appendChild(identityInfo);
+  // Identity info with copy + explorer link
+  const dpnsIdentityId = state.identityId || state.targetIdentityId || 'Unknown';
+  div.appendChild(renderIdSection('Identity ID', dpnsIdentityId, {
+    explorerHref: dpnsIdentityId !== 'Unknown' ? explorerUrl(state.network, 'identity', dpnsIdentityId) : undefined,
+    copyBtnId: 'copy-dpns-identity-btn',
+  }));
 
   // Action buttons
   const actionButtons = document.createElement('div');
@@ -1375,6 +1698,7 @@ function getKeyPurposeName(purpose: number): string {
 function renderManageEnterIdentityStep(state: BridgeState): HTMLElement {
   const div = document.createElement('div');
   div.className = 'manage-enter-identity-step';
+  div.id = 'manage-key-upload-dropzone';
 
   const headline = document.createElement('h2');
   headline.className = 'manage-headline';
@@ -1411,6 +1735,8 @@ function renderManageEnterIdentityStep(state: BridgeState): HTMLElement {
   }
 
   form.innerHTML = `
+    ${renderKeyUploadSection('manage-key-upload')}
+
     <div class="input-group">
       <label class="input-label">Identity ID</label>
       <input
@@ -1727,14 +2053,12 @@ function renderManageCompleteStep(state: BridgeState): HTMLElement {
     div.appendChild(errorMsg);
   }
 
-  // Identity info
-  const identityInfo = document.createElement('div');
-  identityInfo.className = 'identity-info';
-  identityInfo.innerHTML = `
-    <label>Identity ID</label>
-    <code class="identity-id">${state.targetIdentityId || 'Unknown'}</code>
-  `;
-  div.appendChild(identityInfo);
+  // Identity info with copy + explorer link
+  const manageIdentityId = state.targetIdentityId || 'Unknown';
+  div.appendChild(renderIdSection('Identity ID', manageIdentityId, {
+    explorerHref: manageIdentityId !== 'Unknown' ? explorerUrl(state.network, 'identity', manageIdentityId) : undefined,
+    copyBtnId: 'copy-manage-identity-btn',
+  }));
 
   // Action buttons
   const actionButtons = document.createElement('div');
@@ -1761,6 +2085,430 @@ function renderManageCompleteStep(state: BridgeState): HTMLElement {
   actionButtons.appendChild(startOverBtn);
 
   div.appendChild(actionButtons);
+
+  return div;
+}
+
+// ============================================================================
+// Contract Registration Steps
+// ============================================================================
+
+/**
+ * Render the fee breakdown table used by both the enter-contract and review steps.
+ */
+function renderFeeTable(estimate: NonNullable<BridgeState['contractEstimate']>): string {
+  const feeRows = estimate.lineItems.map(item =>
+    `<tr><td>${escapeHtml(item.label)}</td><td class="num">${item.count}</td><td class="num">${(item.totalCostCredits / 100_000_000_000).toFixed(2)}</td></tr>`
+  ).join('');
+  const totalDash = estimate.totalDash.toFixed(2);
+  return `
+    <div class="fee-breakdown">
+      <h4>Registration Fee</h4>
+      <table class="fee-table">
+        <thead><tr><th>Item</th><th class="num">Count</th><th class="num">Dash</th></tr></thead>
+        <tbody>${feeRows}</tbody>
+        <tfoot><tr class="total-row"><td><strong>Total</strong></td><td></td><td class="num"><strong>${totalDash} Dash</strong></td></tr></tfoot>
+      </table>
+    </div>`;
+}
+
+function renderContractChooseIdentityStep(_state: BridgeState): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'dpns-choose-identity-step';
+
+  const headline = document.createElement('h2');
+  headline.className = 'dpns-headline';
+  headline.textContent = 'Register a Data Contract';
+  div.appendChild(headline);
+
+  const subtitle = document.createElement('p');
+  subtitle.className = 'dpns-subtitle';
+  subtitle.textContent = 'Publish a data contract on Dash Platform. You\'ll need an identity to own the contract.';
+  div.appendChild(subtitle);
+
+  const choiceButtons = document.createElement('div');
+  choiceButtons.className = 'dpns-choice-buttons';
+  choiceButtons.innerHTML = `
+    <button id="contract-choose-new-btn" class="mode-btn primary-btn">
+      <span class="mode-label">Create New Identity</span>
+      <span class="mode-desc">We'll create one for you with the exact funds needed</span>
+    </button>
+    <button id="contract-choose-existing-btn" class="mode-btn secondary-btn">
+      <span class="mode-label">Use Existing Identity</span>
+      <span class="mode-desc">Use an identity you already have</span>
+    </button>
+  `;
+  div.appendChild(choiceButtons);
+
+  const navButtons = document.createElement('div');
+  navButtons.className = 'nav-buttons';
+  const backBtn = document.createElement('button');
+  backBtn.id = 'contract-back-btn';
+  backBtn.className = 'secondary-btn';
+  backBtn.textContent = 'Back';
+  navButtons.appendChild(backBtn);
+  div.appendChild(navButtons);
+
+  return div;
+}
+
+function renderContractEnterIdentityStep(state: BridgeState): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'dpns-enter-identity-step';
+  div.id = 'contract-key-upload-dropzone';
+
+  const headline = document.createElement('h2');
+  headline.className = 'dpns-headline';
+  headline.textContent = 'Enter Your Identity';
+  div.appendChild(headline);
+
+  const isFetching = state.contractIdentityFetching === true;
+  const hasFetched = state.contractIdentityKeys !== undefined;
+  const hasFetchError = state.contractIdentityFetchError !== undefined;
+  const hasValidatedKey = state.contractKeyValidated === true;
+  const hasKeyError = state.contractKeyValidationError !== undefined;
+
+  let identityStatusHtml = '';
+  if (isFetching) {
+    identityStatusHtml = '<p class="identity-status loading">Fetching identity...</p>';
+  } else if (hasFetchError) {
+    identityStatusHtml = `<p class="identity-status error">${escapeHtml(state.contractIdentityFetchError!)}</p>`;
+  } else if (hasFetched) {
+    const keyCount = state.contractIdentityKeys!.length;
+    const balanceStr = state.contractIdentityBalance !== undefined
+      ? ` &mdash; Balance: ${(state.contractIdentityBalance / 100_000_000_000).toFixed(4)} Dash`
+      : '';
+    identityStatusHtml = `<p class="identity-status success">Identity found with ${keyCount} key${keyCount !== 1 ? 's' : ''}${balanceStr}</p>`;
+  }
+
+  let keyValidationHtml = '';
+  if (hasValidatedKey) {
+    keyValidationHtml = '<p class="key-status success">Key validated</p>';
+  } else if (hasKeyError) {
+    keyValidationHtml = `<p class="key-status error">${escapeHtml(state.contractKeyValidationError!)}</p>`;
+  }
+
+  const form = document.createElement('div');
+  form.className = 'dpns-identity-form';
+  form.innerHTML = `
+    ${renderKeyUploadSection('contract-key-upload')}
+
+    <div class="input-group">
+      <label class="input-label">Identity ID</label>
+      <input
+        type="text"
+        id="contract-identity-id-input"
+        class="dpns-input"
+        placeholder="Your 44-character identity ID..."
+        value="${state.targetIdentityId || ''}"
+        ${isFetching ? 'disabled' : ''}
+      />
+      <p class="input-hint">The Base58 identifier for your identity</p>
+      ${identityStatusHtml}
+    </div>
+
+    <div class="input-group">
+      <label class="input-label">Private Key (WIF)</label>
+      <input
+        type="password"
+        id="contract-private-key-input"
+        class="dpns-input"
+        placeholder="Your private key in WIF format..."
+        value="${state.contractPrivateKeyWif || ''}"
+      />
+      <p class="input-hint">An AUTHENTICATION key with CRITICAL or HIGH security level</p>
+      ${keyValidationHtml}
+    </div>
+  `;
+  div.appendChild(form);
+
+  const navButtons = document.createElement('div');
+  navButtons.className = 'nav-buttons';
+
+  const backBtn = document.createElement('button');
+  backBtn.id = 'contract-back-btn';
+  backBtn.className = 'secondary-btn';
+  backBtn.textContent = 'Back';
+  navButtons.appendChild(backBtn);
+
+  const continueBtn = document.createElement('button');
+  continueBtn.id = 'contract-identity-continue-btn';
+  continueBtn.className = 'primary-btn';
+  continueBtn.textContent = 'Continue';
+  if (!hasValidatedKey) {
+    continueBtn.setAttribute('disabled', 'true');
+  }
+  navButtons.appendChild(continueBtn);
+
+  div.appendChild(navButtons);
+  return div;
+}
+
+function renderContractEnterContractStep(state: BridgeState): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'contract-enter-step';
+
+  const json = state.contractJson || '';
+  const parseError = state.contractParseError;
+  const parsed = state.contractParsed;
+  const estimate = state.contractEstimate;
+  const isNew = state.contractIdentitySource === 'new';
+
+  let contractDisplayHtml = '';
+  if (parseError) {
+    contractDisplayHtml = `<div class="contract-error">${escapeHtml(parseError)}</div>`;
+  } else if (parsed && estimate) {
+    let docTypesHtml = '';
+    if (parsed.documentTypes.length > 0) {
+      docTypesHtml = parsed.documentTypes.map(dt => {
+        const indexBadges = dt.indexes.map(idx => {
+          const type = idx.contested ? 'contested' : idx.unique ? 'unique' : 'non-unique';
+          return `<span class="index-badge badge-${type}">${escapeHtml(idx.name)} (${type})</span>`;
+        }).join(' ');
+        return `<div class="doc-type"><strong>${escapeHtml(dt.name)}</strong> ${indexBadges || '<span class="no-indexes">no indexes</span>'}</div>`;
+      }).join('');
+    }
+
+    let tokensHtml = '';
+    if (parsed.tokens.length > 0) {
+      tokensHtml = `<div class="contract-section"><h4>Tokens</h4><p>${parsed.tokens.length} token${parsed.tokens.length !== 1 ? 's' : ''}</p></div>`;
+    }
+
+    let keywordsHtml = '';
+    if (parsed.keywords.length > 0) {
+      keywordsHtml = `<div class="contract-section"><h4>Keywords</h4><p>${parsed.keywords.map(k => escapeHtml(k)).join(', ')}</p></div>`;
+    }
+
+    const totalDash = estimate.totalDash.toFixed(2);
+
+    let depositHtml = '';
+    if (isNew) {
+      const CREDITS_PER_SATOSHI = 1000; // 1 Dash = 100M satoshis = 100B credits
+      const feeSatoshis = Math.ceil(estimate.totalCredits / CREDITS_PER_SATOSHI);
+      const depositSatoshis = feeSatoshis + 10_000_000 + 1000;
+      const depositDash = (depositSatoshis / 100_000_000).toFixed(4);
+      depositHtml = `<div class="deposit-estimate"><strong>Deposit needed:</strong> ${depositDash} DASH <span class="deposit-detail">(${totalDash} fee + 0.1 buffer + tx fee)</span></div>`;
+    }
+
+    let balanceWarningHtml = '';
+    if (!isNew && state.contractIdentityBalance !== undefined) {
+      if (state.contractIdentityBalance < estimate.totalCredits) {
+        const shortfall = ((estimate.totalCredits - state.contractIdentityBalance) / 100_000_000_000).toFixed(4);
+        balanceWarningHtml = `<div class="balance-warning">Insufficient balance. Need ${shortfall} more Dash in credits.</div>`;
+      }
+    }
+
+    contractDisplayHtml = `
+      <div class="contract-display">
+        ${docTypesHtml ? `<div class="contract-section"><h4>Document Types</h4>${docTypesHtml}</div>` : ''}
+        ${tokensHtml}
+        ${keywordsHtml}
+        ${renderFeeTable(estimate)}
+        ${depositHtml}
+        ${balanceWarningHtml}
+      </div>
+    `;
+  }
+
+  const canContinue = parsed && estimate && !parseError;
+
+  const headline = document.createElement('h2');
+  headline.className = 'dpns-headline';
+  headline.textContent = 'Enter Contract';
+  div.appendChild(headline);
+
+  const subtitle = document.createElement('p');
+  subtitle.className = 'dpns-subtitle';
+  subtitle.textContent = 'Paste your data contract JSON below. The registration fee will be calculated automatically.';
+  div.appendChild(subtitle);
+
+  const form = document.createElement('div');
+  form.className = 'dpns-identity-form';
+  form.innerHTML = `
+    <div class="input-group">
+      <label class="input-label">Contract JSON</label>
+      <textarea id="contract-json-input" class="dpns-input contract-textarea"
+                spellcheck="false" placeholder='{ "documentSchemas": { ... } }'>${escapeHtml(json)}</textarea>
+    </div>
+    ${contractDisplayHtml}
+  `;
+  div.appendChild(form);
+
+  const navButtons = document.createElement('div');
+  navButtons.className = 'nav-buttons';
+
+  const backBtn = document.createElement('button');
+  backBtn.id = 'contract-back-btn';
+  backBtn.className = 'secondary-btn';
+  backBtn.textContent = 'Back';
+  navButtons.appendChild(backBtn);
+
+  // Deep link copy button inline with nav (only when contract is valid)
+  if (parsed && json) {
+    const copyLinkBtn = document.createElement('button');
+    copyLinkBtn.id = 'contract-copy-link-btn';
+    copyLinkBtn.className = 'tertiary-btn';
+    copyLinkBtn.textContent = 'Copy Link';
+    copyLinkBtn.title = 'Copy a shareable URL that pre-fills this contract';
+    navButtons.appendChild(copyLinkBtn);
+  }
+
+  const reviewBtn = document.createElement('button');
+  reviewBtn.id = 'contract-review-btn';
+  reviewBtn.className = 'primary-btn';
+  reviewBtn.textContent = 'Review';
+  if (!canContinue) reviewBtn.setAttribute('disabled', 'true');
+  navButtons.appendChild(reviewBtn);
+
+  div.appendChild(navButtons);
+  return div;
+}
+
+function renderContractReviewStep(state: BridgeState): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'contract-review-step';
+
+  const estimate = state.contractEstimate;
+  const parsed = state.contractParsed;
+  const isNew = state.contractIdentitySource === 'new';
+
+  if (!estimate || !parsed) {
+    div.innerHTML = '<p>No contract data available.</p>';
+    return div;
+  }
+
+  const headline = document.createElement('h2');
+  headline.className = 'dpns-headline';
+  headline.textContent = 'Review Contract';
+  div.appendChild(headline);
+
+  const totalIndexes = parsed.documentTypes.reduce((s, dt) => s + dt.indexes.length, 0);
+
+  const statsDiv = document.createElement('div');
+  statsDiv.className = 'contract-complete-summary';
+  statsDiv.innerHTML = `
+    <div class="complete-stats">
+      <div class="stat"><span class="stat-value">${parsed.documentTypes.length}</span><span class="stat-label">doc types</span></div>
+      <div class="stat"><span class="stat-value">${totalIndexes}</span><span class="stat-label">indexes</span></div>
+      <div class="stat"><span class="stat-value">${parsed.tokens.length}</span><span class="stat-label">tokens</span></div>
+      <div class="stat"><span class="stat-value">${estimate.totalDash.toFixed(2)}</span><span class="stat-label">Dash fee</span></div>
+    </div>
+  `;
+  div.appendChild(statsDiv);
+
+  const feeDiv = document.createElement('div');
+  feeDiv.innerHTML = renderFeeTable(estimate);
+  div.appendChild(feeDiv);
+
+  // Deposit / identity info callout
+  if (isNew && !state.contractFromIdentityCreation) {
+    const depositDash = state.minimumDeposit ? (state.minimumDeposit / 100_000_000).toFixed(4) : '?';
+    const depositInfo = document.createElement('div');
+    depositInfo.className = 'deposit-estimate';
+    depositInfo.innerHTML = `A new identity will be created with a deposit of <strong>${depositDash} DASH</strong>. After identity creation, the contract will be published automatically.`;
+    div.appendChild(depositInfo);
+  } else {
+    const idLabel = state.identityId || state.targetIdentityId || '';
+    if (idLabel) {
+      const identityInfo = document.createElement('p');
+      identityInfo.className = 'review-note';
+      identityInfo.innerHTML = `Publishing with identity <code>${escapeHtml(idLabel)}</code>`;
+      div.appendChild(identityInfo);
+    }
+  }
+
+  // Action buttons
+  const navButtons = document.createElement('div');
+  navButtons.className = 'nav-buttons';
+
+  const backBtn = document.createElement('button');
+  backBtn.id = 'contract-back-btn';
+  backBtn.className = 'secondary-btn';
+  backBtn.textContent = 'Back';
+  navButtons.appendChild(backBtn);
+
+  if (isNew && !state.contractFromIdentityCreation) {
+    const startBridgeBtn = document.createElement('button');
+    startBridgeBtn.id = 'contract-start-bridge-btn';
+    startBridgeBtn.className = 'primary-btn';
+    startBridgeBtn.textContent = 'Continue';
+    navButtons.appendChild(startBridgeBtn);
+  } else {
+    const publishBtn = document.createElement('button');
+    publishBtn.id = 'contract-publish-btn';
+    publishBtn.className = 'primary-btn';
+    publishBtn.textContent = 'Publish Contract';
+    navButtons.appendChild(publishBtn);
+  }
+
+  div.appendChild(navButtons);
+  return div;
+}
+
+function renderContractCompleteStep(state: BridgeState): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'complete-step';
+
+  const contractId = state.contractRegisteredId || 'Unknown';
+  const identityId = state.identityId || state.targetIdentityId || '';
+  const estimate = state.contractEstimate;
+  const parsed = state.contractParsed;
+  // Success header
+  const header = document.createElement('div');
+  header.className = 'contract-complete-header';
+  header.innerHTML = `
+    <div class="success-icon">&#10003;</div>
+    <h2 class="complete-headline">Contract Published!</h2>
+    <p class="complete-subtitle">Your data contract is now live on Dash Platform.</p>
+  `;
+  div.appendChild(header);
+
+  // Contract ID with copy + explorer
+  div.appendChild(renderIdSection('Contract ID', contractId, {
+    explorerHref: explorerUrl(state.network, 'dataContract', contractId),
+    copyBtnId: 'copy-contract-id-btn',
+  }));
+
+  // Owner identity with copy + explorer
+  if (identityId) {
+    div.appendChild(renderIdSection('Owner Identity', identityId, {
+      explorerHref: explorerUrl(state.network, 'identity', identityId),
+      copyBtnId: 'copy-identity-id-btn',
+    }));
+  }
+
+  // Fee summary (what was paid)
+  if (estimate && parsed) {
+    const summaryDiv = document.createElement('div');
+    summaryDiv.className = 'contract-complete-summary';
+    summaryDiv.innerHTML = `
+      <div class="complete-stats">
+        <div class="stat"><span class="stat-value">${parsed.documentTypes.length}</span><span class="stat-label">doc types</span></div>
+        <div class="stat"><span class="stat-value">${parsed.documentTypes.reduce((s, dt) => s + dt.indexes.length, 0)}</span><span class="stat-label">indexes</span></div>
+        <div class="stat"><span class="stat-value">${parsed.tokens.length}</span><span class="stat-label">tokens</span></div>
+        <div class="stat"><span class="stat-value">${estimate.totalDash.toFixed(2)}</span><span class="stat-label">Dash fee</span></div>
+      </div>
+    `;
+    div.appendChild(summaryDiv);
+  }
+
+  // Key backup (for new identity route)
+  if (state.contractFromIdentityCreation) {
+    const backupSection = document.createElement('div');
+    backupSection.className = 'backup-section';
+    backupSection.innerHTML = `
+      <button id="download-keys-btn" class="primary-btn">Download Key Backup</button>
+      <p class="backup-warning">Keys cannot be recovered if lost.</p>
+    `;
+    div.appendChild(backupSection);
+  }
+
+  // Start over
+  const startOverBtn = document.createElement('button');
+  startOverBtn.id = 'retry-btn';
+  startOverBtn.className = 'secondary-btn';
+  startOverBtn.textContent = 'Start Over';
+  div.appendChild(startOverBtn);
 
   return div;
 }

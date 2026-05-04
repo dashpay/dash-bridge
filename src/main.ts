@@ -1,11 +1,12 @@
-import { getNetwork } from './config.js';
+import { getNetwork, MAINNET, TESTNET } from './config.js';
 import { publicKeyToAddress, signTransaction, generateKeyPair } from './crypto/index.js';
 import { deriveAssetLockKeyPair } from './crypto/hd.js';
 import { createAssetLockTransaction, serializeTransaction } from './transaction/index.js';
 import { InsightClient } from './api/insight.js';
 import { DAPIClient } from './api/dapi.js';
 import { buildInstantAssetLockProof } from './proof/index.js';
-import { registerIdentity, topUpIdentity, updateIdentity, AddKeyConfig } from './platform/index.js';
+import { registerIdentity, topUpIdentity, updateIdentity, sendToPlatformAddress, AddKeyConfig } from './platform/index.js';
+import { bech32m } from '@scure/base';
 import { privateKeyToWif, bytesToHex } from './utils/index.js';
 import {
   createInitialState,
@@ -15,12 +16,16 @@ import {
   setTargetIdentityId,
   setOneTimeKeyPair,
   setTopUpComplete,
+  setRecipientPlatformAddress,
+  setSendToAddressComplete,
   setUtxoDetected,
   setTransactionSigned,
   setTransactionBroadcast,
   setInstantLockReceived,
   setIdentityRegistered,
   setError,
+  toError,
+  ErrorCodes,
   setDepositTimedOut,
   setNetwork,
   updateIdentityKey,
@@ -66,6 +71,19 @@ import {
   resetManageState,
   resetManageStateAndRefresh,
   setManageBackToEntry,
+  // Contract registration state functions
+  setContractIdentitySource,
+  setContractIdentityFetching,
+  setContractIdentityFetched,
+  setContractIdentityFetchError,
+  setContractKeyValidated,
+  setContractKeyValidationError,
+  setContractJson,
+  setContractReview,
+  setContractRegistering,
+  setContractComplete,
+  setModeContractFromIdentity,
+  setContractStartBridge,
   // Faucet state functions
   setFaucetSolvingPow,
   setFaucetRequesting,
@@ -91,6 +109,8 @@ import {
   getPurposeName,
   generateIdentityKey,
 } from './crypto/keys.js';
+import { publishContract, extractDocumentSchemas } from './platform/contract.js';
+import { estimateContractFee, parseContractJson } from 'dash-contract-fee-estimator';
 import type {
   BridgeState,
   KeyType,
@@ -223,14 +243,49 @@ function waitForE2EMockAdvance(timeoutMs = E2E_MOCK_ADVANCE_TIMEOUT_MS): Promise
  * Initialize the application
  */
 function init() {
-  // Get network from URL or default to testnet
   const urlParams = new URLSearchParams(window.location.search);
-  const network = urlParams.get('network') === 'mainnet' ? 'mainnet' : 'testnet';
+
+  // Infer network from ?address= param prefix, falling back to ?network= param
+  let network: 'testnet' | 'mainnet' = urlParams.get('network') === 'mainnet' ? 'mainnet' : 'testnet';
+  const addressParam = urlParams.get('address')?.trim();
+  if (addressParam) {
+    try {
+      const decoded = bech32m.decode(addressParam as `${string}1${string}`);
+      if (decoded.prefix === MAINNET.platformHrp) network = 'mainnet';
+      else if (decoded.prefix === TESTNET.platformHrp) network = 'testnet';
+    } catch {
+      // Invalid address — will be ignored below
+    }
+  }
 
   // Initialize state
   state = createInitialState(network);
   insightClient = new InsightClient(getNetwork(network));
   dapiClient = new DAPIClient({ network });
+
+  // Deep-link: ?address=<bech32m> opens send-to-address mode with address pre-filled
+  if (addressParam && validatePlatformAddress(addressParam, network)) {
+    state = setMode(state, 'send_to_address');
+    state = setRecipientPlatformAddress(state, addressParam);
+  }
+
+  // Deep-link: ?mode=contract opens contract registration mode
+  const modeParam = urlParams.get('mode');
+  if (modeParam === 'contract') {
+    state = setMode(state, 'contract');
+    const contractParam = urlParams.get('contract');
+    if (contractParam) {
+      try {
+        const jsonStr = atob(contractParam.replace(/-/g, '+').replace(/_/g, '/'));
+        const json = JSON.parse(jsonStr);
+        const parsed = parseContractJson(json);
+        const estimate = estimateContractFee(parsed);
+        state = setContractJson(state, JSON.stringify(json, null, 2), parsed, estimate, undefined);
+      } catch {
+        // Invalid contract param, ignore
+      }
+    }
+  }
 
   // Render UI
   const container = document.getElementById('app');
@@ -323,11 +378,24 @@ function setupEventListeners(container: HTMLElement) {
     });
   }
 
-  // Back button (configure keys or enter identity -> init)
+  // Platform Address mode button (init page)
+  const modeSendToAddressBtn = container.querySelector('#mode-send-to-address-btn');
+  if (modeSendToAddressBtn) {
+    modeSendToAddressBtn.addEventListener('click', () => {
+      updateState(setMode(state, 'send_to_address'));
+    });
+  }
+
+  // Back button (configure keys, enter identity, enter recipient address -> init)
   const backBtn = container.querySelector('#back-btn');
   if (backBtn) {
     backBtn.addEventListener('click', () => {
-      updateState(setStep(state, 'init'));
+      if (state.contractFromIdentityCreation) {
+        // Return to contract review instead of init
+        updateState({ ...state, mode: 'contract', step: 'contract_review' });
+      } else {
+        updateState(setStep(state, 'init'));
+      }
     });
   }
 
@@ -348,6 +416,33 @@ function setupEventListeners(container: HTMLElement) {
         startTopUp();
       } else {
         showValidationError('Please enter a valid identity ID (44 character Base58 string)');
+      }
+    });
+  }
+
+  // Recipient platform address input (send_to_address mode)
+  const recipientAddressInput = container.querySelector('#recipient-address-input');
+  if (recipientAddressInput) {
+    recipientAddressInput.addEventListener('input', (e) => {
+      const value = (e.target as HTMLInputElement).value.trim();
+      updateState(setRecipientPlatformAddress(state, value));
+    });
+  }
+
+  // Continue send to address button
+  const continueSendToAddressBtn = container.querySelector('#continue-send-to-address-btn');
+  if (continueSendToAddressBtn) {
+    continueSendToAddressBtn.addEventListener('click', () => {
+      const address = state.recipientPlatformAddress;
+      if (address && validatePlatformAddress(address, state.network)) {
+        startSendToAddress();
+      } else {
+        const prefix = `${getNetwork(state.network).platformHrp}1`;
+        const msg = document.getElementById('recipient-address-validation-msg');
+        if (msg) {
+          msg.textContent = `Please enter a valid bech32m platform address (starts with ${prefix})`;
+          msg.classList.remove('hidden');
+        }
       }
     });
   }
@@ -486,7 +581,8 @@ function setupEventListeners(container: HTMLElement) {
       } else {
         updateState(setError(
           state,
-          new Error('No valid key for DPNS registration. You need an AUTHENTICATION key with CRITICAL or HIGH security level.')
+          new Error('No valid key for DPNS registration. You need an AUTHENTICATION key with CRITICAL or HIGH security level.'),
+          ErrorCodes.CONFIG
         ));
       }
     });
@@ -1065,6 +1161,334 @@ function setupEventListeners(container: HTMLElement) {
       updateState(resetManageState(state));
     });
   }
+
+  // ============================================================================
+  // ============================================================================
+  // Key Backup Upload Handlers (shared across DPNS, manage, contract)
+  // ============================================================================
+
+  function wireKeyUpload(
+    inputId: string,
+    onParsed: (result: { identityId: string; privateKeyWif: string }) => void,
+  ) {
+    const fileInput = container.querySelector<HTMLInputElement>(`#${inputId}`);
+    const dropzone = container.querySelector<HTMLElement>(`#${inputId}-dropzone`);
+    if (!fileInput) return;
+
+    function handleFile(file: File) {
+      const statusEl = container.querySelector(`#${inputId}-status`);
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const json = JSON.parse(reader.result as string);
+          const parsed = parseKeyBackup(json);
+          if (!parsed) {
+            if (statusEl) { statusEl.textContent = 'No identity or keys found in file'; statusEl.className = 'key-upload-status error'; }
+            return;
+          }
+          if (statusEl) { statusEl.textContent = `Loaded: ${parsed.identityId.slice(0, 8)}... (${parsed.purpose} / ${parsed.securityLevel})`; statusEl.className = 'key-upload-status success'; }
+          onParsed(parsed);
+        } catch {
+          if (statusEl) { statusEl.textContent = 'Invalid JSON file'; statusEl.className = 'key-upload-status error'; }
+        }
+      };
+      reader.readAsText(file);
+    }
+
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files?.[0];
+      if (file) handleFile(file);
+    });
+
+    if (dropzone) {
+      dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
+      dropzone.addEventListener('dragleave', () => { dropzone.classList.remove('dragover'); });
+      dropzone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropzone.classList.remove('dragover');
+        const file = e.dataTransfer?.files[0];
+        if (file) handleFile(file);
+      });
+    }
+  }
+
+  // DPNS key upload — show loading, fetch identity, validate key, update once
+  wireKeyUpload('dpns-key-upload', async (result) => {
+    updateState({ ...setDpnsIdentityFetching(state, result.identityId), dpnsPrivateKeyWif: result.privateKeyWif });
+    try {
+      const keys = await getIdentityPublicKeys(result.identityId, state.network);
+      // Build final state in one shot: fetched keys + key validation result
+      let finalState = setDpnsIdentityFetched(state, keys);
+      finalState = { ...finalState, dpnsPrivateKeyWif: result.privateKeyWif };
+      const match = findMatchingKeyIndex(result.privateKeyWif, keys, state.network);
+      if (match && isPurposeAllowedForDpns(match.purpose) && isSecurityLevelAllowedForDpns(match.securityLevel)) {
+        finalState = setDpnsKeyValidated(finalState, match.keyId, result.privateKeyWif);
+      } else {
+        finalState = { ...finalState, dpnsKeyValidationError: match ? 'Key must be AUTHENTICATION with HIGH or CRITICAL level' : 'Key does not match any identity key' };
+      }
+      updateState(finalState);
+    } catch (error) {
+      updateState({ ...setDpnsIdentityFetchError(state, error instanceof Error ? error.message : String(error)), dpnsPrivateKeyWif: result.privateKeyWif });
+    }
+  });
+
+  // Manage key upload — show loading, fetch identity, validate key, update once
+  wireKeyUpload('manage-key-upload', async (result) => {
+    updateState({ ...setManageIdentityFetching(state, result.identityId), managePrivateKeyWif: result.privateKeyWif });
+    try {
+      const keys = await getIdentityPublicKeys(result.identityId, state.network);
+      let finalState = setManageIdentityFetched(state, keys);
+      finalState = { ...finalState, managePrivateKeyWif: result.privateKeyWif };
+      const match = findMatchingKeyIndex(result.privateKeyWif, keys, state.network);
+      if (match) {
+        finalState = setManageKeyValidated(finalState, match.keyId, match.securityLevel, result.privateKeyWif);
+      } else {
+        finalState = { ...finalState, manageKeyValidationError: 'Key does not match any identity key' };
+      }
+      updateState(finalState);
+    } catch (error) {
+      updateState({ ...setManageIdentityFetchError(state, error instanceof Error ? error.message : String(error)), managePrivateKeyWif: result.privateKeyWif });
+    }
+  });
+
+  // Contract key upload — show loading, fetch identity + balance, validate key, update once
+  wireKeyUpload('contract-key-upload', async (result) => {
+    updateState({
+      ...setContractIdentityFetching(setTargetIdentityId(state, result.identityId), result.identityId),
+      contractPrivateKeyWif: result.privateKeyWif,
+    });
+    try {
+      const keys = await getIdentityPublicKeys(result.identityId, state.network);
+      let balance: number | undefined;
+      try {
+        const { EvoSDK } = await import('@dashevo/evo-sdk');
+        const sdk = state.network === 'mainnet' ? EvoSDK.mainnetTrusted() : EvoSDK.testnetTrusted();
+        await sdk.connect();
+        const br = await sdk.identities.balanceAndRevision(result.identityId);
+        balance = Number(br?.balance ?? 0n);
+      } catch { /* best-effort */ }
+      // Build final state: fetched + key WIF + validation — single updateState call
+      let finalState = setContractIdentityFetched(state, keys, balance);
+      finalState = { ...finalState, contractPrivateKeyWif: result.privateKeyWif };
+      const match = findMatchingKeyIndex(result.privateKeyWif, keys, state.network);
+      if (match && isPurposeAllowedForDpns(match.purpose) && isSecurityLevelAllowedForDpns(match.securityLevel)) {
+        finalState = setContractKeyValidated(finalState, match.keyId, result.privateKeyWif);
+      } else {
+        finalState = { ...finalState, contractKeyValidationError: match ? 'Key must be AUTHENTICATION with HIGH or CRITICAL level' : 'Key does not match any identity key' };
+      }
+      updateState(finalState);
+    } catch (error) {
+      updateState({ ...setContractIdentityFetchError(state, error instanceof Error ? error.message : String(error)), contractPrivateKeyWif: result.privateKeyWif });
+    }
+  });
+
+  // ============================================================================
+  // Contract Registration Event Listeners
+  // ============================================================================
+
+  // Contract mode button (init page)
+  const modeContractBtn = container.querySelector('#mode-contract-btn');
+  if (modeContractBtn) {
+    modeContractBtn.addEventListener('click', () => {
+      updateState(setMode(state, 'contract'));
+    });
+  }
+
+  // Contract choose identity buttons
+  const contractChooseNewBtn = container.querySelector('#contract-choose-new-btn');
+  if (contractChooseNewBtn) {
+    contractChooseNewBtn.addEventListener('click', () => {
+      updateState(setContractIdentitySource(state, 'new'));
+    });
+  }
+
+  const contractChooseExistingBtn = container.querySelector('#contract-choose-existing-btn');
+  if (contractChooseExistingBtn) {
+    contractChooseExistingBtn.addEventListener('click', () => {
+      updateState(setContractIdentitySource(state, 'existing'));
+    });
+  }
+
+  // Contract from identity creation complete
+  const contractFromIdentityBtn = container.querySelector('#contract-from-identity-btn');
+  if (contractFromIdentityBtn) {
+    contractFromIdentityBtn.addEventListener('click', () => {
+      updateState(setModeContractFromIdentity(state));
+    });
+  }
+
+  // Contract identity ID input (existing identity route)
+  const contractIdentityIdInput = container.querySelector<HTMLInputElement>('#contract-identity-id-input');
+  if (contractIdentityIdInput) {
+    const fetchContractIdentity = async () => {
+      const identityId = contractIdentityIdInput.value.trim();
+      if (!validateIdentityId(identityId)) return;
+
+      updateState(setContractIdentityFetching(state, identityId));
+
+      try {
+        const keys = await getIdentityPublicKeys(identityId, state.network);
+        // Also fetch balance for the existing identity credit check
+        let balance: number | undefined;
+        try {
+          const { EvoSDK } = await import('@dashevo/evo-sdk');
+          const sdk = state.network === 'mainnet' ? EvoSDK.mainnetTrusted() : EvoSDK.testnetTrusted();
+          await sdk.connect();
+          const result = await sdk.identities.balanceAndRevision(identityId);
+          balance = Number(result?.balance ?? 0n);
+        } catch {
+          // Balance fetch is best-effort; continue without it
+        }
+        updateState(setContractIdentityFetched(state, keys, balance));
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        updateState(setContractIdentityFetchError(state, msg));
+      }
+    };
+
+    contractIdentityIdInput.addEventListener('blur', fetchContractIdentity);
+    contractIdentityIdInput.addEventListener('paste', () => setTimeout(fetchContractIdentity, 50));
+  }
+
+  // Contract private key input (existing identity route)
+  const contractPrivateKeyInput = container.querySelector<HTMLInputElement>('#contract-private-key-input');
+  if (contractPrivateKeyInput) {
+    const validateContractPrivateKey = async () => {
+      const privateKeyWif = contractPrivateKeyInput.value.trim();
+      if (!privateKeyWif || !state.contractIdentityKeys) return;
+
+      try {
+        const match = findMatchingKeyIndex(privateKeyWif, state.contractIdentityKeys, state.network);
+        if (!match) {
+          updateState(setContractKeyValidationError(state, 'Key does not match any identity key'));
+          return;
+        }
+        // Must be AUTHENTICATION with HIGH or CRITICAL
+        if (!isPurposeAllowedForDpns(match.purpose)) {
+          updateState(setContractKeyValidationError(state, `Key purpose must be AUTHENTICATION, got ${getPurposeName(match.purpose)}`));
+          return;
+        }
+        if (!isSecurityLevelAllowedForDpns(match.securityLevel)) {
+          updateState(setContractKeyValidationError(state, `Security level must be HIGH or CRITICAL, got ${getSecurityLevelName(match.securityLevel)}`));
+          return;
+        }
+        updateState(setContractKeyValidated(state, match.keyId, privateKeyWif));
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        updateState(setContractKeyValidationError(state, msg));
+      }
+    };
+
+    contractPrivateKeyInput.addEventListener('blur', validateContractPrivateKey);
+    contractPrivateKeyInput.addEventListener('paste', () => setTimeout(validateContractPrivateKey, 50));
+  }
+
+  // Contract identity continue button
+  const contractIdentityContinueBtn = container.querySelector('#contract-identity-continue-btn');
+  if (contractIdentityContinueBtn) {
+    contractIdentityContinueBtn.addEventListener('click', () => {
+      updateState({ ...state, step: 'contract_enter_contract' });
+    });
+  }
+
+  // Contract JSON textarea (debounced live parse)
+  const contractJsonInput = container.querySelector<HTMLTextAreaElement>('#contract-json-input');
+  if (contractJsonInput) {
+    let contractDebounceTimer: ReturnType<typeof setTimeout>;
+    contractJsonInput.addEventListener('input', () => {
+      clearTimeout(contractDebounceTimer);
+      contractDebounceTimer = setTimeout(() => {
+        const raw = contractJsonInput.value.trim();
+        if (!raw) {
+          updateState(setContractJson(state, '', undefined, undefined, undefined));
+          return;
+        }
+        try {
+          const json = JSON.parse(raw);
+          const parsed = parseContractJson(json);
+          const estimate = estimateContractFee(parsed);
+          updateState(setContractJson(state, raw, parsed, estimate, undefined));
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          updateState(setContractJson(state, raw, undefined, undefined, msg));
+        }
+      }, 300);
+    });
+  }
+
+  // Contract copy deep link button
+  const contractCopyLinkBtn = container.querySelector('#contract-copy-link-btn');
+  if (contractCopyLinkBtn) {
+    contractCopyLinkBtn.addEventListener('click', () => {
+      if (!state.contractJson) return;
+      try {
+        // Minify the JSON and base64url encode it
+        const minified = JSON.stringify(JSON.parse(state.contractJson));
+        const base64 = btoa(minified).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        const url = new URL(window.location.href);
+        url.search = '';
+        url.searchParams.set('network', state.network);
+        url.searchParams.set('mode', 'contract');
+        url.searchParams.set('contract', base64);
+        navigator.clipboard.writeText(url.toString()).then(() => {
+          contractCopyLinkBtn.textContent = 'Copied!';
+          setTimeout(() => { contractCopyLinkBtn.textContent = 'Copy Link'; }, 2000);
+        });
+      } catch {
+        // Clipboard write failed silently
+      }
+    });
+  }
+
+  // Contract review button
+  const contractReviewBtn = container.querySelector('#contract-review-btn');
+  if (contractReviewBtn) {
+    contractReviewBtn.addEventListener('click', () => {
+      updateState(setContractReview(state));
+    });
+  }
+
+  // Contract start bridge button (new identity route: from review → create mode)
+  const contractStartBridgeBtn = container.querySelector('#contract-start-bridge-btn');
+  if (contractStartBridgeBtn) {
+    contractStartBridgeBtn.addEventListener('click', () => {
+      updateState(setContractStartBridge(state));
+    });
+  }
+
+  // Contract publish button (existing identity or post-identity-creation)
+  const contractPublishBtn = container.querySelector('#contract-publish-btn');
+  if (contractPublishBtn) {
+    contractPublishBtn.addEventListener('click', startContractRegistration);
+  }
+
+  // Contract back buttons
+  const contractBackBtn = container.querySelector('#contract-back-btn');
+  if (contractBackBtn) {
+    contractBackBtn.addEventListener('click', () => {
+      switch (state.step) {
+        case 'contract_choose_identity':
+          updateState(createInitialState(state.network));
+          break;
+        case 'contract_enter_identity':
+          updateState({ ...state, step: 'contract_choose_identity' });
+          break;
+        case 'contract_enter_contract':
+          if (state.contractIdentitySource === 'existing') {
+            updateState({ ...state, step: 'contract_enter_identity' });
+          } else {
+            updateState({ ...state, step: 'contract_choose_identity' });
+          }
+          break;
+        case 'contract_review':
+          updateState({ ...state, step: 'contract_enter_contract' });
+          break;
+        default:
+          updateState(createInitialState(state.network));
+          break;
+      }
+    });
+  }
 }
 
 /**
@@ -1074,6 +1498,58 @@ function validateIdentityId(id?: string): boolean {
   if (!id) return false;
   // Dash identity IDs are Base58 encoded, typically 43-44 characters
   return /^[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(id);
+}
+
+/**
+ * Parse a key backup JSON file and extract identityId + best private key WIF.
+ * Prefers AUTHENTICATION keys with HIGH or CRITICAL security level, since those
+ * are required for DPNS and contract operations. MASTER keys are ranked lower
+ * because they are rejected by isPurposeAllowedForDpns/isSecurityLevelAllowedForDpns.
+ */
+function parseKeyBackup(json: unknown): { identityId: string; privateKeyWif: string; purpose: string; securityLevel: string } | null {
+  if (!json || typeof json !== 'object') return null;
+  const obj = json as Record<string, unknown>;
+  const identityId = (obj.identityId || obj.targetIdentityId) as string | undefined;
+  if (!identityId || typeof identityId !== 'string') return null;
+
+  const keys = obj.identityKeys as Array<Record<string, unknown>> | undefined;
+  if (!Array.isArray(keys) || keys.length === 0) return null;
+
+  const ranked = keys
+    .filter((k) => typeof k.privateKeyWif === 'string')
+    .sort((a, b) => {
+      // Prefer AUTHENTICATION purpose
+      const aAuth = a.purpose === 'AUTHENTICATION' ? 1 : 0;
+      const bAuth = b.purpose === 'AUTHENTICATION' ? 1 : 0;
+      if (aAuth !== bAuth) return bAuth - aAuth;
+      // Prefer HIGH/CRITICAL over MASTER (MASTER is not accepted for DPNS/contracts)
+      const levelOrder: Record<string, number> = { HIGH: 4, CRITICAL: 3, MEDIUM: 2, MASTER: 1 };
+      return (levelOrder[b.securityLevel as string] || 0) - (levelOrder[a.securityLevel as string] || 0);
+    });
+
+  if (ranked.length === 0) return null;
+  const best = ranked[0];
+  return {
+    identityId,
+    privateKeyWif: best.privateKeyWif as string,
+    purpose: (best.purpose as string) || 'UNKNOWN',
+    securityLevel: (best.securityLevel as string) || 'UNKNOWN',
+  };
+}
+
+/**
+ * Validate platform address format (bech32m, correct network prefix)
+ */
+function validatePlatformAddress(address: string, network: 'testnet' | 'mainnet'): boolean {
+  const trimmed = address.trim();
+  if (!trimmed) return false;
+
+  try {
+    const decoded = bech32m.decode(trimmed as `${string}1${string}`);
+    return decoded.prefix === getNetwork(network).platformHrp;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1138,7 +1614,7 @@ async function startTopUp() {
     // Step 2: Wait for deposit
     updateState(setStep(stateWithKeys, 'detecting_deposit'));
 
-    const minAmount = 300000; // 0.003 DASH minimum
+    const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
     const depositResult = await insightClient.waitForUtxo(
       depositAddress,
       minAmount,
@@ -1222,7 +1698,109 @@ async function startTopUp() {
       clearE2EMockAdvanceHook();
     }
     console.error('Top-up error:', error);
-    updateState(setError(state, error instanceof Error ? error : new Error(String(error))));
+    updateState(setError(state, toError(error)));
+  }
+}
+
+/**
+ * Start the send-to-platform-address process (asset lock → send to recipient address)
+ */
+async function startSendToAddress() {
+  try {
+    const network = getNetwork(state.network);
+
+    // Step 1: Generate random one-time key pair
+    updateState(setStep(state, 'generating_keys'));
+
+    const assetLockKeyPair = generateKeyPair();
+    const depositAddress = publicKeyToAddress(assetLockKeyPair.publicKey, network);
+
+    const stateWithKeys = setOneTimeKeyPair(state, assetLockKeyPair, depositAddress);
+    updateState(stateWithKeys);
+
+    // Auto-download key backup for safety
+    downloadKeyBackup(stateWithKeys);
+
+    // Step 2: Wait for deposit
+    updateState(setStep(stateWithKeys, 'detecting_deposit'));
+
+    const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
+    const depositResult = await insightClient.waitForUtxo(
+      depositAddress,
+      minAmount,
+      120000,
+      3000
+    );
+
+    if (!depositResult.utxo) {
+      updateState(setDepositTimedOut(state, true, depositResult.totalAmount));
+      return;
+    }
+
+    const utxo = depositResult.utxo;
+    updateState(setUtxoDetected(state, utxo));
+
+    // Step 3: Build transaction
+    updateState(setStep(state, 'building_transaction'));
+
+    const tx = createAssetLockTransaction(
+      utxo,
+      assetLockKeyPair.publicKey,
+      BigInt(network.minFee)
+    );
+
+    // Step 4: Sign transaction
+    updateState(setStep(state, 'signing_transaction'));
+
+    const signedTx = await signTransaction(
+      tx,
+      [utxo],
+      assetLockKeyPair.privateKey,
+      assetLockKeyPair.publicKey
+    );
+
+    const signedTxBytes = serializeTransaction(signedTx);
+    const signedTxHex = bytesToHex(signedTxBytes);
+
+    updateState(setTransactionSigned(state, signedTxHex));
+
+    // Step 5: Broadcast transaction
+    const txid = await insightClient.broadcastTransaction(signedTxHex);
+    updateState(setTransactionBroadcast(state, txid));
+
+    // Step 6: Wait for InstantSend lock
+    updateState(setStep(state, 'waiting_islock'));
+
+    const islockBytes = await dapiClient.waitForInstantSendLock(txid, 60000);
+
+    const assetLockProof = buildInstantAssetLockProof(
+      signedTxBytes,
+      islockBytes,
+      0
+    );
+
+    updateState(setInstantLockReceived(state, islockBytes, assetLockProof));
+
+    // Step 7: Send to the recipient platform address
+    updateState(setStep(state, 'sending_to_address'));
+
+    const assetLockPrivateKeyWif = privateKeyToWif(
+      assetLockKeyPair.privateKey,
+      network
+    );
+
+    await sendToPlatformAddress(
+      state.recipientPlatformAddress!,
+      assetLockProof,
+      assetLockPrivateKeyWif,
+      state.network
+    );
+
+    updateState(setSendToAddressComplete(state));
+
+  } catch (error) {
+    console.error('Send to platform address error:', error);
+    updateState(setError(state, toError(error)));
   }
 }
 
@@ -1283,7 +1861,7 @@ async function startBridge() {
     // Step 2: Wait for deposit
     updateState(setStep(state, 'detecting_deposit'));
 
-    const minAmount = 300000; // 0.003 DASH minimum
+    const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
     const depositResult = await insightClient.waitForUtxo(
       depositAddress,
       minAmount,
@@ -1367,12 +1945,15 @@ async function startBridge() {
     // (Earlier download at deposit step used pending filename)
     downloadKeyBackup(state);
 
+    // Auto-publish contract if this identity was created for contract registration
+    if (await autoPublishContractIfNeeded(result.identityId)) return;
+
   } catch (error) {
     if (isE2EMockMode()) {
       clearE2EMockAdvanceHook();
     }
     console.error('Bridge error:', error);
-    updateState(setError(state, error instanceof Error ? error : new Error(String(error))));
+    updateState(setError(state, toError(error)));
   }
 }
 
@@ -1388,7 +1969,7 @@ async function recheckDeposit() {
   // Reset timeout state and start polling again
   updateState(setDepositTimedOut(state, false, 0));
 
-  const minAmount = 300000; // 0.003 DASH minimum
+  const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
   const depositResult = await insightClient.waitForUtxo(
     state.depositAddress,
     minAmount,
@@ -1455,29 +2036,109 @@ async function recheckDeposit() {
 
     updateState(setInstantLockReceived(state, islockBytes, assetLockProof));
 
-    // Step 7: Register identity
-    updateState(setStep(state, 'registering_identity'));
-
+    // Step 7: Mode-specific final operation
     const assetLockPrivateKeyWif = privateKeyToWif(
       assetLockKeyPair.privateKey,
       network
     );
 
-    const result = await registerIdentity(
-      assetLockProof,
-      assetLockPrivateKeyWif,
-      state.identityKeys,
-      state.network
-    );
+    if (state.mode === 'topup') {
+      updateState(setStep(state, 'topping_up'));
+      await topUpIdentity(
+        state.targetIdentityId!,
+        assetLockProof,
+        assetLockPrivateKeyWif,
+        state.network
+      );
+      updateState(setTopUpComplete(state));
+    } else if (state.mode === 'send_to_address') {
+      updateState(setStep(state, 'sending_to_address'));
+      await sendToPlatformAddress(
+        state.recipientPlatformAddress!,
+        assetLockProof,
+        assetLockPrivateKeyWif,
+        state.network
+      );
+      updateState(setSendToAddressComplete(state));
+    } else if (state.mode === 'create') {
+      // Create mode — register identity
+      updateState(setStep(state, 'registering_identity'));
+      const result = await registerIdentity(
+        assetLockProof,
+        assetLockPrivateKeyWif,
+        state.identityKeys,
+        state.network
+      );
+      updateState(setIdentityRegistered(state, result.identityId));
+      // Auto-download final key backup on "Save your keys" page
+      downloadKeyBackup(state);
 
-    updateState(setIdentityRegistered(state, result.identityId));
-
-    // Auto-download final key backup on "Save your keys" page
-    downloadKeyBackup(state);
+      // Auto-publish contract if applicable
+      if (await autoPublishContractIfNeeded(result.identityId)) return;
+    } else {
+      throw new Error(`recheckDeposit: unexpected mode '${state.mode}'`);
+    }
 
   } catch (error) {
     console.error('Bridge error:', error);
-    updateState(setError(state, error instanceof Error ? error : new Error(String(error))));
+    updateState(setError(state, toError(error)));
+  }
+}
+
+// ============================================================================
+// Contract Registration Functions
+// ============================================================================
+
+/**
+ * Auto-publish contract after identity creation if the identity was created
+ * for contract registration. Finds the first suitable auth key and publishes.
+ * Returns true if contract publishing was initiated, false otherwise.
+ */
+async function autoPublishContractIfNeeded(identityId: string): Promise<boolean> {
+  if (!state.contractFromIdentityCreation || !state.contractJson) return false;
+
+  const authKey = state.identityKeys.find(
+    (k) => k.purpose === 'AUTHENTICATION' && (k.securityLevel === 'HIGH' || k.securityLevel === 'CRITICAL'),
+  );
+  if (!authKey) return false;
+
+  state = { ...state, contractPrivateKeyWif: authKey.privateKeyWif, contractPublicKeyId: authKey.id, identityId };
+  await startContractRegistration();
+  return true;
+}
+
+/**
+ * Start contract registration (for existing identity route or post-identity-creation)
+ */
+async function startContractRegistration() {
+  try {
+    const identityId = state.identityId || state.targetIdentityId;
+    const privateKeyWif = state.contractPrivateKeyWif;
+    const publicKeyId = state.contractPublicKeyId ?? 0;
+
+    if (!identityId || !privateKeyWif || !state.contractJson) {
+      throw new Error('Missing required data for contract registration');
+    }
+
+    updateState(setContractRegistering(state));
+
+    const contractJson = JSON.parse(state.contractJson);
+    const documentSchemas = extractDocumentSchemas(contractJson);
+    const tokens = contractJson.tokens;
+
+    const result = await publishContract(
+      identityId,
+      documentSchemas,
+      tokens,
+      publicKeyId,
+      privateKeyWif,
+      state.network,
+    );
+
+    updateState(setContractComplete(state, result.contractId));
+  } catch (error) {
+    console.error('Contract registration error:', error);
+    updateState(setError(state, toError(error)));
   }
 }
 
@@ -1514,7 +2175,7 @@ async function startDpnsCheck() {
 
   } catch (error) {
     console.error('DPNS check error:', error);
-    updateState(setError(state, error instanceof Error ? error : new Error(String(error))));
+    updateState(setError(state, toError(error)));
   }
 }
 
@@ -1575,7 +2236,7 @@ async function startDpnsRegistration() {
 
   } catch (error) {
     console.error('DPNS registration error:', error);
-    updateState(setError(state, error instanceof Error ? error : new Error(String(error))));
+    updateState(setError(state, toError(error)));
   }
 }
 
@@ -1714,7 +2375,7 @@ async function requestFaucetFunds() {
 
       try {
         const utxos = await insightClient.getUTXOs(addressToCheck);
-        const minAmount = 300000; // 0.003 DASH minimum
+        const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
         const sufficientUtxo = utxos.find(u => u.satoshis >= minAmount);
         if (sufficientUtxo && state.step === 'detecting_deposit') {
           updateState(setUtxoDetected(state, sufficientUtxo));

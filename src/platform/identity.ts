@@ -6,6 +6,7 @@ import {
   IdentityPublicKeyInCreation,
   IdentitySigner,
   PrivateKey,
+  PlatformAddressSigner,
 } from '@dashevo/evo-sdk';
 import { sha256 } from '@noble/hashes/sha256';
 import { ripemd160 } from '@noble/hashes/ripemd160';
@@ -38,6 +39,54 @@ function base64ToBytes(base64: string): Uint8Array {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
+}
+
+const PLATFORM_REQUEST_SETTINGS = {
+  connectTimeoutMs: 10000,
+  // wait_for_state_transition_result uses a 30s server-side wait window,
+  // so client-side request timeout must exceed that on runtimes that honor it.
+  timeoutMs: 40000,
+  retries: 2,
+  banFailedAddress: true,
+} as const;
+
+const PLATFORM_PUT_SETTINGS = {
+  ...PLATFORM_REQUEST_SETTINGS,
+} as const;
+
+const PLATFORM_OPERATION_TIMEOUT_MS = 45000;
+
+async function withOperationTimeout<T>(
+  promise: Promise<T>,
+  action: string,
+  timeoutMs: number = PLATFORM_OPERATION_TIMEOUT_MS
+): Promise<T> {
+  let timeoutId: number | undefined;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeoutId = window.setTimeout(() => {
+          reject(new Error(`Timed out while ${action}`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+    }
+  }
+}
+
+function createPlatformSdk(network: 'testnet' | 'mainnet'): EvoSDK {
+  const options = { settings: PLATFORM_REQUEST_SETTINGS };
+
+  if (network === 'mainnet') {
+    return EvoSDK.mainnetTrusted(options);
+  }
+
+  return EvoSDK.testnetTrusted(options);
 }
 
 /**
@@ -149,9 +198,7 @@ export async function registerIdentity(
   retryOptions?: RetryOptions
 ): Promise<{ identityId: string; balance: number; revision: number }> {
   // Initialize SDK for the target network
-  const sdk = network === 'mainnet'
-    ? EvoSDK.mainnetTrusted()
-    : EvoSDK.testnetTrusted();
+  const sdk = createPlatformSdk(network);
 
   // Connect to the network with retry
   console.log(`Connecting to ${network}...`);
@@ -188,14 +235,18 @@ export async function registerIdentity(
   const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);
 
   console.log('Creating identity with', identityKeys.length, 'keys...');
-  await withRetry(
-    () => sdk.identities.create({
-      identity,
-      assetLockProof: proof,
-      assetLockPrivateKey,
-      signer,
-    }),
-    retryOptions
+  await withOperationTimeout(
+    withRetry(
+      () => sdk.identities.create({
+        identity,
+        assetLockProof: proof,
+        assetLockPrivateKey,
+        signer,
+        settings: PLATFORM_PUT_SETTINGS,
+      }),
+      retryOptions
+    ),
+    'waiting for identity creation confirmation'
   );
 
   const balanceAndRevision = await withRetry(
@@ -230,9 +281,7 @@ export async function topUpIdentity(
   retryOptions?: RetryOptions
 ): Promise<{ success: boolean; balance?: number }> {
   // Initialize SDK for the target network (trusted mode required for identity fetch)
-  const sdk = network === 'mainnet'
-    ? EvoSDK.mainnetTrusted()
-    : EvoSDK.testnetTrusted();
+  const sdk = createPlatformSdk(network);
 
   // Connect to the network with retry
   console.log(`Connecting to ${network}...`);
@@ -255,13 +304,17 @@ export async function topUpIdentity(
   const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);
 
   console.log('Topping up identity:', identityId);
-  const result = await withRetry(
-    () => sdk.identities.topUp({
-      identity,
-      assetLockProof: proof,
-      assetLockPrivateKey,
-    }),
-    retryOptions
+  const result = await withOperationTimeout(
+    withRetry(
+      () => sdk.identities.topUp({
+        identity,
+        assetLockProof: proof,
+        assetLockPrivateKey,
+        settings: PLATFORM_PUT_SETTINGS,
+      }),
+      retryOptions
+    ),
+    'waiting for identity top-up confirmation'
   );
 
   console.log('Top-up result:', result);
@@ -308,9 +361,7 @@ export async function updateIdentity(
   retryOptions?: RetryOptions
 ): Promise<{ success: boolean; error?: string }> {
   // Initialize SDK for the target network (trusted mode required for identity fetch)
-  const sdk = network === 'mainnet'
-    ? EvoSDK.mainnetTrusted()
-    : EvoSDK.testnetTrusted();
+  const sdk = createPlatformSdk(network);
 
   console.log(`Connecting to ${network}...`);
   await withRetry(() => sdk.connect(), retryOptions);
@@ -367,18 +418,22 @@ export async function updateIdentity(
 
     console.log('Formatted keys to add:', JSON.stringify(formattedAddKeys, null, 2));
 
-    await withRetry(
-      () => sdk.identities.update({
-        identity,
-        signer,
-        addPublicKeys: formattedAddKeys.length > 0
-          ? formattedAddKeys
-          : undefined,
-        disablePublicKeys: disablePublicKeyIds.length > 0
-          ? disablePublicKeyIds
-          : undefined,
-      }),
-      retryOptions
+    await withOperationTimeout(
+      withRetry(
+        () => sdk.identities.update({
+          identity,
+          signer,
+          addPublicKeys: formattedAddKeys.length > 0
+            ? formattedAddKeys
+            : undefined,
+          disablePublicKeys: disablePublicKeyIds.length > 0
+            ? disablePublicKeyIds
+            : undefined,
+          settings: PLATFORM_PUT_SETTINGS,
+        }),
+        retryOptions
+      ),
+      'waiting for identity update confirmation'
     );
 
     console.log('Update completed');
@@ -395,4 +450,81 @@ export async function updateIdentity(
       error: errorMessage,
     };
   }
+}
+
+/**
+ * Send credits to a Platform address from an asset lock
+ *
+ * Accepts any bech32m platform address as the recipient.
+ * Uses sdk.addresses.fundFromAssetLock() with an empty PlatformAddressSigner
+ * since we don't have (or need) the recipient's private key.
+ */
+export async function sendToPlatformAddress(
+  recipientAddress: string,
+  assetLockProofData: AssetLockProofData,
+  assetLockPrivateKeyWif: string,
+  network: 'testnet' | 'mainnet',
+  retryOptions?: RetryOptions
+): Promise<{ success: boolean; recipientAddress: string }> {
+  const sdk = createPlatformSdk(network);
+
+  console.log(`Connecting to ${network}...`);
+  await withRetry(() => sdk.connect(), retryOptions);
+  console.log('Connected to Platform');
+
+  // Build typed AssetLockProof from raw components
+  const assetLockProof = AssetLockProof.createInstantAssetLockProof(
+    assetLockProofData.instantLockBytes,
+    assetLockProofData.transactionBytes,
+    assetLockProofData.outputIndex
+  );
+
+  // Build the asset lock private key
+  const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);
+
+  // Empty signer — recipient does not need to sign for receiving
+  const signer = new PlatformAddressSigner();
+
+  console.log('Sending to platform address:', recipientAddress);
+
+  // Pass output as a plain object — the WASM serde deserializer expects
+  // { address: string } not a PlatformAddressOutput WASM instance
+  const result = await withOperationTimeout(
+    withRetry(
+      () => sdk.addresses.fundFromAssetLock({
+        assetLockProof,
+        assetLockPrivateKey,
+        outputs: [{ address: recipientAddress }] as any,
+        signer,
+        feeStrategy: [{ type: 'reduceOutput', index: 0 }] as any,
+        settings: PLATFORM_PUT_SETTINGS,
+      }),
+      retryOptions
+    ),
+    'waiting for platform address funding confirmation'
+  );
+
+  console.log('Send to address result:', result);
+  if (result == null) {
+    throw new Error('Failed to send to platform address: fundFromAssetLock returned no result');
+  }
+  if (typeof result === 'object') {
+    const maybeResult = result as {
+      success?: unknown;
+      error?: unknown;
+    };
+
+    if (
+      maybeResult.success === false
+      || maybeResult.error !== undefined
+    ) {
+      const details = maybeResult.error ?? 'unknown error';
+      throw new Error(`Failed to send to platform address: ${String(details)}`);
+    }
+  }
+
+  return {
+    success: true,
+    recipientAddress,
+  };
 }
