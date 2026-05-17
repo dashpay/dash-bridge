@@ -146,8 +146,8 @@ function showCustomDevnetModal(existing?: { name?: string; insightApiUrl?: strin
       <label>JSON-RPC URL for IS locks (optional) <input id="d-rpc" placeholder="https://rpc.my-devnet.example.com"></label>
       <label>Faucet URL (optional) <input id="d-faucet"></label>
       <div class="devnet-modal-actions">
-        <button class="btn" id="d-cancel">Cancel</button>
-        <button class="btn primary" id="d-save">Save & Connect</button>
+        <button class="secondary-btn" id="d-cancel">Cancel</button>
+        <button class="primary-btn" id="d-save">Save &amp; Connect</button>
       </div>
     </div>
   `;
