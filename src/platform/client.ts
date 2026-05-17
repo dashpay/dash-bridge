@@ -27,6 +27,8 @@ export const PLATFORM_PUT_SETTINGS = {
 
 const PLATFORM_OPERATION_TIMEOUT_MS = 45000;
 
+const sdkCache = new Map<PlatformNetwork, EvoSDK>();
+
 function createPlatformSdk(network: PlatformNetwork): EvoSDK {
   const options = { settings: PLATFORM_REQUEST_SETTINGS };
 
@@ -41,13 +43,39 @@ export async function connectPlatformSdk(
   network: PlatformNetwork,
   retryOptions?: RetryOptions
 ): Promise<EvoSDK> {
+  const cached = sdkCache.get(network);
+  if (cached && cached.isConnected) {
+    return cached;
+  }
+
   const sdk = createPlatformSdk(network);
 
   console.log(`Connecting to ${network}...`);
   await withRetry(() => sdk.connect(), retryOptions);
   console.log('Connected to Platform');
 
+  sdkCache.set(network, sdk);
   return sdk;
+}
+
+export function disconnectPlatformSdk(network: PlatformNetwork): void {
+  sdkCache.delete(network);
+}
+
+function isConnectionError(error: unknown): boolean {
+  if (!(error && typeof error === 'object' && 'message' in error)) {
+    return false;
+  }
+  const msg = String((error as { message: unknown }).message).toLowerCase();
+  return (
+    msg.includes('transport') ||
+    msg.includes('connection') ||
+    msg.includes('econnrefused') ||
+    msg.includes('econnreset') ||
+    msg.includes('network') ||
+    msg.includes('unavailable') ||
+    msg.includes('failed to fetch')
+  );
 }
 
 export async function withConnectedPlatformSdk<T>(
@@ -56,7 +84,14 @@ export async function withConnectedPlatformSdk<T>(
   retryOptions?: RetryOptions
 ): Promise<T> {
   const sdk = await connectPlatformSdk(network, retryOptions);
-  return callback(sdk);
+  try {
+    return await callback(sdk);
+  } catch (error) {
+    if (isConnectionError(error)) {
+      disconnectPlatformSdk(network);
+    }
+    throw error;
+  }
 }
 
 export async function withPlatformOperationTimeout<T>(
