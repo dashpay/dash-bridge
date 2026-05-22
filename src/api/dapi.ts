@@ -85,17 +85,11 @@ export class DAPIClient {
 
       // Wait before next poll, but bail out immediately if aborted
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(() => {
-          signal?.removeEventListener('abort', onAbort);
-          resolve();
-        }, pollInterval);
-        const onAbort = (): void => {
+        const timer = setTimeout(resolve, pollInterval);
+        signal?.addEventListener('abort', () => {
           clearTimeout(timer);
           resolve();
-        };
-        if (signal) {
-          signal.addEventListener('abort', onAbort, { once: true });
-        }
+        }, { once: true });
       });
     }
 
