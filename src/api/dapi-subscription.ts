@@ -85,8 +85,13 @@ export class DAPISubscriptionClient {
     publicKey: Uint8Array,
     utxo: { txid: string; vout: number },
     timeoutMs: number = 60000,
-    onProgress?: (message: string) => void
+    onProgress?: (message: string) => void,
+    signal?: AbortSignal
   ): Promise<Uint8Array> {
+    if (signal?.aborted) {
+      throw new Error(`InstantSend lock subscription aborted for ${txid}`);
+    }
+
     onProgress?.('Creating bloom filter...');
     const bloomFilter = this.createBloomFilter(hash160(publicKey), utxo);
 
@@ -103,8 +108,13 @@ export class DAPISubscriptionClient {
     onProgress?.('Listening for InstantSend lock...');
 
     return new Promise<Uint8Array>((resolve, reject) => {
+      const onAbort = (): void => {
+        finish(() => reject(new Error(`InstantSend lock subscription aborted for ${txid}`)));
+      };
+
       const finish = (fn: () => void): void => {
         clearTimeout(timeoutId);
+        signal?.removeEventListener('abort', onAbort);
         try { stream.cancel(); } catch { /* ignore */ }
         fn();
       };
@@ -112,6 +122,14 @@ export class DAPISubscriptionClient {
       const timeoutId = setTimeout(() => {
         finish(() => reject(new Error(`Timeout waiting for InstantSend lock for ${txid} after ${timeoutMs}ms`)));
       }, timeoutMs);
+
+      if (signal) {
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
 
       stream.on('data', (response: unknown) => {
         try {

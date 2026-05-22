@@ -70,6 +70,12 @@ const NETWORK_REGISTRY = new Map<string, NetworkConfig>([
 
 const CUSTOM_DEVNETS_KEY = 'bridge-custom-devnets';
 
+export const RESERVED_NETWORK_NAMES: ReadonlySet<string> = new Set(['testnet', 'mainnet']);
+
+export function isReservedNetworkName(name: string): boolean {
+  return RESERVED_NETWORK_NAMES.has(name);
+}
+
 function loadCustomDevnets(): NetworkConfig[] {
   try {
     const stored = localStorage.getItem(CUSTOM_DEVNETS_KEY);
@@ -80,11 +86,17 @@ function loadCustomDevnets(): NetworkConfig[] {
       (c): c is NetworkConfig =>
         c &&
         typeof c.name === 'string' &&
+        !RESERVED_NETWORK_NAMES.has(c.name) &&
         c.type === 'devnet' &&
         typeof c.insightApiUrl === 'string' &&
         typeof c.addressPrefix === 'number' &&
         typeof c.wifPrefix === 'number' &&
-        typeof c.platformHrp === 'string'
+        typeof c.minFee === 'number' &&
+        typeof c.dustThreshold === 'number' &&
+        typeof c.platformHrp === 'string' &&
+        Array.isArray(c.dapiAddresses) &&
+        c.dapiAddresses.length > 0 &&
+        c.dapiAddresses.every((a: unknown) => typeof a === 'string')
     );
   } catch {
     return [];
@@ -92,6 +104,9 @@ function loadCustomDevnets(): NetworkConfig[] {
 }
 
 export function saveCustomDevnet(config: NetworkConfig): void {
+  if (RESERVED_NETWORK_NAMES.has(config.name)) {
+    throw new Error(`Cannot save custom devnet with reserved name "${config.name}"`);
+  }
   const customs = loadCustomDevnets().filter((c) => c.name !== config.name);
   customs.push(config);
   localStorage.setItem(CUSTOM_DEVNETS_KEY, JSON.stringify(customs));
@@ -99,6 +114,9 @@ export function saveCustomDevnet(config: NetworkConfig): void {
 }
 
 export function removeCustomDevnet(name: string): void {
+  if (RESERVED_NETWORK_NAMES.has(name)) {
+    throw new Error(`Cannot remove reserved network "${name}"`);
+  }
   const customs = loadCustomDevnets().filter((c) => c.name !== name);
   localStorage.setItem(CUSTOM_DEVNETS_KEY, JSON.stringify(customs));
   NETWORK_REGISTRY.delete(name);

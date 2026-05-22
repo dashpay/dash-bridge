@@ -38,7 +38,12 @@ function createPlatformSdk(network: PlatformNetwork): EvoSDK {
     return EvoSDK.mainnetTrusted(options);
   }
 
-  if (config.type === 'devnet' && config.dapiAddresses?.length) {
+  if (config.type === 'devnet') {
+    if (!config.dapiAddresses?.length) {
+      throw new Error(
+        `Devnet "${config.name}" is missing dapiAddresses; cannot create Platform SDK`
+      );
+    }
     return new EvoSDK({
       addresses: config.dapiAddresses,
       network: 'testnet',

@@ -36,9 +36,30 @@ export class IslockService {
       return this.subscriptionClient.waitForInstantSendLock(txid, publicKey, utxo, timeoutMs);
     }
 
-    // Race JSON-RPC polling against DAPI subscription — first success wins
-    const jsonRpcPromise = this.jsonRpcClient.waitForInstantSendLock(txid, timeoutMs, onRetry);
-    const dapiPromise = this.subscriptionClient.waitForInstantSendLock(txid, publicKey, utxo, timeoutMs);
+    // Race JSON-RPC polling against DAPI subscription — first success wins.
+    // Each source gets its own AbortController so the loser is cancelled as soon
+    // as the race settles, avoiding wasted HTTP polls and dangling gRPC streams.
+    const jsonRpcController = new AbortController();
+    const dapiController = new AbortController();
+
+    const jsonRpcPromise = this.jsonRpcClient.waitForInstantSendLock(
+      txid,
+      timeoutMs,
+      onRetry,
+      jsonRpcController.signal
+    );
+    const dapiPromise = this.subscriptionClient.waitForInstantSendLock(
+      txid,
+      publicKey,
+      utxo,
+      timeoutMs,
+      undefined,
+      dapiController.signal
+    );
+
+    // Suppress unhandled rejections from the loser once we abort it.
+    jsonRpcPromise.catch(() => {});
+    dapiPromise.catch(() => {});
 
     try {
       return await Promise.any([jsonRpcPromise, dapiPromise]);
@@ -49,6 +70,9 @@ export class IslockService {
         );
       }
       throw error;
+    } finally {
+      jsonRpcController.abort();
+      dapiController.abort();
     }
   }
 

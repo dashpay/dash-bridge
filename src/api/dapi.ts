@@ -59,16 +59,21 @@ export class DAPIClient {
    * Get InstantSend lock from tRPC API
    * Polls the API until the islock is available or timeout is reached
    * @param onRetry - Optional callback when a network error causes a retry
+   * @param signal - Optional AbortSignal to cancel polling early
    */
   async waitForInstantSendLock(
     txid: string,
     timeoutMs: number = 60000,
-    onRetry?: (attempt: number, maxAttempts: number, error: unknown) => void
+    onRetry?: (attempt: number, maxAttempts: number, error: unknown) => void,
+    signal?: AbortSignal
   ): Promise<Uint8Array> {
     const startTime = Date.now();
     const pollInterval = 2000; // Poll every 2 seconds
 
     while (Date.now() - startTime < timeoutMs) {
+      if (signal?.aborted) {
+        throw new Error(`InstantSend lock polling aborted for ${txid}`);
+      }
       try {
         const islock = await this.getIslock(txid, { onRetry });
         if (islock) {
@@ -78,8 +83,20 @@ export class DAPIClient {
         console.warn('Error polling for islock:', error);
       }
 
-      // Wait before next poll
-      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      // Wait before next poll, but bail out immediately if aborted
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve();
+        }, pollInterval);
+        const onAbort = (): void => {
+          clearTimeout(timer);
+          resolve();
+        };
+        if (signal) {
+          signal.addEventListener('abort', onAbort, { once: true });
+        }
+      });
     }
 
     throw new Error(

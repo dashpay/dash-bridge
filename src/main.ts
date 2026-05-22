@@ -1,4 +1,4 @@
-import { getNetwork, initNetworkRegistry, createCustomDevnetConfig, saveCustomDevnet, MAINNET, TESTNET } from './config.js';
+import { getNetwork, initNetworkRegistry, createCustomDevnetConfig, saveCustomDevnet, isReservedNetworkName, MAINNET, TESTNET } from './config.js';
 import { publicKeyToAddress, signTransaction, generateKeyPair } from './crypto/index.js';
 import { deriveAssetLockKeyPair } from './crypto/hd.js';
 import { createAssetLockTransaction, serializeTransaction } from './transaction/index.js';
@@ -130,6 +130,10 @@ function initClients(network: string): void {
 }
 
 function switchNetwork(network: string): void {
+  // Tear down any active IS lock subscriptions/polling before replacing clients
+  if (islockService) {
+    islockService.disconnect().catch((err) => console.warn('Error disconnecting IslockService:', err));
+  }
   updateState(setNetwork(state, network));
   initClients(network);
 }
@@ -171,6 +175,11 @@ function showCustomDevnetModal(existing?: { name?: string; insightApiUrl?: strin
 
     if (!name || !insightApiUrl || dapiAddresses.length === 0) {
       alert('Name, Insight API URL, and at least one DAPI address are required');
+      return;
+    }
+
+    if (isReservedNetworkName(name)) {
+      alert(`"${name}" is a reserved network name. Please choose a different name.`);
       return;
     }
 

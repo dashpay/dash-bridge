@@ -92,6 +92,20 @@ export function escapeHtml(str: string): string {
 }
 
 /**
+ * Escape a string for safe use inside a double-quoted HTML attribute.
+ * escapeHtml does not escape quotes, so it cannot be used for attribute values
+ * that may contain user-controlled data.
+ */
+export function escapeAttr(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
  * Render the main application UI
  */
 export function render(state: BridgeState, container: HTMLElement): void {
@@ -276,8 +290,7 @@ function renderInitStep(state: BridgeState): HTMLElement {
   const isDevnetActive = devnets.some((d) => d.name === state.network);
   const devnetOptions = devnets
     .map((d) => {
-      const safe = escapeHtml(d.name);
-      return `<button class="devnet-option ${state.network === d.name ? 'active' : ''}" data-network="${safe}">${safe}</button>`;
+      return `<button class="devnet-option ${state.network === d.name ? 'active' : ''}" data-network="${escapeAttr(d.name)}">${escapeHtml(d.name)}</button>`;
     })
     .join('');
   networkSelector.innerHTML = `
