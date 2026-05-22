@@ -32,7 +32,7 @@ const IDENTITY_INDEX = 0;
  * Mainnet: 5 (Dash)
  * Testnet: 1 (Testnet)
  */
-export function getCoinType(network: 'testnet' | 'mainnet'): number {
+export function getCoinType(network: string): number {
   return network === 'mainnet' ? 5 : 1;
 }
 
@@ -58,7 +58,7 @@ export function mnemonicToHDKey(mnemonic: string, passphrase: string = ''): HDKe
  * Get asset lock key derivation path (BIP44)
  * Path: m/44'/[coin_type]'/0'/0/0
  */
-export function getAssetLockDerivationPath(network: 'testnet' | 'mainnet'): string {
+export function getAssetLockDerivationPath(network: string): string {
   const coinType = getCoinType(network);
   return `m/${BIP44_PURPOSE}'/${coinType}'/0'/0/0`;
 }
@@ -74,7 +74,7 @@ export function getAssetLockDerivationPath(network: 'testnet' | 'mainnet'): stri
  */
 export function getIdentityKeyDerivationPath(
   keyIndex: number,
-  network: 'testnet' | 'mainnet',
+  network: string,
   identityIndex: number = IDENTITY_INDEX,
   keyType: number = ECDSA_KEY_TYPE
 ): string {
@@ -110,7 +110,7 @@ export function deriveKeyAtPath(
  */
 export function deriveAssetLockKeyPair(
   mnemonic: string,
-  network: 'testnet' | 'mainnet'
+  network: string
 ): {
   privateKey: Uint8Array;
   publicKey: Uint8Array;
@@ -130,7 +130,7 @@ export function deriveAssetLockKeyPair(
 export function deriveIdentityKey(
   mnemonic: string,
   keyIndex: number,
-  network: 'testnet' | 'mainnet',
+  network: string,
   identityIndex: number = IDENTITY_INDEX
 ): {
   privateKey: Uint8Array;

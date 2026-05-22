@@ -67,7 +67,7 @@ export function generateIdentityKey(
   keyType: KeyType,
   purpose: KeyPurpose,
   securityLevel: SecurityLevel,
-  network: 'testnet' | 'mainnet'
+  network: string
 ): IdentityKeyConfig {
   const keyPair = generateKeyPair();
   const networkConfig = getNetwork(network);
@@ -93,7 +93,7 @@ export function generateIdentityKey(
  */
 export function regenerateIdentityKey(
   existing: IdentityKeyConfig,
-  network: 'testnet' | 'mainnet'
+  network: string
 ): IdentityKeyConfig {
   return generateIdentityKey(
     existing.id,
@@ -111,7 +111,7 @@ export function regenerateIdentityKey(
 export function updateKeyType(
   existing: IdentityKeyConfig,
   newKeyType: KeyType,
-  network: 'testnet' | 'mainnet'
+  network: string
 ): IdentityKeyConfig {
   const networkConfig = getNetwork(network);
   const dataBytes = getKeyDataBytes(existing.publicKey, newKeyType);
@@ -129,7 +129,7 @@ export function updateKeyType(
  * @deprecated Use generateDefaultIdentityKeysHD for HD derivation
  */
 export function generateDefaultIdentityKeys(
-  network: 'testnet' | 'mainnet'
+  network: string
 ): IdentityKeyConfig[] {
   return [
     generateIdentityKey(0, 'Master', 'ECDSA_SECP256K1', 'AUTHENTICATION', 'MASTER', network),
@@ -151,7 +151,7 @@ export function createIdentityKeyFromKeyPair(
   securityLevel: SecurityLevel,
   privateKey: Uint8Array,
   publicKey: Uint8Array,
-  network: 'testnet' | 'mainnet',
+  network: string,
   derivationPath?: string
 ): IdentityKeyConfig {
   const networkConfig = getNetwork(network);
@@ -182,7 +182,7 @@ export function generateIdentityKeyFromMnemonic(
   keyType: KeyType,
   purpose: KeyPurpose,
   securityLevel: SecurityLevel,
-  network: 'testnet' | 'mainnet',
+  network: string,
   mnemonic: string,
   keyIndex: number
 ): IdentityKeyConfig {
@@ -205,7 +205,7 @@ export function generateIdentityKeyFromMnemonic(
  * Generate default identity keys using HD derivation
  */
 export function generateDefaultIdentityKeysHD(
-  network: 'testnet' | 'mainnet',
+  network: string,
   mnemonic: string
 ): IdentityKeyConfig[] {
   return [
@@ -235,7 +235,7 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 export function findMatchingKeyIndex(
   privateKeyWif: string,
   identityPublicKeys: IdentityPublicKeyInfo[],
-  network: 'testnet' | 'mainnet'
+  network: string
 ): { keyId: number; securityLevel: number; purpose: number; publicKey: Uint8Array } | null {
   // Decode the WIF to get the private key
   let privateKey: Uint8Array;

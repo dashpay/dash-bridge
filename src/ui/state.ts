@@ -88,7 +88,7 @@ export function toError(value: unknown): Error {
  * Create initial bridge state (mode selection)
  * Keys are generated when mode is selected, not at init
  */
-export function createInitialState(network: 'testnet' | 'mainnet'): BridgeState {
+export function createInitialState(network: string): BridgeState {
   return {
     step: 'init',
     network,
@@ -463,7 +463,7 @@ export function setError(state: BridgeState, error: Error, errorCode?: string): 
  */
 export function setNetwork(
   state: BridgeState,
-  network: 'testnet' | 'mainnet'
+  network: string
 ): BridgeState {
   if (!state.mnemonic) {
     // Fallback: generate new mnemonic if none exists

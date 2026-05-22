@@ -4,15 +4,16 @@ import { shouldShowContestedWarning, countUsernameStatuses } from '../platform/d
 import { generateQRCodeDataUrl } from './qrcode.js';
 import { privateKeyToWif } from '../utils/wif.js';
 import { bytesToHex } from '../utils/hex.js';
-import { getNetwork } from '../config.js';
+import { getNetwork, getAvailableNetworks } from '../config.js';
 import { getAssetLockDerivationPath } from '../crypto/hd.js';
 
 /**
  * Build a Platform Explorer URL for a given entity.
  */
-function explorerUrl(network: 'testnet' | 'mainnet', type: 'identity' | 'dataContract', id: string): string {
-  const base = network === 'testnet' ? 'https://testnet.platform-explorer.com' : 'https://platform-explorer.com';
-  return `${base}/${type}/${id}`;
+function explorerUrl(network: string, type: 'identity' | 'dataContract', id: string): string | undefined {
+  if (network === 'mainnet') return `https://platform-explorer.com/${type}/${id}`;
+  if (network === 'testnet') return `https://testnet.platform-explorer.com/${type}/${id}`;
+  return undefined;
 }
 
 /**
@@ -84,7 +85,7 @@ function getAllowedSecurityLevels(purpose: KeyPurpose, includeMaster = true): Se
 /**
  * Escape HTML special characters to prevent XSS
  */
-function escapeHtml(str: string): string {
+export function escapeHtml(str: string): string {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
@@ -110,9 +111,10 @@ export function render(state: BridgeState, container: HTMLElement): void {
 
   // Header
   const header = document.createElement('header');
+  const badgeClass = getNetwork(state.network).type;
   header.innerHTML = `
     <h1>Dash Core → Platform Bridge</h1>
-    <p class="network-badge ${state.network}">${state.network.toUpperCase()}</p>
+    <p class="network-badge ${badgeClass}">${escapeHtml(state.network.toUpperCase())}</p>
   `;
   wrapper.appendChild(header);
 
@@ -270,9 +272,26 @@ function renderInitStep(state: BridgeState): HTMLElement {
   // Network selector
   const networkSelector = document.createElement('div');
   networkSelector.className = 'network-selector';
+  const devnets = getAvailableNetworks().filter((n) => n.type === 'devnet');
+  const isDevnetActive = devnets.some((d) => d.name === state.network);
+  const devnetOptions = devnets
+    .map((d) => {
+      const safe = escapeHtml(d.name);
+      return `<button class="devnet-option ${state.network === d.name ? 'active' : ''}" data-network="${safe}">${safe}</button>`;
+    })
+    .join('');
   networkSelector.innerHTML = `
     <button class="network-btn testnet ${state.network === 'testnet' ? 'active' : ''}" data-network="testnet">Testnet</button>
     <button class="network-btn mainnet ${state.network === 'mainnet' ? 'active' : ''}" data-network="mainnet">Mainnet</button>
+    <div class="devnet-dropdown">
+      <button class="network-btn devnet ${isDevnetActive ? 'active' : ''}" id="devnet-toggle">
+        ${isDevnetActive ? escapeHtml(state.network) : 'Devnet'} ▾
+      </button>
+      <div class="devnet-menu" id="devnet-menu" style="display: none;">
+        ${devnetOptions}
+        <button class="devnet-option custom" data-network="__custom__">Custom devnet...</button>
+      </div>
+    </div>
   `;
   div.appendChild(networkSelector);
 

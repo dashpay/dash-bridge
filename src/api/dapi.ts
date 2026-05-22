@@ -1,16 +1,17 @@
 /**
- * Client for InstantSend lock retrieval via RPC API
+ * Client for InstantSend lock retrieval via JSON-RPC API
  */
 
 import { withRetry, type RetryOptions } from '../utils/retry.js';
 
-const API_URLS = {
+const API_URLS: Record<string, string> = {
   testnet: 'https://trpc.digitalcash.dev',
   mainnet: 'https://rpc.digitalcash.dev',
-} as const;
+};
 
 export interface DAPIConfig {
-  network: 'testnet' | 'mainnet';
+  network: string;
+  rpcUrl?: string;
 }
 
 /**
@@ -31,10 +32,16 @@ interface IslockResponse {
  * Client for InstantSend lock retrieval
  */
 export class DAPIClient {
-  readonly network: 'testnet' | 'mainnet';
+  readonly network: string;
+  private readonly rpcUrl?: string;
 
   constructor(config: DAPIConfig) {
     this.network = config.network;
+    this.rpcUrl = config.rpcUrl;
+  }
+
+  get hasRpcUrl(): boolean {
+    return !!(this.rpcUrl || API_URLS[this.network]);
   }
 
   /**
@@ -85,7 +92,10 @@ export class DAPIClient {
    */
   private async getIslock(txid: string, retryOptions?: RetryOptions): Promise<Uint8Array | null> {
     return withRetry(async () => {
-      const baseUrl = API_URLS[this.network];
+      const baseUrl = this.rpcUrl ?? API_URLS[this.network];
+      if (!baseUrl) {
+        throw new Error(`No RPC URL configured for network ${this.network}`);
+      }
 
       const response = await fetch(baseUrl, {
         method: 'POST',

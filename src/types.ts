@@ -205,7 +205,7 @@ export interface AssetLockProofData {
 
 export interface BridgeState {
   step: BridgeStep;
-  network: 'testnet' | 'mainnet';
+  network: string;
   /** Bridge operation mode */
   mode: BridgeMode;
   /** Current network retry status (for displaying retry indicator) */

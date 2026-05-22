@@ -727,6 +727,136 @@
       color: #008de4;
     }
 
+    .network-btn.devnet.active {
+      background: rgba(156, 39, 176, 0.15);
+      border-color: #9c27b0;
+      color: #9c27b0;
+    }
+
+    .devnet-dropdown {
+      position: relative;
+      flex: 1;
+      max-width: 160px;
+    }
+
+    .devnet-dropdown .network-btn {
+      width: 100%;
+      max-width: none;
+    }
+
+    .devnet-menu {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      background: #1a1a1a;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 10px;
+      padding: 6px;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .devnet-option {
+      padding: 10px 14px;
+      border: none;
+      background: transparent;
+      color: #ccc;
+      text-align: left;
+      cursor: pointer;
+      border-radius: 6px;
+      font-size: 0.9rem;
+    }
+
+    .devnet-option:hover {
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .devnet-option.active {
+      background: rgba(156, 39, 176, 0.15);
+      color: #9c27b0;
+    }
+
+    .devnet-option.custom {
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      margin-top: 4px;
+      padding-top: 12px;
+    }
+
+    .network-badge.devnet {
+      background: rgba(156, 39, 176, 0.15);
+      color: #9c27b0;
+    }
+
+    /* Custom devnet modal */
+    .devnet-modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+
+    .devnet-modal {
+      background: #1a1a1a;
+      border-radius: 14px;
+      padding: 28px;
+      max-width: 520px;
+      width: 90%;
+      max-height: 85vh;
+      overflow-y: auto;
+    }
+
+    .devnet-modal h2 {
+      margin-top: 0;
+      color: #fff;
+    }
+
+    .devnet-modal label {
+      display: block;
+      margin-top: 14px;
+      font-weight: 500;
+      color: #ccc;
+      font-size: 0.9rem;
+    }
+
+    .devnet-modal input,
+    .devnet-modal textarea {
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 6px;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.05);
+      color: #fff;
+      font-family: inherit;
+      font-size: 0.9rem;
+    }
+
+    .devnet-modal textarea {
+      font-family: monospace;
+      min-height: 80px;
+      resize: vertical;
+    }
+
+    .devnet-modal-actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 22px;
+      justify-content: flex-end;
+    }
+
+    .devnet-modal-actions .primary-btn,
+    .devnet-modal-actions .secondary-btn {
+      padding: 10px 20px;
+      font-size: 0.95rem;
+    }
+
     /* Configure keys step */
     .configure-keys-step {
       text-align: left;
