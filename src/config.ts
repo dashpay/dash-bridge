@@ -37,34 +37,35 @@ export const MAINNET: NetworkConfig = {
   rpcUrl: 'https://rpc.digitalcash.dev',
 };
 
-export const DEVNET_TADI: NetworkConfig = {
+export const DEVNET_PORTER: NetworkConfig = {
   type: 'devnet',
-  name: 'devnet-tadi',
-  insightApiUrl: 'https://insight.devnet-tadi.networks.dash.org/insight-api',
+  name: 'devnet-porter',
+  insightApiUrl: 'https://insight.porter.networks.dash.org/insight-api',
   addressPrefix: 140,
   wifPrefix: 239,
   minFee: 1000,
   dustThreshold: 546,
   platformHrp: 'tdash',
   dapiAddresses: [
-    'https://35.89.28.18:1443',
-    'https://34.217.21.126:1443',
-    'https://34.219.89.114:1443',
-    'https://44.249.83.233:1443',
-    'https://54.188.228.213:1443',
-    'https://54.244.210.104:1443',
-    'https://34.219.127.187:1443',
-    'https://18.237.1.251:1443',
-    'https://35.89.185.80:1443',
-    'https://34.219.40.199:1443',
+    'https://44.247.149.200:1443',
+    'https://54.70.124.48:1443',
+    'https://34.209.64.250:1443',
+    'https://34.217.209.121:1443',
+    'https://44.255.39.178:1443',
+    'https://35.88.212.218:1443',
+    'https://34.221.172.217:1443',
+    'https://52.89.161.171:1443',
+    'https://35.90.237.76:1443',
+    'https://35.88.158.240:1443',
+    'https://34.221.127.165:1443',
   ],
-  faucetBaseUrl: 'https://faucet.devnet-tadi.networks.dash.org',
+  faucetBaseUrl: 'https://faucet.porter.networks.dash.org',
 };
 
 const NETWORK_REGISTRY = new Map<string, NetworkConfig>([
   ['testnet', TESTNET],
   ['mainnet', MAINNET],
-  ['devnet-tadi', DEVNET_TADI],
+  ['devnet-porter', DEVNET_PORTER],
 ]);
 
 const CUSTOM_DEVNETS_KEY = 'bridge-custom-devnets';
