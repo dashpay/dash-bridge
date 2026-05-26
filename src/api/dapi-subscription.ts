@@ -36,7 +36,17 @@ export class DAPISubscriptionClient {
     this.network = config.network;
     const options: any = { timeout: 30000, retries: 3 };
     if (config.dapiAddresses?.length) {
-      options.dapiAddresses = config.dapiAddresses;
+      // DAPIClient expects address objects { host, port, protocol }, not URL strings.
+      // Our configs store URLs (https://host:port) for EvoSDK compatibility, so
+      // parse them here.
+      options.dapiAddresses = config.dapiAddresses.map((addr) => {
+        const url = new URL(addr);
+        return {
+          protocol: url.protocol.replace(':', ''),
+          host: url.hostname,
+          port: url.port ? parseInt(url.port, 10) : 443,
+        };
+      });
     } else {
       options.network = config.network === 'mainnet' ? 'mainnet' : 'testnet';
     }
@@ -80,14 +90,22 @@ export class DAPISubscriptionClient {
     }
   }
 
-  async waitForInstantSendLock(
+  /**
+   * Open a gRPC subscription stream for the bloom filter and return a handle
+   * whose `.wait()` resolves with the matching IS lock bytes.
+   *
+   * The gRPC stream is established before this method returns, so the caller
+   * can broadcast the watched tx afterwards without missing a fast IS lock
+   * (dashd's TransactionsWithProofs does not replay historical IS locks).
+   */
+  async subscribeForInstantSendLock(
     txid: string,
     publicKey: Uint8Array,
     utxo: { txid: string; vout: number },
     timeoutMs: number = 60000,
     onProgress?: (message: string) => void,
     signal?: AbortSignal
-  ): Promise<Uint8Array> {
+  ): Promise<{ wait: () => Promise<Uint8Array> }> {
     if (signal?.aborted) {
       throw new Error(`InstantSend lock subscription aborted for ${txid}`);
     }
@@ -97,6 +115,7 @@ export class DAPISubscriptionClient {
 
     onProgress?.('Getting current block height...');
     const currentHeight: number = await this.dapiClient.core.getBestBlockHeight();
+    console.log('[islock-sub] Current block height:', currentHeight);
     const fromBlockHeight = Math.max(1, currentHeight - 10);
 
     onProgress?.(`Subscribing from block ${fromBlockHeight}...`);
@@ -104,10 +123,11 @@ export class DAPISubscriptionClient {
       bloomFilter,
       { fromBlockHeight, count: 0 }
     );
+    console.log(`[islock-sub] Subscribed from block ${fromBlockHeight}, watching for txid ${txid}`);
 
     onProgress?.('Listening for InstantSend lock...');
 
-    return new Promise<Uint8Array>((resolve, reject) => {
+    const lockPromise = new Promise<Uint8Array>((resolve, reject) => {
       const onAbort = (): void => {
         finish(() => reject(new Error(`InstantSend lock subscription aborted for ${txid}`)));
       };
@@ -134,12 +154,19 @@ export class DAPISubscriptionClient {
       stream.on('data', (response: unknown) => {
         try {
           const islockMessages = (response as any).getInstantSendLockMessages?.();
+          const hasIslocks = !!islockMessages;
+          const hasMerkleBlock = !!(response as any).getRawMerkleBlock?.()?.length;
+          const hasRawTxs = !!(response as any).getRawTransactions?.()?.getTransactionsList?.()?.length;
+          console.log(`[islock-sub] stream data: islocks=${hasIslocks} merkleBlock=${hasMerkleBlock} rawTxs=${hasRawTxs}`);
           if (!islockMessages) return;
           const messages = islockMessages.getMessagesList_asU8?.() || islockMessages.getMessagesList?.();
           if (!messages || messages.length === 0) return;
+          console.log(`[islock-sub] received ${messages.length} IS lock(s) in stream message`);
           for (const msgBytes of messages) {
             const bytes = msgBytes instanceof Uint8Array ? msgBytes : new Uint8Array(msgBytes);
-            if (this.parseInstantLockTxid(bytes) === txid) {
+            const lockTxid = this.parseInstantLockTxid(bytes);
+            console.log(`[islock-sub] IS lock txid=${lockTxid} (want ${txid})`);
+            if (lockTxid === txid) {
               onProgress?.('InstantSend lock received!');
               finish(() => resolve(bytes));
               return;
@@ -150,9 +177,32 @@ export class DAPISubscriptionClient {
         }
       });
 
-      stream.on('error', (error: Error) => finish(() => reject(error)));
-      stream.on('end', () => finish(() => reject(new Error(`Stream ended before receiving InstantSend lock for ${txid}`))));
+      stream.on('error', (error: Error) => {
+        console.error('[islock-sub] stream error:', error);
+        finish(() => reject(error));
+      });
+      stream.on('end', () => {
+        console.warn('[islock-sub] stream ended');
+        finish(() => reject(new Error(`Stream ended before receiving InstantSend lock for ${txid}`)));
+      });
     });
+
+    // Avoid unhandled-rejection warnings if the caller never awaits .wait()
+    lockPromise.catch(() => {});
+
+    return { wait: () => lockPromise };
+  }
+
+  async waitForInstantSendLock(
+    txid: string,
+    publicKey: Uint8Array,
+    utxo: { txid: string; vout: number },
+    timeoutMs: number = 60000,
+    onProgress?: (message: string) => void,
+    signal?: AbortSignal
+  ): Promise<Uint8Array> {
+    const sub = await this.subscribeForInstantSendLock(txid, publicKey, utxo, timeoutMs, onProgress, signal);
+    return sub.wait();
   }
 
   async disconnect(): Promise<void> {

@@ -1,7 +1,7 @@
 import { getNetwork, initNetworkRegistry, createCustomDevnetConfig, saveCustomDevnet, isReservedNetworkName, MAINNET, TESTNET } from './config.js';
 import { publicKeyToAddress, signTransaction, generateKeyPair } from './crypto/index.js';
 import { deriveAssetLockKeyPair } from './crypto/hd.js';
-import { createAssetLockTransaction, serializeTransaction } from './transaction/index.js';
+import { createAssetLockTransaction, serializeTransaction, calculateTxId } from './transaction/index.js';
 import { InsightClient } from './api/insight.js';
 import { IslockService } from './api/islock.js';
 import { buildInstantAssetLockProof } from './proof/index.js';
@@ -1563,23 +1563,31 @@ async function startTopUp() {
 
     const signedTxBytes = serializeTransaction(signedTx);
     const signedTxHex = bytesToHex(signedTxBytes);
+    const txid = calculateTxId(signedTx);
 
     updateState(setTransactionSigned(state, signedTxHex));
 
-    // Step 5: Broadcast transaction
-    const txid = await insightClient.broadcastTransaction(signedTxHex);
-
-    updateState(setTransactionBroadcast(state, txid));
-
-    // Step 6: Wait for InstantSend lock
+    // Step 5: Open IS lock subscription BEFORE broadcasting — dashd does not
+    // replay historical IS locks, so we must be listening before the lock
+    // is signed (which can happen within milliseconds of broadcast).
     updateState(setStep(state, 'waiting_islock'));
-
-    console.log('Waiting for InstantSend lock...');
-    const islockBytes = await islockService.waitForInstantSendLock(
+    console.log('Opening IS lock subscription before broadcast...');
+    const islockSub = await islockService.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
       utxo
     );
+
+    // Step 6: Broadcast transaction
+    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
+    if (broadcastedTxid !== txid) {
+      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
+    }
+
+    updateState(setTransactionBroadcast(state, txid));
+
+    console.log('Waiting for InstantSend lock...');
+    const islockBytes = await islockSub.wait();
     console.log('InstantSend lock received:', islockBytes.length, 'bytes');
 
     const assetLockProof = buildInstantAssetLockProof(
@@ -1672,21 +1680,26 @@ async function startSendToAddress() {
 
     const signedTxBytes = serializeTransaction(signedTx);
     const signedTxHex = bytesToHex(signedTxBytes);
+    const txid = calculateTxId(signedTx);
 
     updateState(setTransactionSigned(state, signedTxHex));
 
-    // Step 5: Broadcast transaction
-    const txid = await insightClient.broadcastTransaction(signedTxHex);
-    updateState(setTransactionBroadcast(state, txid));
-
-    // Step 6: Wait for InstantSend lock
+    // Step 5: Subscribe for IS lock BEFORE broadcasting (see flow #1 for why).
     updateState(setStep(state, 'waiting_islock'));
-
-    const islockBytes = await islockService.waitForInstantSendLock(
+    const islockSub = await islockService.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
       utxo
     );
+
+    // Step 6: Broadcast transaction
+    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
+    if (broadcastedTxid !== txid) {
+      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
+    }
+    updateState(setTransactionBroadcast(state, txid));
+
+    const islockBytes = await islockSub.wait();
 
     const assetLockProof = buildInstantAssetLockProof(
       signedTxBytes,
@@ -1788,23 +1801,28 @@ async function startBridge() {
 
     const signedTxBytes = serializeTransaction(signedTx);
     const signedTxHex = bytesToHex(signedTxBytes);
+    const txid = calculateTxId(signedTx);
 
     updateState(setTransactionSigned(state, signedTxHex));
 
-    // Step 5: Broadcast transaction
-    const txid = await insightClient.broadcastTransaction(signedTxHex);
-
-    updateState(setTransactionBroadcast(state, txid));
-
-    // Step 6: Wait for InstantSend lock
+    // Step 5: Subscribe for IS lock BEFORE broadcasting (see flow #1 for why).
     updateState(setStep(state, 'waiting_islock'));
-
-    console.log('Waiting for InstantSend lock...');
-    const islockBytes = await islockService.waitForInstantSendLock(
+    console.log('Opening IS lock subscription before broadcast...');
+    const islockSub = await islockService.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
       utxo
     );
+
+    // Step 6: Broadcast transaction
+    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
+    if (broadcastedTxid !== txid) {
+      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
+    }
+    updateState(setTransactionBroadcast(state, txid));
+
+    console.log('Waiting for InstantSend lock...');
+    const islockBytes = await islockSub.wait();
     console.log('InstantSend lock received:', islockBytes.length, 'bytes');
 
     const assetLockProof = buildInstantAssetLockProof(
@@ -1902,23 +1920,28 @@ async function recheckDeposit() {
 
     const signedTxBytes = serializeTransaction(signedTx);
     const signedTxHex = bytesToHex(signedTxBytes);
+    const txid = calculateTxId(signedTx);
 
     updateState(setTransactionSigned(state, signedTxHex));
 
-    // Step 5: Broadcast transaction
-    const txid = await insightClient.broadcastTransaction(signedTxHex);
-
-    updateState(setTransactionBroadcast(state, txid));
-
-    // Step 6: Wait for InstantSend lock
+    // Step 5: Subscribe for IS lock BEFORE broadcasting (see flow #1 for why).
     updateState(setStep(state, 'waiting_islock'));
-
-    console.log('Waiting for InstantSend lock...');
-    const islockBytes = await islockService.waitForInstantSendLock(
+    console.log('Opening IS lock subscription before broadcast...');
+    const islockSub = await islockService.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
       utxo
     );
+
+    // Step 6: Broadcast transaction
+    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
+    if (broadcastedTxid !== txid) {
+      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
+    }
+    updateState(setTransactionBroadcast(state, txid));
+
+    console.log('Waiting for InstantSend lock...');
+    const islockBytes = await islockSub.wait();
     console.log('InstantSend lock received:', islockBytes.length, 'bytes');
 
     const assetLockProof = buildInstantAssetLockProof(

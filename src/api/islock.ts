@@ -25,22 +25,46 @@ export class IslockService {
     this.subscriptionClient = new DAPISubscriptionClient(subConfig);
   }
 
-  async waitForInstantSendLock(
+  /**
+   * Open IS lock sources (DAPI bloom subscription + optional JSON-RPC polling)
+   * before broadcasting. Returns a handle whose `.wait()` resolves with the
+   * IS lock bytes once available. This avoids the race where dashd signs the
+   * IS lock between broadcast and subscribe (subscriptions don't replay
+   * historical IS locks).
+   */
+  async subscribeForInstantSendLock(
     txid: string,
     publicKey: Uint8Array,
     utxo: { txid: string; vout: number },
     timeoutMs: number = 60000,
-    onRetry?: RetryOptions['onRetry']
-  ): Promise<Uint8Array> {
+    onRetry?: RetryOptions['onRetry'],
+    onProgress?: (message: string) => void
+  ): Promise<{ wait: () => Promise<Uint8Array> }> {
     if (!this.hasJsonRpc) {
-      return this.subscriptionClient.waitForInstantSendLock(txid, publicKey, utxo, timeoutMs);
+      // DAPI subscription only — establish the stream, then return.
+      return this.subscriptionClient.subscribeForInstantSendLock(
+        txid,
+        publicKey,
+        utxo,
+        timeoutMs,
+        onProgress
+      );
     }
 
     // Race JSON-RPC polling against DAPI subscription — first success wins.
-    // Each source gets its own AbortController so the loser is cancelled as soon
-    // as the race settles, avoiding wasted HTTP polls and dangling gRPC streams.
+    // Each source gets its own AbortController so the loser is cancelled as
+    // soon as the race settles.
     const jsonRpcController = new AbortController();
     const dapiController = new AbortController();
+
+    const dapiSub = await this.subscriptionClient.subscribeForInstantSendLock(
+      txid,
+      publicKey,
+      utxo,
+      timeoutMs,
+      onProgress,
+      dapiController.signal
+    );
 
     const jsonRpcPromise = this.jsonRpcClient.waitForInstantSendLock(
       txid,
@@ -48,32 +72,41 @@ export class IslockService {
       onRetry,
       jsonRpcController.signal
     );
-    const dapiPromise = this.subscriptionClient.waitForInstantSendLock(
-      txid,
-      publicKey,
-      utxo,
-      timeoutMs,
-      undefined,
-      dapiController.signal
-    );
 
-    // Suppress unhandled rejections from the loser once we abort it.
     jsonRpcPromise.catch(() => {});
+    const dapiPromise = dapiSub.wait();
     dapiPromise.catch(() => {});
 
-    try {
-      return await Promise.any([jsonRpcPromise, dapiPromise]);
-    } catch (error) {
-      if (error instanceof AggregateError) {
-        throw new Error(
-          `All IS lock sources failed: ${error.errors.map((e) => (e as Error).message).join('; ')}`
-        );
+    const racePromise = (async (): Promise<Uint8Array> => {
+      try {
+        return await Promise.any([jsonRpcPromise, dapiPromise]);
+      } catch (error) {
+        if (error instanceof AggregateError) {
+          throw new Error(
+            `All IS lock sources failed: ${error.errors.map((e) => (e as Error).message).join('; ')}`
+          );
+        }
+        throw error;
+      } finally {
+        jsonRpcController.abort();
+        dapiController.abort();
       }
-      throw error;
-    } finally {
-      jsonRpcController.abort();
-      dapiController.abort();
-    }
+    })();
+    racePromise.catch(() => {});
+
+    return { wait: () => racePromise };
+  }
+
+  async waitForInstantSendLock(
+    txid: string,
+    publicKey: Uint8Array,
+    utxo: { txid: string; vout: number },
+    timeoutMs: number = 60000,
+    onRetry?: RetryOptions['onRetry'],
+    onProgress?: (message: string) => void
+  ): Promise<Uint8Array> {
+    const sub = await this.subscribeForInstantSendLock(txid, publicKey, utxo, timeoutMs, onRetry, onProgress);
+    return sub.wait();
   }
 
   async disconnect(): Promise<void> {
