@@ -4,6 +4,7 @@
 
 import { withRetry, type RetryOptions } from '../utils/retry.js';
 import { describeIslock } from '../utils/islock-debug.js';
+import { abortableSleep } from '../utils/sleep.js';
 
 const API_URLS: Record<string, string> = {
   testnet: 'https://trpc.digitalcash.dev',
@@ -96,13 +97,7 @@ export class DAPIClient {
       }
 
       // Wait before next poll, but bail out immediately if aborted
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, pollInterval);
-        signal?.addEventListener('abort', () => {
-          clearTimeout(timer);
-          resolve();
-        }, { once: true });
-      });
+      await abortableSleep(pollInterval, signal);
     }
 
     throw new Error(

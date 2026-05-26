@@ -1,6 +1,7 @@
 import type { UTXO, TxInfo } from '../types.js';
 import type { NetworkConfig } from '../config.js';
 import { withRetry, type RetryOptions } from '../utils/retry.js';
+import { abortableSleep } from '../utils/sleep.js';
 
 export interface InsightApiResponse<T> {
   success: boolean;
@@ -118,17 +119,7 @@ export class InsightClient {
         console.warn('waitForBlockHeight: polling error', error);
       }
 
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, pollIntervalMs);
-        signal?.addEventListener(
-          'abort',
-          () => {
-            clearTimeout(timer);
-            resolve();
-          },
-          { once: true }
-        );
-      });
+      await abortableSleep(pollIntervalMs, signal);
     }
 
     throw new Error(`Block-height polling aborted for ${txid}`);
