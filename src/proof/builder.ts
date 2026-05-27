@@ -11,7 +11,7 @@ export function buildInstantAssetLockProof(
   transactionBytes: Uint8Array,
   instantLockBytes: Uint8Array,
   outputIndex: number = 0
-): AssetLockProofData {
+): Extract<AssetLockProofData, { type: 'instant' }> {
   return {
     type: 'instant',
     transactionBytes,

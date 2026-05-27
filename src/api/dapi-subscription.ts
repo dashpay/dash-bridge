@@ -229,6 +229,6 @@ export class DAPISubscriptionClient {
     const chain = status.getChainStatus?.() ?? status.chain;
     const raw = chain?.getCoreChainLockedHeight?.() ?? chain?.coreChainLockedHeight;
     if (raw === null || raw === undefined) return undefined;
-    return typeof raw === 'bigint' ? Number(raw) : Number(raw);
+    return Number(raw);
   }
 }

@@ -78,13 +78,13 @@ export class IslockService {
     dapiPromise.catch(() => {});
 
     const raceStart = Date.now();
-    const tagged = async (
+    async function tagged(
       source: string,
       promise: Promise<Uint8Array>
-    ): Promise<{ source: string; bytes: Uint8Array }> => {
+    ): Promise<{ source: string; bytes: Uint8Array }> {
       const bytes = await promise;
       return { source, bytes };
-    };
+    }
 
     const racePromise = (async (): Promise<Uint8Array> => {
       try {

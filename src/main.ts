@@ -115,7 +115,7 @@ import {
 import { publishContract, extractDocumentSchemas } from './platform/contract.js';
 import { getIdentityBalanceAndRevision, disconnectPlatformSdk } from './platform/client.js';
 import { estimateContractFee, parseContractJson } from 'dash-contract-fee-estimator';
-import type { KeyType, KeyPurpose, SecurityLevel, ManageNewKeyConfig } from './types.js';
+import type { KeyType, KeyPurpose, SecurityLevel, ManageNewKeyConfig, AssetLockProofData } from './types.js';
 import type { BridgeState } from './types.js';
 
 // Global state
@@ -1774,14 +1774,11 @@ async function startSendToAddress() {
  * deterministic). The platform-side identity is real either way.
  */
 async function registerIdentityResilient(
-  signedTxBytes: Uint8Array,
-  islockBytes: Uint8Array,
+  proof: Extract<AssetLockProofData, { type: 'instant' }>,
   assetLockPrivateKeyWif: string,
   identityKeys: typeof state.identityKeys,
   network: string
 ): Promise<{ identityId: string; balance: number; revision: number; alreadyExisted?: boolean }> {
-  const proof = buildInstantAssetLockProof(signedTxBytes, islockBytes, 0);
-
   const isAlreadyExistsError = (err: unknown): boolean => {
     const msg =
       err && typeof err === 'object' && 'message' in err
@@ -1807,7 +1804,11 @@ async function registerIdentityResilient(
       '[identity-create] Platform reports state transition already submitted; treating as success.'
     );
     const { AssetLockProof } = await import('@dashevo/evo-sdk');
-    const sdkProof = AssetLockProof.createInstantAssetLockProof(islockBytes, signedTxBytes, 0);
+    const sdkProof = AssetLockProof.createInstantAssetLockProof(
+      proof.instantLockBytes,
+      proof.transactionBytes,
+      proof.outputIndex
+    );
     const identityId = sdkProof.createIdentityId().toString();
     console.log('[identity-create] Recovered identityId:', identityId);
     return { identityId, balance: 0, revision: 0, alreadyExisted: true };
@@ -1924,8 +1925,7 @@ async function startBridge() {
     );
 
     const result = await registerIdentityResilient(
-      signedTxBytes,
-      islockBytes,
+      assetLockProof,
       assetLockPrivateKeyWif,
       state.identityKeys,
       state.network
@@ -2063,8 +2063,7 @@ async function recheckDeposit() {
       // Create mode — register identity
       updateState(setStep(state, 'registering_identity'));
       const result = await registerIdentityResilient(
-        signedTxBytes,
-        islockBytes,
+        assetLockProof,
         assetLockPrivateKeyWif,
         state.identityKeys,
         state.network
@@ -2130,24 +2129,25 @@ async function runPlatformSubmission(
 
   if (state.mode === 'create') {
     updateState(setStep(state, 'registering_identity'));
-    // registerIdentityResilient needs the raw signed tx + IS lock bytes to
-    // derive the identity ID on AlreadyExists, so it only applies to instant
-    // proofs. For chain proofs, call registerIdentity directly.
-    const result =
-      assetLockProof.type === 'instant'
-        ? await registerIdentityResilient(
-            assetLockProof.transactionBytes,
-            assetLockProof.instantLockBytes,
-            assetLockPrivateKeyWif,
-            state.identityKeys,
-            state.network
-          )
-        : await registerIdentity(
-            assetLockProof,
-            assetLockPrivateKeyWif,
-            state.identityKeys,
-            state.network
-          );
+    // registerIdentityResilient derives the identity ID from the asset lock
+    // outpoint on AlreadyExists, which only applies to instant proofs here.
+    // Chain proofs go straight to registerIdentity.
+    let result;
+    if (assetLockProof.type === 'instant') {
+      result = await registerIdentityResilient(
+        assetLockProof,
+        assetLockPrivateKeyWif,
+        state.identityKeys,
+        state.network
+      );
+    } else {
+      result = await registerIdentity(
+        assetLockProof,
+        assetLockPrivateKeyWif,
+        state.identityKeys,
+        state.network
+      );
+    }
     updateState(setIdentityRegistered(state, result.identityId));
     downloadKeyBackup(state);
 
