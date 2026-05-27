@@ -44,10 +44,25 @@ function createPlatformSdk(network: PlatformNetwork): EvoSDK {
         `Devnet "${config.name}" is missing dapiAddresses; cannot create Platform SDK`
       );
     }
+    // EXPLICITLY trusted: false on devnets.
+    //
+    // trusted: true makes the WASM SDK attach the testnet "trusted context"
+    // (quorum keys, chain checkpoints) which it then uses to verify proofs.
+    // That context's address list overrides our custom devnet addresses, so
+    // queries get routed to the public testnet DAPI nodes instead of the
+    // devnet masternodes — at best returning wrong data, at worst silently
+    // succeeding against testnet while looking like it works against devnet.
+    // We verified this empirically against paloma: any apparent success in
+    // trusted mode is a coincidence of state, not a real query.
+    //
+    // For the chainlock fallback we read core_chain_locked_height via
+    // @dashevo/dapi-client.platform.getStatus() directly against the
+    // devnet's dapiAddresses — see
+    // DAPISubscriptionClient.getCoreChainLockedHeight in api/dapi-subscription.ts.
     return new EvoSDK({
       addresses: config.dapiAddresses,
       network: 'testnet',
-      trusted: true,
+      trusted: false,
       ...options,
     });
   }
@@ -91,26 +106,6 @@ function isConnectionError(error: unknown): boolean {
     msg.includes('network') ||
     msg.includes('unavailable') ||
     msg.includes('failed to fetch')
-  );
-}
-
-/**
- * Fetch the current chain-locked tip height from Platform.
- * Returned as a regular `number` because the WASM-bound field is already a
- * `number | undefined`.
- */
-export async function getCoreChainLockedHeight(
-  network: PlatformNetwork,
-  retryOptions?: RetryOptions
-): Promise<number | undefined> {
-  return withConnectedPlatformSdk(
-    network,
-    async (sdk) => {
-      const status = await withRetry(() => sdk.system.status(), retryOptions);
-      const height = status.chain.core_chain_locked_height;
-      return typeof height === 'number' ? height : undefined;
-    },
-    retryOptions
   );
 }
 
