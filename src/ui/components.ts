@@ -72,8 +72,10 @@ const KEY_PURPOSES: KeyPurpose[] = ['AUTHENTICATION', 'ENCRYPTION', 'DECRYPTION'
 const SECURITY_LEVELS: SecurityLevel[] = ['MASTER', 'CRITICAL', 'HIGH', 'MEDIUM'];
 
 /**
- * Get allowed security levels for a given purpose
- * TRANSFER purpose only allows CRITICAL security level
+ * Get allowed security levels for a given purpose.
+ * - TRANSFER purpose only allows CRITICAL security level.
+ * - ENCRYPTION and DECRYPTION purposes only allow MEDIUM security level.
+ * Other purposes return all security levels, unless includeMaster is false.
  */
 function getAllowedSecurityLevels(purpose: KeyPurpose, includeMaster = true): SecurityLevel[] {
   if (purpose === 'TRANSFER') {
