@@ -83,8 +83,11 @@ export const DEVNET_PALOMA: NetworkConfig = {
   faucetBaseUrl: 'https://faucet.paloma.networks.dash.org',
   useTrustedContext: true,
   // DNS for `quorums.paloma.networks.dash.org` is not deployed; point at the
-  // operator-provided host directly until it is.
-  trustedQuorumUrl: 'https://44.238.203.84:8080/quorums',
+  // operator-provided host directly until it is. The SDK appends `/quorums`
+  // to this base URL, so don't include that path here. (The host serves
+  // plain HTTP, not HTTPS — mixed-content blocking will apply when the
+  // bridge itself is served over HTTPS.)
+  trustedQuorumUrl: 'http://44.238.203.84:8080',
 };
 
 const NETWORK_REGISTRY = new Map<string, NetworkConfig>([
