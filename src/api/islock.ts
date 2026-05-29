@@ -202,6 +202,18 @@ export class IslockService {
   }
 
   /**
+   * Read Platform/Tenderdash status (chain-locked Core height, latest Platform
+   * block height + timestamp) for the network-health indicator.
+   */
+  async getPlatformStatus(): Promise<{
+    coreChainLockedHeight?: number;
+    latestBlockHeight?: number;
+    latestBlockTimeMs?: number;
+  }> {
+    return this.subscriptionClient.getPlatformStatus();
+  }
+
+  /**
    * Diagnostic helper: ask DAPI directly whether `txid` is currently
    * IS-locked or chain-locked. Returns null if the tx isn't known.
    *

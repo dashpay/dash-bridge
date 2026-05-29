@@ -6,6 +6,68 @@ import { privateKeyToWif } from '../utils/wif.js';
 import { bytesToHex } from '../utils/hex.js';
 import { getNetwork, getAvailableNetworks } from '../config.js';
 import { getAssetLockDerivationPath } from '../crypto/hd.js';
+import { formatAge } from '../api/network-status.js';
+
+/** Dot color + label for each network-health verdict. */
+const NETWORK_HEALTH_META: Record<
+  import('../types.js').NetworkHealth,
+  { label: string; dotClass: string }
+> = {
+  healthy: { label: 'Network healthy', dotClass: 'healthy' },
+  degraded: { label: 'Network degraded', dotClass: 'degraded' },
+  stalled: { label: 'Platform stalled', dotClass: 'stalled' },
+  unknown: { label: 'Status unknown', dotClass: 'unknown' },
+};
+
+/**
+ * Compact header indicator: a colored dot + short label reflecting overall
+ * network health. Hidden until the first status snapshot arrives. The full
+ * `title` tooltip carries the underlying numbers.
+ */
+function renderNetworkStatusIndicator(state: BridgeState): string {
+  const status = state.networkStatus;
+  if (!status) return '';
+  const meta = NETWORK_HEALTH_META[status.health];
+
+  const tip: string[] = [];
+  if (status.coreHeight !== undefined) tip.push(`Core height: ${status.coreHeight}`);
+  if (status.coreChainLockedHeight !== undefined)
+    tip.push(`Platform chain-locked: ${status.coreChainLockedHeight}`);
+  if (status.platformBlockHeight !== undefined)
+    tip.push(`Platform block: ${status.platformBlockHeight}`);
+  if (status.platformBlockAgeMs !== undefined)
+    tip.push(`Platform block age: ${formatAge(status.platformBlockAgeMs)}`);
+  if (status.reasons.length) tip.push('', ...status.reasons);
+
+  return `<span class="net-status ${meta.dotClass}" title="${escapeAttr(tip.join('\n'))}">
+    <span class="net-status-dot"></span>${escapeHtml(meta.label)}
+  </span>`;
+}
+
+/**
+ * Full-width warning banner shown only when health is degraded/stalled, so the
+ * user understands why Platform operations may hang even though Core is moving.
+ */
+function renderNetworkStatusBanner(state: BridgeState): HTMLElement | null {
+  const status = state.networkStatus;
+  if (!status || status.health === 'healthy' || status.health === 'unknown') return null;
+  if (status.reasons.length === 0) return null;
+
+  const banner = document.createElement('div');
+  banner.className = `net-status-banner ${status.health}`;
+  const heading =
+    status.health === 'stalled'
+      ? 'Platform network issue'
+      : 'Network running slow';
+  banner.innerHTML = `
+    <span class="net-status-banner-icon">${status.health === 'stalled' ? '⚠️' : '⏳'}</span>
+    <div class="net-status-banner-body">
+      <strong>${escapeHtml(heading)}</strong>
+      <ul>${status.reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join('')}</ul>
+    </div>
+  `;
+  return banner;
+}
 
 /**
  * Build a Platform Explorer URL for a given entity.
@@ -129,8 +191,13 @@ export function render(state: BridgeState, container: HTMLElement): void {
   header.innerHTML = `
     <h1>Dash Core → Platform Bridge</h1>
     <p class="network-badge ${badgeClass}">${escapeHtml(state.network.toUpperCase())}</p>
+    ${renderNetworkStatusIndicator(state)}
   `;
   wrapper.appendChild(header);
+
+  // Detailed warning banner when Platform health is degraded/stalled
+  const statusBanner = renderNetworkStatusBanner(state);
+  if (statusBanner) wrapper.appendChild(statusBanner);
 
   // Retry indicator banner
   if (state.retryStatus?.isRetrying) {

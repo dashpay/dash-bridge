@@ -179,6 +179,78 @@
       color: #fff;
     }
 
+    /* Network health indicator (header) */
+    .net-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: 10px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: #9aa0a6;
+      vertical-align: middle;
+      cursor: default;
+    }
+
+    .net-status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #888;
+      flex-shrink: 0;
+    }
+
+    .net-status.healthy { color: #6bd28a; }
+    .net-status.healthy .net-status-dot {
+      background: #2ecc71;
+      box-shadow: 0 0 6px rgba(46, 204, 113, 0.7);
+    }
+
+    .net-status.degraded { color: #f0b86e; }
+    .net-status.degraded .net-status-dot {
+      background: #ff9800;
+      box-shadow: 0 0 6px rgba(255, 152, 0, 0.7);
+    }
+
+    .net-status.stalled { color: #f08a8a; }
+    .net-status.stalled .net-status-dot {
+      background: #e74c3c;
+      box-shadow: 0 0 6px rgba(231, 76, 60, 0.8);
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    .net-status.unknown { color: #888; }
+    .net-status.unknown .net-status-dot { background: #666; }
+
+    /* Network health warning banner */
+    .net-status-banner {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin-bottom: 16px;
+      text-align: left;
+      font-size: 0.85rem;
+    }
+
+    .net-status-banner.degraded {
+      background: rgba(255, 152, 0, 0.12);
+      border: 1px solid rgba(255, 152, 0, 0.3);
+      color: #f0b86e;
+    }
+
+    .net-status-banner.stalled {
+      background: rgba(231, 76, 60, 0.12);
+      border: 1px solid rgba(231, 76, 60, 0.35);
+      color: #f08a8a;
+    }
+
+    .net-status-banner-icon { font-size: 1.1rem; line-height: 1.4; }
+    .net-status-banner-body strong { display: block; margin-bottom: 4px; color: #fff; }
+    .net-status-banner-body ul { margin: 0; padding-left: 18px; }
+    .net-status-banner-body li { margin: 2px 0; }
+
     /* Retry banner */
     .retry-banner {
       background: rgba(255, 152, 0, 0.15);

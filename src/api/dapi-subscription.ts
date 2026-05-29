@@ -225,11 +225,39 @@ export class DAPISubscriptionClient {
    *   reports no chain-lock yet.
    */
   async getCoreChainLockedHeight(): Promise<number | undefined> {
+    const status = await this.getPlatformStatus();
+    return status.coreChainLockedHeight;
+  }
+
+  /**
+   * Read Platform/Tenderdash status via gRPC `platform.getStatus()`. Surfaces
+   * the chain-locked Core height plus the latest Platform block height and its
+   * timestamp, which together let callers detect a stalled Platform consensus
+   * (Core advancing while Tenderdash is stuck). Fields are `undefined` when the
+   * masternode doesn't report them.
+   */
+  async getPlatformStatus(): Promise<{
+    coreChainLockedHeight?: number;
+    latestBlockHeight?: number;
+    latestBlockTimeMs?: number;
+  }> {
     const status = await this.dapiClient.platform.getStatus();
+
     const chain = status.getChainStatus?.() ?? status.chain;
-    const raw = chain?.getCoreChainLockedHeight?.() ?? chain?.coreChainLockedHeight;
-    if (raw === null || raw === undefined) return undefined;
-    return Number(raw);
+    const clhRaw = chain?.getCoreChainLockedHeight?.() ?? chain?.coreChainLockedHeight;
+    const lbhRaw = chain?.getLatestBlockHeight?.() ?? chain?.latestBlockHeight;
+
+    const time = status.getTimeStatus?.() ?? status.time;
+    const blockTimeRaw = time?.getBlockTime?.() ?? time?.block;
+
+    const toNum = (v: unknown): number | undefined =>
+      v === null || v === undefined ? undefined : Number(v);
+
+    return {
+      coreChainLockedHeight: toNum(clhRaw),
+      latestBlockHeight: toNum(lbhRaw),
+      latestBlockTimeMs: toNum(blockTimeRaw),
+    };
   }
 
   /**

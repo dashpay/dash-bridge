@@ -4,6 +4,7 @@ import { deriveAssetLockKeyPair } from './crypto/hd.js';
 import { createAssetLockTransaction, serializeTransaction, calculateTxId } from './transaction/index.js';
 import { InsightClient } from './api/insight.js';
 import { IslockService } from './api/islock.js';
+import { fetchNetworkStatus } from './api/network-status.js';
 import { DAPIClient } from './api/dapi.js';
 import { buildInstantAssetLockProof, buildChainAssetLockProof } from './proof/index.js';
 import { registerIdentity, topUpIdentity, updateIdentity, sendToPlatformAddress, AddKeyConfig } from './platform/index.js';
@@ -32,6 +33,7 @@ import {
   ErrorCodes,
   setDepositTimedOut,
   setNetwork,
+  setNetworkStatus,
   updateIdentityKey,
   addIdentityKey,
   removeIdentityKey,
@@ -131,6 +133,52 @@ function initClients(network: string): void {
     rpcUrl: config.rpcUrl,
     dapiAddresses: config.dapiAddresses,
   });
+  startNetworkStatusPolling();
+}
+
+// ── Network-status polling ──────────────────────────────────────────────────
+// Periodically compares Core (Insight) height against Platform (DAPI) status
+// so the header can warn when Platform consensus stalls while Core keeps
+// moving. Re-renders only when the health verdict (or its reasons) changes, to
+// avoid disrupting the UI on every tick.
+const NETWORK_STATUS_POLL_MS = 30_000;
+let networkStatusTimer: ReturnType<typeof setInterval> | undefined;
+let networkStatusGeneration = 0;
+let lastNetworkStatusKey: string | undefined;
+
+function stopNetworkStatusPolling(): void {
+  if (networkStatusTimer !== undefined) {
+    clearInterval(networkStatusTimer);
+    networkStatusTimer = undefined;
+  }
+  // Bump the generation so any in-flight fetch result is ignored.
+  networkStatusGeneration += 1;
+  lastNetworkStatusKey = undefined;
+}
+
+function startNetworkStatusPolling(): void {
+  stopNetworkStatusPolling();
+  const generation = networkStatusGeneration;
+  const insight = insightClient;
+  const islock = islockService;
+
+  const poll = async (): Promise<void> => {
+    try {
+      const status = await fetchNetworkStatus(insight, islock);
+      // Ignore results from a superseded network/client.
+      if (generation !== networkStatusGeneration) return;
+
+      const key = `${status.health}|${status.reasons.join('|')}`;
+      if (key === lastNetworkStatusKey) return;
+      lastNetworkStatusKey = key;
+      updateState(setNetworkStatus(state, status));
+    } catch (err) {
+      console.warn('Network status poll failed:', err);
+    }
+  };
+
+  void poll();
+  networkStatusTimer = setInterval(() => void poll(), NETWORK_STATUS_POLL_MS);
 }
 
 function switchNetwork(network: string): void {

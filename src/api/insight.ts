@@ -44,6 +44,28 @@ export class InsightClient {
   }
 
   /**
+   * Current Core block height, via Insight `/status?q=getInfo` (`info.blocks`).
+   * Used by the network-status indicator to compare Core's tip against
+   * Platform's chain-locked height.
+   */
+  async getBlockHeight(retryOptions?: RetryOptions): Promise<number> {
+    return withRetry(async () => {
+      const response = await fetch(`${this.baseUrl}/status?q=getInfo`);
+
+      if (!response.ok) {
+        throw new Error(`Insight API error: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      const blocks = data?.info?.blocks;
+      if (typeof blocks !== 'number') {
+        throw new Error('Insight getInfo response missing info.blocks');
+      }
+      return blocks;
+    }, retryOptions);
+  }
+
+  /**
    * Broadcast a raw transaction
    */
   async broadcastTransaction(txHex: string, retryOptions?: RetryOptions): Promise<string> {

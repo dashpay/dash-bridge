@@ -11,6 +11,7 @@ import type {
   IdentityPublicKeyInfo,
   ManageNewKeyConfig,
   AssetLockProofData,
+  NetworkStatus,
 } from '../types.js';
 import {
   generateDefaultIdentityKeysHD,
@@ -534,6 +535,16 @@ export function setChainlockProofReady(
     ...state,
     assetLockProof: proof,
   };
+}
+
+/**
+ * Update the network-health snapshot shown in the header indicator.
+ */
+export function setNetworkStatus(
+  state: BridgeState,
+  networkStatus: NetworkStatus
+): BridgeState {
+  return { ...state, networkStatus };
 }
 
 /**
