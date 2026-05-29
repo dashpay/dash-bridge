@@ -1,5 +1,8 @@
 # Dash Bridge
 
+[![CI](https://github.com/PastaPastaPasta/dash-bridge/actions/workflows/deploy.yml/badge.svg)](https://github.com/PastaPastaPasta/dash-bridge/actions/workflows/deploy.yml)
+![Evo SDK](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FPastaPastaPasta%2Fdash-bridge%2Fmain%2Fpackage.json&query=%24.dependencies%5B%22%40dashevo%2Fevo-sdk%22%5D&label=%40dashevo%2Fevo-sdk&color=blue)
+
 A non-custodial bridge for converting Dash Core funds to Dash Platform credits.
 
 ## Features
