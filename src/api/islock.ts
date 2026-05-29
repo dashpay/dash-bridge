@@ -109,14 +109,26 @@ export class IslockService {
     const tripwireController = new AbortController();
     this.startLockStatusTripwire(txid, tripwireController.signal);
 
-    const dapiSub = await this.subscriptionClient.subscribeForInstantSendLock(
-      txid,
-      publicKey,
-      utxo,
-      timeoutMs,
-      onProgress,
-      dapiController.signal
-    );
+    // The DAPI bloom subscription is best-effort here: JSON-RPC polling is the
+    // reliable path on testnet/mainnet. The subscription's setup hits
+    // dapi-client masternode address resolution, which can throw "No available
+    // addresses" on those networks (no explicit dapiAddresses). Don't let that
+    // abort the whole wait — fall back to JSON-RPC polling alone.
+    let dapiSub: { wait: () => Promise<Uint8Array> } | null = null;
+    try {
+      dapiSub = await this.subscriptionClient.subscribeForInstantSendLock(
+        txid,
+        publicKey,
+        utxo,
+        timeoutMs,
+        onProgress,
+        dapiController.signal
+      );
+    } catch (error) {
+      console.warn(
+        `[islock] DAPI bloom subscription unavailable; using JSON-RPC polling only: ${(error as Error).message}`
+      );
+    }
 
     const jsonRpcPromise = this.jsonRpcClient.waitForInstantSendLock(
       txid,
@@ -126,8 +138,8 @@ export class IslockService {
     );
 
     jsonRpcPromise.catch(() => {});
-    const dapiPromise = dapiSub.wait();
-    dapiPromise.catch(() => {});
+    const dapiPromise = dapiSub?.wait();
+    dapiPromise?.catch(() => {});
 
     const raceStart = Date.now();
     async function tagged(
@@ -139,11 +151,12 @@ export class IslockService {
     }
 
     const racePromise = (async (): Promise<Uint8Array> => {
+      const contenders = [tagged('json-rpc', jsonRpcPromise)];
+      if (dapiPromise) {
+        contenders.push(tagged('dapi-subscription', dapiPromise));
+      }
       try {
-        const winner = await Promise.any([
-          tagged('json-rpc', jsonRpcPromise),
-          tagged('dapi-subscription', dapiPromise),
-        ]);
+        const winner = await Promise.any(contenders);
         const elapsedMs = Date.now() - raceStart;
         console.log(
           `[islock-debug] IS lock race won by ${winner.source} for txid=${txid} in ${elapsedMs}ms`
