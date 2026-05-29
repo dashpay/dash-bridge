@@ -231,4 +231,28 @@ export class DAPISubscriptionClient {
     if (raw === null || raw === undefined) return undefined;
     return Number(raw);
   }
+
+  /**
+   * Fetch tx lock status from DAPI gRPC `getTransaction`. Returns
+   * `instantLocked`/`chainLocked` booleans (the endpoint does NOT return the
+   * IS lock bytes, so this is only useful as a diagnostic tripwire to detect
+   * cases where DAPI silently dropped the IS lock we needed from the
+   * bloom-filter subscription).
+   *
+   * Returns `null` if the tx isn't known yet (not in mempool, not mined).
+   */
+  async getTransactionLockStatus(
+    txid: string
+  ): Promise<{ instantLocked: boolean; chainLocked: boolean; height: number } | null> {
+    try {
+      const response = await this.dapiClient.core.getTransaction(txid);
+      return {
+        instantLocked: !!response.isInstantLocked?.(),
+        chainLocked: !!response.isChainLocked?.(),
+        height: Number(response.getHeight?.() ?? 0),
+      };
+    } catch {
+      return null;
+    }
+  }
 }

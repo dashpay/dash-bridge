@@ -1,6 +1,7 @@
 import { DAPIClient, type DAPIConfig } from './dapi.js';
 import { DAPISubscriptionClient, type DAPISubscriptionConfig } from './dapi-subscription.js';
 import type { RetryOptions } from '../utils/retry.js';
+import { abortableSleep } from '../utils/sleep.js';
 
 export interface IslockServiceConfig {
   network: string;
@@ -26,6 +27,44 @@ export class IslockService {
   }
 
   /**
+   * Diagnostic poller. Watches `getTransaction(txid)` and logs a one-shot
+   * warning the first time DAPI reports the tx as IS-locked. If the bloom
+   * subscription has not delivered the IS lock by then, the discrepancy is
+   * almost certainly the post-mempool-sent race in DAPI's
+   * `subscribeToNewTransactions` (matched tx not in `transactionHashesMap`
+   * when the IS lock arrives → silently dropped). The poller can't recover
+   * the IS lock bytes — only the bloom subscription can — but the warning
+   * makes the failure mode visible.
+   */
+  private startLockStatusTripwire(txid: string, signal: AbortSignal): void {
+    void (async () => {
+      let warnedInstant = false;
+      let warnedChain = false;
+      while (!signal.aborted) {
+        const status = await this.subscriptionClient
+          .getTransactionLockStatus(txid)
+          .catch(() => null);
+        if (signal.aborted) return;
+        if (status) {
+          if (status.instantLocked && !warnedInstant) {
+            warnedInstant = true;
+            console.warn(
+              `[islock-tripwire] DAPI reports tx ${txid} is IS-locked, but our bloom subscription has not delivered the IS lock bytes. This is consistent with the DAPI subscribeToNewTransactions race (matched tx absent from transactionHashesMap when the IS lock arrives). Continuing to wait on the bloom subscription.`
+            );
+          }
+          if (status.chainLocked && !warnedChain) {
+            warnedChain = true;
+            console.warn(
+              `[islock-tripwire] DAPI reports tx ${txid} is chain-locked (height ${status.height}); IS lock window is effectively closed. If the bloom subscription does not produce an IS lock soon, the chainlock fallback is the right escape hatch.`
+            );
+          }
+        }
+        await abortableSleep(3000, signal);
+      }
+    })();
+  }
+
+  /**
    * Open IS lock sources (DAPI bloom subscription + optional JSON-RPC polling)
    * before broadcasting. Returns a handle whose `.wait()` resolves with the
    * IS lock bytes once available. This avoids the race where dashd signs the
@@ -42,13 +81,24 @@ export class IslockService {
   ): Promise<{ wait: () => Promise<Uint8Array> }> {
     if (!this.hasJsonRpc) {
       // DAPI subscription only — establish the stream, then return.
-      return this.subscriptionClient.subscribeForInstantSendLock(
+      const sub = await this.subscriptionClient.subscribeForInstantSendLock(
         txid,
         publicKey,
         utxo,
         timeoutMs,
         onProgress
       );
+      const tripwireController = new AbortController();
+      this.startLockStatusTripwire(txid, tripwireController.signal);
+      return {
+        wait: async () => {
+          try {
+            return await sub.wait();
+          } finally {
+            tripwireController.abort();
+          }
+        },
+      };
     }
 
     // Race JSON-RPC polling against DAPI subscription — first success wins.
@@ -56,6 +106,8 @@ export class IslockService {
     // soon as the race settles.
     const jsonRpcController = new AbortController();
     const dapiController = new AbortController();
+    const tripwireController = new AbortController();
+    this.startLockStatusTripwire(txid, tripwireController.signal);
 
     const dapiSub = await this.subscriptionClient.subscribeForInstantSendLock(
       txid,
@@ -107,6 +159,7 @@ export class IslockService {
       } finally {
         jsonRpcController.abort();
         dapiController.abort();
+        tripwireController.abort();
       }
     })();
     racePromise.catch(() => {});
@@ -133,6 +186,22 @@ export class IslockService {
    */
   async getCoreChainLockedHeight(): Promise<number | undefined> {
     return this.subscriptionClient.getCoreChainLockedHeight();
+  }
+
+  /**
+   * Diagnostic helper: ask DAPI directly whether `txid` is currently
+   * IS-locked or chain-locked. Returns null if the tx isn't known.
+   *
+   * The endpoint does NOT return IS lock bytes, so this can't replace the
+   * bloom-filter subscription — but it lets us detect cases where DAPI's
+   * subscribeToTransactionsWithProofs silently dropped our IS lock (a known
+   * race in DAPI's post-mempool-sent handler — see
+   * `subscribeToNewTransactions.js`).
+   */
+  async getTransactionLockStatus(
+    txid: string
+  ): Promise<{ instantLocked: boolean; chainLocked: boolean; height: number } | null> {
+    return this.subscriptionClient.getTransactionLockStatus(txid);
   }
 
   async disconnect(): Promise<void> {
