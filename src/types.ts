@@ -3,6 +3,8 @@ export interface KeyPair {
   publicKey: Uint8Array;
 }
 
+export type E2EMockWindow = Window & { __e2eMockAdvance?: () => void };
+
 export interface UTXO {
   txid: string;
   vout: number;

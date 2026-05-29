@@ -25,3 +25,26 @@ jobs:
         run: npm run build
       - name: Test
         run: npm test -- --run --passWithNoTests
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install Playwright browser
+        run: npm run test:e2e:install
+      - name: Run deterministic Playwright suite
+        run: npm run test:e2e
+      - name: Upload Playwright artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: warn
