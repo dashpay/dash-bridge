@@ -77,9 +77,26 @@ export class IslockService {
     const dapiPromise = dapiSub.wait();
     dapiPromise.catch(() => {});
 
+    const raceStart = Date.now();
+    async function tagged(
+      source: string,
+      promise: Promise<Uint8Array>
+    ): Promise<{ source: string; bytes: Uint8Array }> {
+      const bytes = await promise;
+      return { source, bytes };
+    }
+
     const racePromise = (async (): Promise<Uint8Array> => {
       try {
-        return await Promise.any([jsonRpcPromise, dapiPromise]);
+        const winner = await Promise.any([
+          tagged('json-rpc', jsonRpcPromise),
+          tagged('dapi-subscription', dapiPromise),
+        ]);
+        const elapsedMs = Date.now() - raceStart;
+        console.log(
+          `[islock-debug] IS lock race won by ${winner.source} for txid=${txid} in ${elapsedMs}ms`
+        );
+        return winner.bytes;
       } catch (error) {
         if (error instanceof AggregateError) {
           throw new Error(
@@ -107,6 +124,15 @@ export class IslockService {
   ): Promise<Uint8Array> {
     const sub = await this.subscribeForInstantSendLock(txid, publicKey, utxo, timeoutMs, onRetry, onProgress);
     return sub.wait();
+  }
+
+  /**
+   * Direct gRPC read of the Platform chain-locked Dash Core height.
+   * Used by the chainlock fallback — see DAPISubscriptionClient
+   * for why this bypasses `sdk.system.status()`.
+   */
+  async getCoreChainLockedHeight(): Promise<number | undefined> {
+    return this.subscriptionClient.getCoreChainLockedHeight();
   }
 
   async disconnect(): Promise<void> {

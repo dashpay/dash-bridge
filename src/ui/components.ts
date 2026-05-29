@@ -819,10 +819,36 @@ function renderProcessingStep(state: BridgeState): HTMLElement {
   spinner.className = 'spinner large';
   div.appendChild(spinner);
 
-  // Status text
+  // Status text — for the chainlock wait, derive it from the polling
+  // progress so the user sees what we're actually waiting on.
   const status = document.createElement('p');
   status.className = 'processing-status';
-  status.textContent = 'Waiting for confirmation...';
+  if (isChainlock) {
+    const block = state.assetLockTxBlockHeight;
+    const clh = state.coreChainLockedHeight;
+    if (block === undefined) {
+      status.textContent = 'Waiting for the asset lock transaction to be mined…';
+    } else if (clh !== undefined && clh >= block) {
+      status.textContent = 'Submitting chain asset lock proof…';
+    } else if (clh !== undefined) {
+      const remaining = block - clh;
+      status.textContent = `Waiting for chain lock (${remaining} block${remaining === 1 ? '' : 's'} to go)…`;
+    } else {
+      status.textContent = 'Waiting for the chain-locked tip…';
+    }
+  } else if (state.step === 'registering_identity') {
+    status.textContent = 'Submitting identity-creation state transition to Platform…';
+  } else if (state.step === 'topping_up') {
+    status.textContent = 'Submitting top-up state transition to Platform…';
+  } else if (state.step === 'sending_to_address') {
+    status.textContent = 'Submitting send-to-address state transition to Platform…';
+  } else if (state.step === 'broadcasting') {
+    status.textContent = 'Broadcasting asset lock transaction to Dash Core…';
+  } else if (state.step === 'waiting_islock') {
+    status.textContent = 'Waiting for the InstantSend lock from the masternode quorum…';
+  } else {
+    status.textContent = 'Waiting for confirmation...';
+  }
   div.appendChild(status);
 
   if (isChainlock) {

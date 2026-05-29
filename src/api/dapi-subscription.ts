@@ -3,6 +3,7 @@
 import DAPIClientModule from '@dashevo/dapi-client';
 import dashcoreLib from '@dashevo/dashcore-lib';
 import { hash160 } from '../crypto/hash.js';
+import { describeIslock } from '../utils/islock-debug.js';
 
 interface BloomFilterStatic {
   create(elements: number, falsePositiveRate: number, nTweak: number, nFlags: number): {
@@ -168,6 +169,8 @@ export class DAPISubscriptionClient {
             console.log(`[islock-sub] IS lock txid=${lockTxid} (want ${txid})`);
             if (lockTxid === txid) {
               onProgress?.('InstantSend lock received!');
+              const debug = describeIslock(bytes, 'dapi-subscription');
+              console.log('[islock-debug] IS lock received via gRPC subscription:', debug);
               finish(() => resolve(bytes));
               return;
             }
@@ -207,5 +210,25 @@ export class DAPISubscriptionClient {
 
   async disconnect(): Promise<void> {
     try { await this.dapiClient.disconnect(); } catch { /* ignore */ }
+  }
+
+  /**
+   * Read the chain-locked Dash Core block height directly from Platform via
+   * gRPC (`platform.getStatus()` → `chain.coreChainLockedHeight`).
+   *
+   * We go straight to dapi-client rather than `sdk.system.status()` because
+   * the wasm SDK in trusted mode returns testnet-cached values for this
+   * field on devnets, while this path is authoritative for whatever
+   * masternode the dapiAddresses point at.
+   *
+   * @returns the chain-locked height, or `undefined` if the masternode
+   *   reports no chain-lock yet.
+   */
+  async getCoreChainLockedHeight(): Promise<number | undefined> {
+    const status = await this.dapiClient.platform.getStatus();
+    const chain = status.getChainStatus?.() ?? status.chain;
+    const raw = chain?.getCoreChainLockedHeight?.() ?? chain?.coreChainLockedHeight;
+    if (raw === null || raw === undefined) return undefined;
+    return Number(raw);
   }
 }

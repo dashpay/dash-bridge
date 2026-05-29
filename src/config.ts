@@ -10,6 +10,25 @@ export interface NetworkConfig {
   faucetBaseUrl?: string;
   dapiAddresses?: string[];
   rpcUrl?: string;
+  /**
+   * Devnet-only: opt in to the SDK's trusted-context mode. When true, the
+   * SDK prefetches a quorum context (from `trustedQuorumUrl` if set,
+   * otherwise from `https://quorums.<devnetName>.networks.dash.org`) so it
+   * can verify proofs and discover masternode addresses — same proof-bearing
+   * read/write surface as mainnet/testnet trusted.
+   */
+  useTrustedContext?: boolean;
+  /** Devnet-only: explicit quorum context URL (overrides DNS-derived URL). */
+  trustedQuorumUrl?: string;
+}
+
+/**
+ * Bare devnet name expected by the SDK's `EvoSDK.devnet` / `EvoSDK.devnetTrusted`
+ * factories. Our config names are conventionally `devnet-<name>`; the SDK
+ * derives the default trusted-quorum URL from the bare name.
+ */
+export function devnetNameForSdk(name: string): string {
+  return name.startsWith('devnet-') ? name.slice('devnet-'.length) : name;
 }
 
 export const TESTNET: NetworkConfig = {
@@ -62,6 +81,10 @@ export const DEVNET_PALOMA: NetworkConfig = {
     'https://68.67.122.207:1443',
   ],
   faucetBaseUrl: 'https://faucet.paloma.networks.dash.org',
+  useTrustedContext: true,
+  // No explicit trustedQuorumUrl — the SDK's default for a devnet named
+  // `paloma` resolves to `https://quorums.paloma.networks.dash.org/quorums`,
+  // which is the deployed endpoint.
 };
 
 const NETWORK_REGISTRY = new Map<string, NetworkConfig>([
@@ -98,7 +121,9 @@ function loadCustomDevnets(): NetworkConfig[] {
         typeof c.platformHrp === 'string' &&
         Array.isArray(c.dapiAddresses) &&
         c.dapiAddresses.length > 0 &&
-        c.dapiAddresses.every((a: unknown) => typeof a === 'string')
+        c.dapiAddresses.every((a: unknown) => typeof a === 'string') &&
+        (c.useTrustedContext === undefined || typeof c.useTrustedContext === 'boolean') &&
+        (c.trustedQuorumUrl === undefined || typeof c.trustedQuorumUrl === 'string')
     );
   } catch {
     return [];
@@ -130,6 +155,8 @@ export function createCustomDevnetConfig(params: {
   dapiAddresses: string[];
   rpcUrl?: string;
   faucetBaseUrl?: string;
+  useTrustedContext?: boolean;
+  trustedQuorumUrl?: string;
 }): NetworkConfig {
   return {
     type: 'devnet',
@@ -143,6 +170,8 @@ export function createCustomDevnetConfig(params: {
     dapiAddresses: params.dapiAddresses,
     rpcUrl: params.rpcUrl,
     faucetBaseUrl: params.faucetBaseUrl,
+    useTrustedContext: params.useTrustedContext,
+    trustedQuorumUrl: params.trustedQuorumUrl,
   };
 }
 
