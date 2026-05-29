@@ -1716,6 +1716,7 @@ async function startTopUp() {
       updateState(setTransactionBroadcast(state, 'b'.repeat(64)));
       await delay(120);
       updateState(setInstantLockReceived(state, new Uint8Array([1, 2, 3, 4]), {
+        type: 'instant',
         transactionBytes: new Uint8Array([0xc0, 0xff, 0xee]),
         instantLockBytes: new Uint8Array([1, 2, 3, 4]),
         outputIndex: 0,
@@ -2041,6 +2042,7 @@ async function startBridge() {
       updateState(setTransactionBroadcast(state, 'd'.repeat(64)));
       await delay(120);
       updateState(setInstantLockReceived(state, new Uint8Array([5, 6, 7, 8]), {
+        type: 'instant',
         transactionBytes: new Uint8Array([0xbe, 0xef]),
         instantLockBytes: new Uint8Array([5, 6, 7, 8]),
         outputIndex: 0,
