@@ -5,11 +5,17 @@ import type { InsightClient } from './insight.js';
 import type { IslockService } from './islock.js';
 
 type PlatformStatus = Awaited<ReturnType<IslockService['getPlatformStatus']>>;
+type ChainLock = Awaited<ReturnType<IslockService['getBestChainLock']>>;
 
-/** Build stub clients that resolve/reject with the supplied values. */
+/**
+ * Build stub clients. `platform` selects the DAPI path (devnet:
+ * supportsJsonRpc=false); `chainLock` selects the JSON-RPC path
+ * (mainnet/testnet: supportsJsonRpc=true).
+ */
 function makeClients(opts: {
   coreHeight?: number | Error;
   platform?: PlatformStatus | Error;
+  chainLock?: ChainLock | Error;
 }): { insight: InsightClient; islock: IslockService } {
   const insight = {
     getBlockHeight: async () => {
@@ -19,7 +25,14 @@ function makeClients(opts: {
     },
   } as unknown as InsightClient;
 
+  const useJsonRpc = opts.chainLock !== undefined;
+
   const islock = {
+    supportsJsonRpc: useJsonRpc,
+    getBestChainLock: async () => {
+      if (opts.chainLock instanceof Error) throw opts.chainLock;
+      return opts.chainLock ?? null;
+    },
     getPlatformStatus: async () => {
       if (opts.platform instanceof Error) throw opts.platform;
       if (opts.platform === undefined) throw new Error('no platform status');
@@ -32,7 +45,7 @@ function makeClients(opts: {
 
 const freshBlock = (): number => Date.now() - 5_000; // 5s old
 
-describe('fetchNetworkStatus', () => {
+describe('fetchNetworkStatus (DAPI / devnet path)', () => {
   it('reports healthy when Core and Platform are in lock-step', async () => {
     const { insight, islock } = makeClients({
       coreHeight: 10_700,
@@ -95,16 +108,6 @@ describe('fetchNetworkStatus', () => {
     expect(status.chainLockLag).toBe(12);
   });
 
-  it('is unknown when neither source responds', async () => {
-    const { insight, islock } = makeClients({
-      coreHeight: new Error('insight down'),
-      platform: new Error('dapi down'),
-    });
-
-    const status = await fetchNetworkStatus(insight, islock);
-    expect(status.health).toBe('unknown');
-  });
-
   it('marks Platform unreachable as degraded (not a false stall) when only Core responds', async () => {
     const { insight, islock } = makeClients({
       coreHeight: 10_700,
@@ -115,6 +118,69 @@ describe('fetchNetworkStatus', () => {
     expect(status.health).toBe('degraded');
     expect(status.coreHeight).toBe(10_700);
     expect(status.reasons.join(' ')).toMatch(/Platform/i);
+  });
+});
+
+describe('fetchNetworkStatus (JSON-RPC / mainnet-testnet path)', () => {
+  it('reports healthy when Core chain-lock tracks the tip', async () => {
+    const { insight, islock } = makeClients({
+      coreHeight: 10_700,
+      chainLock: { height: 10_699 },
+    });
+
+    const status = await fetchNetworkStatus(insight, islock);
+    expect(status.health).toBe('healthy');
+    expect(status.coreChainLockedHeight).toBe(10_699);
+    expect(status.chainLockLag).toBe(1);
+    // No Tenderdash block age signal on this path.
+    expect(status.platformBlockHeight).toBeUndefined();
+  });
+
+  it('flags stalled when Core chain-lock falls far behind', async () => {
+    const { insight, islock } = makeClients({
+      coreHeight: 10_700,
+      chainLock: { height: 10_650 }, // 50 behind
+    });
+
+    const status = await fetchNetworkStatus(insight, islock);
+    expect(status.health).toBe('stalled');
+    expect(status.chainLockLag).toBe(50);
+  });
+
+  it('stays healthy (no lag signal) when no chain lock observed yet', async () => {
+    const { insight, islock } = makeClients({
+      coreHeight: 10_700,
+      chainLock: null,
+    });
+
+    const status = await fetchNetworkStatus(insight, islock);
+    expect(status.health).toBe('healthy');
+    expect(status.coreChainLockedHeight).toBeUndefined();
+    expect(status.chainLockLag).toBeUndefined();
+  });
+
+  it('reports the RPC source (not Platform) when the chain-lock RPC fails', async () => {
+    const { insight, islock } = makeClients({
+      coreHeight: 10_700,
+      chainLock: new Error('rpc down'),
+    });
+
+    const status = await fetchNetworkStatus(insight, islock);
+    expect(status.health).toBe('degraded');
+    expect(status.reasons.join(' ')).toMatch(/RPC/i);
+    expect(status.reasons.join(' ')).not.toMatch(/Platform/i);
+  });
+});
+
+describe('fetchNetworkStatus (both sources down)', () => {
+  it('is unknown when neither Core nor the chain-lock source responds', async () => {
+    const { insight, islock } = makeClients({
+      coreHeight: new Error('insight down'),
+      chainLock: new Error('rpc down'),
+    });
+
+    const status = await fetchNetworkStatus(insight, islock);
+    expect(status.health).toBe('unknown');
   });
 });
 

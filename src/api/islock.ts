@@ -202,8 +202,28 @@ export class IslockService {
   }
 
   /**
+   * Whether a JSON-RPC endpoint is configured (mainnet/testnet). Devnets have
+   * none and must read Platform status over DAPI instead. The network-status
+   * poller uses this to avoid the dapi-client seed/SML address resolution,
+   * which can't complete in a browser on mainnet/testnet.
+   */
+  get supportsJsonRpc(): boolean {
+    return this.hasJsonRpc;
+  }
+
+  /**
+   * Core's best chain-lock (height + blockhash) via JSON-RPC. Returns null when
+   * no chain lock has been observed yet, or when no JSON-RPC endpoint exists.
+   */
+  async getBestChainLock(): Promise<{ height: number; blockhash?: string } | null> {
+    if (!this.hasJsonRpc) return null;
+    return this.jsonRpcClient.getBestChainLock();
+  }
+
+  /**
    * Read Platform/Tenderdash status (chain-locked Core height, latest Platform
-   * block height + timestamp) for the network-health indicator.
+   * block height + timestamp) over DAPI. Used by the network-health indicator
+   * on devnets (which have explicit dapiAddresses).
    */
   async getPlatformStatus(): Promise<{
     coreChainLockedHeight?: number;

@@ -33,19 +33,49 @@ export async function fetchNetworkStatus(
 ): Promise<NetworkStatus> {
   const checkedAtMs = Date.now();
 
+  // Route the chain-lock source the same way the islock flow is routed:
+  //   - mainnet/testnet (JSON-RPC available): read Core's best chain-lock over
+  //     JSON-RPC. The dapi-client DAPI path can't resolve a masternode address
+  //     in a browser there (seed/SML resolution fails on bad certs + CORS), so
+  //     we deliberately avoid it.
+  //   - devnets (no JSON-RPC, explicit dapiAddresses): read full Platform
+  //     status over DAPI, which also yields Tenderdash block height + age.
+  const useDapiPlatformStatus = !islock.supportsJsonRpc;
+
   // Bound the Insight retry so a flaky endpoint can't stretch one poll past the
-  // 30s interval (the dapi-client behind getPlatformStatus has its own timeout).
-  const [coreResult, platformResult] = await Promise.allSettled([
+  // 30s interval (the dapi-client / JSON-RPC calls have their own timeouts).
+  const [coreResult, secondaryResult] = await Promise.allSettled([
     insight.getBlockHeight({ maxAttempts: 1 }),
-    islock.getPlatformStatus(),
+    useDapiPlatformStatus ? islock.getPlatformStatus() : islock.getBestChainLock(),
   ]);
 
   const coreHeight = coreResult.status === 'fulfilled' ? coreResult.value : undefined;
-  const platform = platformResult.status === 'fulfilled' ? platformResult.value : undefined;
 
-  const coreChainLockedHeight = platform?.coreChainLockedHeight;
-  const platformBlockHeight = platform?.latestBlockHeight;
-  const platformBlockTimeMs = platform?.latestBlockTimeMs;
+  let coreChainLockedHeight: number | undefined;
+  let platformBlockHeight: number | undefined;
+  let platformBlockTimeMs: number | undefined;
+  let secondaryReachable: boolean;
+
+  if (useDapiPlatformStatus) {
+    // Settled value is the getPlatformStatus() shape on this branch.
+    const platform =
+      secondaryResult.status === 'fulfilled'
+        ? (secondaryResult.value as Awaited<ReturnType<IslockService['getPlatformStatus']>>)
+        : undefined;
+    secondaryReachable = platform !== undefined;
+    coreChainLockedHeight = platform?.coreChainLockedHeight;
+    platformBlockHeight = platform?.latestBlockHeight;
+    platformBlockTimeMs = platform?.latestBlockTimeMs;
+  } else {
+    // A null result (no chain lock observed yet) still means the endpoint
+    // answered — only a rejection counts as unreachable.
+    secondaryReachable = secondaryResult.status === 'fulfilled';
+    const chainLock =
+      secondaryResult.status === 'fulfilled'
+        ? (secondaryResult.value as Awaited<ReturnType<IslockService['getBestChainLock']>>)
+        : undefined;
+    coreChainLockedHeight = chainLock?.height;
+  }
 
   const reasons: string[] = [];
   let health: Exclude<NetworkHealth, 'unknown'> = 'healthy';
@@ -71,13 +101,12 @@ export async function fetchNetworkStatus(
   };
 
   const coreReachable = coreHeight !== undefined;
-  const platformReachable = platform !== undefined;
 
   // Nothing answered — we can't say anything useful.
-  if (!coreReachable && !platformReachable) {
+  if (!coreReachable && !secondaryReachable) {
     return {
       health: 'unknown',
-      reasons: ['Could not reach Insight or Platform'],
+      reasons: ['Could not reach Insight or the chain-lock source'],
       checkedAtMs,
     };
   }
@@ -86,15 +115,17 @@ export async function fetchNetworkStatus(
     escalate('degraded');
     reasons.push('Insight (Core) unreachable');
   }
-  if (!platformReachable) {
+  if (!secondaryReachable) {
     // "Unreachable" is a transport failure, not an observed consensus stall —
-    // flag it as degraded so a transient DAPI error doesn't fire a false red
+    // flag it as degraded so a transient error doesn't fire a false red
     // "stalled" alarm. A genuine stall shows up via the lag/age checks below.
     escalate('degraded');
-    reasons.push('Platform (DAPI) status unreachable');
+    reasons.push(
+      useDapiPlatformStatus ? 'Platform (DAPI) status unreachable' : 'Chain-lock RPC unreachable'
+    );
   }
 
-  // Chain-lock lag: Core advancing while Platform's chain-locked height trails.
+  // Chain-lock lag: Core's tip advancing while the chain-locked height trails.
   let chainLockLag: number | undefined;
   if (coreHeight !== undefined && coreChainLockedHeight !== undefined) {
     chainLockLag = coreHeight - coreChainLockedHeight;
@@ -102,7 +133,7 @@ export async function fetchNetworkStatus(
       chainLockLag,
       CHAIN_LOCK_LAG_DEGRADED,
       CHAIN_LOCK_LAG_STALLED,
-      `Platform chain-lock is ${chainLockLag} blocks behind Core (${coreChainLockedHeight} vs ${coreHeight})`
+      `Chain-lock is ${chainLockLag} blocks behind Core (${coreChainLockedHeight} vs ${coreHeight})`
     );
   }
 
