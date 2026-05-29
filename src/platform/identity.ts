@@ -4,26 +4,134 @@ import {
   IdentityPublicKey,
   IdentityPublicKeyInCreation,
   IdentitySigner,
+  OutPoint,
   PrivateKey,
   PlatformAddressSigner,
+  type PurposeLike,
+  type SecurityLevelLike,
+  type KeyTypeLike,
 } from '@dashevo/evo-sdk';
 import { sha256 } from '@noble/hashes/sha256';
 import { ripemd160 } from '@noble/hashes/ripemd160';
 import type { PublicKeyInfo, IdentityKeyConfig, AssetLockProofData } from '../types.js';
 import { withRetry, type RetryOptions } from '../utils/retry.js';
+import { bytesToHex } from '../utils/hex.js';
+import { describeIslock, diffIslockInputsAgainstTx } from '../utils/islock-debug.js';
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+import dashcoreLib from '@dashevo/dashcore-lib';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const DashcoreTransaction = (dashcoreLib as any).Transaction;
 import {
   PLATFORM_PUT_SETTINGS,
   fetchIdentityWithSdk,
   getIdentityBalanceAndRevisionWithSdk,
+  waitForIdentityByPolling,
   withConnectedPlatformSdk,
   withPlatformOperationTimeout,
 } from './client.js';
+import { getNetwork } from '../config.js';
 
 /**
  * Compute hash160 (RIPEMD160(SHA256(data))) of a buffer
  */
 function hash160(data: Uint8Array): Uint8Array {
   return ripemd160(sha256(data));
+}
+
+/**
+ * Build the typed SDK AssetLockProof from our discriminated proof data.
+ */
+function toSdkProof(data: AssetLockProofData): AssetLockProof {
+  if (data.type === 'instant') {
+    return AssetLockProof.createInstantAssetLockProof(
+      data.instantLockBytes,
+      data.transactionBytes,
+      data.outputIndex
+    );
+  }
+  return AssetLockProof.createChainAssetLockProof(
+    data.coreChainLockedHeight,
+    new OutPoint(data.txid, data.vout)
+  );
+}
+
+/**
+ * Dump everything we are about to feed into the platform SDK for an
+ * asset-lock-proof-based call. Used to debug "Instant lock proof signature
+ * is invalid or wasn't created recently" errors from Platform.
+ */
+function logAssetLockProofForDebug(
+  proofData: AssetLockProofData,
+  network: string,
+  context: string
+): void {
+  if (proofData.type === 'chain') {
+    console.log('[islock-debug] Asset lock proof debug dump (chain):', {
+      context,
+      network,
+      type: 'chain',
+      coreChainLockedHeight: proofData.coreChainLockedHeight,
+      txid: proofData.txid,
+      vout: proofData.vout,
+      timestampIso: new Date().toISOString(),
+    });
+    return;
+  }
+  const islockDebug = describeIslock(proofData.instantLockBytes, `proof:${context}`);
+  const txHex = bytesToHex(proofData.transactionBytes);
+
+  let txInputs: Array<{ txid: string; vout: number }> = [];
+  let parsedTxTxid: string | undefined;
+  let parsedTxVersion: number | undefined;
+  let parsedTxType: number | undefined;
+  let outputCount: number | undefined;
+  try {
+    // Parse the asset lock tx with dashcore-lib so we can compare its inputs
+    // and txid against the IS lock we just got back.
+    const tx = new DashcoreTransaction(txHex);
+    parsedTxTxid = tx.hash || tx.id;
+    parsedTxVersion = tx.version;
+    parsedTxType = tx.type;
+    outputCount = tx.outputs?.length;
+    txInputs = (tx.inputs || []).map((i: { prevTxId: Buffer; outputIndex: number }) => ({
+      txid: Buffer.from(i.prevTxId).toString('hex'),
+      vout: i.outputIndex,
+    }));
+  } catch (err) {
+    console.warn('[islock-debug] Failed to parse asset lock tx for debug:', err);
+  }
+
+  const inputDiff = islockDebug.parsed
+    ? diffIslockInputsAgainstTx(islockDebug.parsed.inputs, txInputs)
+    : { matches: false, details: ['islock could not be parsed'] };
+
+  const txidMatches =
+    islockDebug.parsed && parsedTxTxid
+      ? islockDebug.parsed.txid === parsedTxTxid
+      : undefined;
+
+  console.log('[islock-debug] Asset lock proof debug dump:', {
+    context,
+    network,
+    outputIndex: proofData.outputIndex,
+    transactionBytesLength: proofData.transactionBytes.length,
+    transactionHex: txHex,
+    parsedTx: {
+      txid: parsedTxTxid,
+      version: parsedTxVersion,
+      type: parsedTxType,
+      outputCount,
+      inputs: txInputs,
+    },
+    islock: islockDebug,
+    consistency: {
+      txidMatches,
+      inputsMatch: inputDiff.matches,
+      inputDiffDetails: inputDiff.details,
+    },
+    timestampIso: new Date().toISOString(),
+  });
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -154,14 +262,11 @@ export async function registerIdentity(
   network: string,
   retryOptions?: RetryOptions
 ): Promise<{ identityId: string; balance: number; revision: number }> {
+  logAssetLockProofForDebug(assetLockProofData, network, 'registerIdentity');
   return withConnectedPlatformSdk(network, async (sdk) => {
-    // Build typed AssetLockProof from raw components
-    const proof = AssetLockProof.createInstantAssetLockProof(
-      assetLockProofData.instantLockBytes,
-      assetLockProofData.transactionBytes,
-      assetLockProofData.outputIndex
-    );
+    const proof = toSdkProof(assetLockProofData);
     const identityId = proof.createIdentityId().toString();
+    console.log('[islock-debug] Derived identityId from proof:', identityId);
     const identity = new Identity(identityId);
     const signer = new IdentitySigner();
 
@@ -172,9 +277,9 @@ export async function registerIdentity(
 
       const publicKey = new IdentityPublicKey({
         keyId: key.id,
-        purpose: key.purpose,
-        securityLevel: key.securityLevel,
-        keyType: key.keyType,
+        purpose: key.purpose.toLowerCase() as PurposeLike,
+        securityLevel: key.securityLevel.toLowerCase() as SecurityLevelLike,
+        keyType: key.keyType.toLowerCase() as KeyTypeLike,
         isReadOnly: false,
         data: keyBytes,
       });
@@ -184,7 +289,77 @@ export async function registerIdentity(
 
     const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);
 
+    // On a NON-TRUSTED devnet, the SDK has no quorum context, so
+    // `identities.create` cannot complete its proof-verifying wait phase:
+    // every retry of `wait_for_state_transition_result` fails inside
+    // Drive::verify_state_transition_was_executed_with_proof, and the SDK
+    // burns minutes cycling through masternodes. The fix: force the wait
+    // phase to fail fast (`retries: 0`), let the broadcast succeed, then
+    // poll `getIdentityUnproved` until the identity appears on-chain.
+    // Trusted devnets (SDK >= 3.1.0-dev.7, `useTrustedContext: true`) take
+    // the normal wait path same as mainnet/testnet.
+    const networkConfig = getNetwork(network);
+    const isNonTrustedDevnet =
+      networkConfig.type === 'devnet' && !networkConfig.useTrustedContext;
+
     console.log('Creating identity with', identityKeys.length, 'keys...');
+    if (isNonTrustedDevnet) {
+      // Do NOT pass `waitTimeoutMs` here: rs-sdk implements that via
+      // `tokio::time::timeout`, and the WASM build of the SDK ships without
+      // a working time backend, so any path that touches `wait_timeout`
+      // panics with "time not implemented on this platform" (Rust std's
+      // `unsupported/time.rs`). Instead, we cap the wait phase by setting
+      // `retries: 0` (one attempt only — Tenderdash's server-side
+      // wait_for_state_transition_result returns within ~30s on its own
+      // deadline) and rely on the outer `withPlatformOperationTimeout`
+      // (45s) as the wall-clock safety net.
+      const broadcastSettings = {
+        ...PLATFORM_PUT_SETTINGS,
+        retries: 0,
+      } as const;
+      let sdkError: unknown;
+      try {
+        await withPlatformOperationTimeout(
+          sdk.identities.create({
+            identity,
+            assetLockProof: proof,
+            assetLockPrivateKey,
+            signer,
+            settings: broadcastSettings,
+          }),
+          'broadcasting identity create state transition'
+        );
+        console.log('Identity create wait phase completed without error');
+      } catch (error) {
+        // Expected on non-trusted devnet: the wait phase cannot verify
+        // proofs without a quorum context (WasmContext::get_quorum_public_key
+        // returns an error). The broadcast itself may have succeeded — we
+        // cannot tell from the error alone, so we fall through to polling.
+        // If the broadcast also failed, polling will time out and the
+        // original error is surfaced in the timeout message for diagnosis.
+        sdkError = error;
+        console.warn(
+          '[devnet] identities.create returned an error (expected when ' +
+            'proof verification is unavailable); falling back to polling. Error:',
+          error instanceof Error ? error.message : error
+        );
+      }
+
+      console.log('Polling for identity', identityId, 'via getIdentityUnproved...');
+      const appeared = await waitForIdentityByPolling(sdk, identityId, 60000, 2000);
+      if (!appeared) {
+        const sdkErrorMsg =
+          sdkError instanceof Error ? sdkError.message : String(sdkError ?? 'no SDK error');
+        throw new Error(
+          `Identity ${identityId} did not appear on Platform within 60s polling window. ` +
+            `The broadcast may have failed (was not just the wait phase). ` +
+            `Original SDK error: ${sdkErrorMsg}`
+        );
+      }
+      console.log('Identity created (observed via polling):', identityId);
+      return { identityId, balance: 0, revision: 0 };
+    }
+
     await withPlatformOperationTimeout(
       withRetry(
         () => sdk.identities.create({
@@ -222,8 +397,12 @@ export async function registerIdentity(
  * - No identity keys needed
  * - Just needs identityId, proof, and asset lock private key
  *
- * Note: Uses trusted mode because topUp needs to fetch the identity first,
- * which requires quorum verification that's only available in trusted mode.
+ * Note: trusted/untrusted mode is decided per-network in
+ * createPlatformSdk. Mainnet/testnet are always trusted; devnets are
+ * trusted when `useTrustedContext` is set on the network config (SDK >=
+ * 3.1.0-dev.7). On a non-trusted devnet, fetching the existing identity
+ * may fail because there is no quorum context to verify the response
+ * proofs against — top up requires trusted-context mode there.
  */
 export async function topUpIdentity(
   identityId: string,
@@ -232,17 +411,14 @@ export async function topUpIdentity(
   network: string,
   retryOptions?: RetryOptions
 ): Promise<{ success: boolean; balance?: number }> {
+  logAssetLockProofForDebug(assetLockProofData, network, `topUpIdentity:${identityId}`);
   return withConnectedPlatformSdk(network, async (sdk) => {
     const identity = await fetchIdentityWithSdk(sdk, identityId, retryOptions);
     if (!identity) {
       throw new Error(`Identity not found: ${identityId}`);
     }
 
-    const proof = AssetLockProof.createInstantAssetLockProof(
-      assetLockProofData.instantLockBytes,
-      assetLockProofData.transactionBytes,
-      assetLockProofData.outputIndex
-    );
+    const proof = toSdkProof(assetLockProofData);
     const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);
 
     console.log('Topping up identity:', identityId);
@@ -292,8 +468,8 @@ export interface AddKeyConfig {
  * - privateKeyWif must be for a MASTER or CRITICAL level key
  * - Cannot disable the key used for signing
  *
- * Note: Uses trusted mode because update needs to fetch the identity first,
- * which requires quorum verification that's only available in trusted mode.
+ * Note: like `topUpIdentity`, this fetches the existing identity via the
+ * SDK and so requires a quorum context — works on trusted devnets only.
  */
 export async function updateIdentity(
   identityId: string,
@@ -342,9 +518,9 @@ export async function updateIdentity(
 
         return new IdentityPublicKeyInCreation({
           keyId: maxKeyId + index + 1,
-          purpose: key.purpose,
-          securityLevel: key.securityLevel,
-          keyType: key.keyType,
+          purpose: key.purpose.toLowerCase() as PurposeLike,
+          securityLevel: key.securityLevel.toLowerCase() as SecurityLevelLike,
+          keyType: key.keyType.toLowerCase() as KeyTypeLike,
           isReadOnly: false,
           data: keyDataBytes,
         });
@@ -401,13 +577,13 @@ export async function sendToPlatformAddress(
   network: string,
   retryOptions?: RetryOptions
 ): Promise<{ success: boolean; recipientAddress: string }> {
+  logAssetLockProofForDebug(
+    assetLockProofData,
+    network,
+    `sendToPlatformAddress:${recipientAddress}`
+  );
   return withConnectedPlatformSdk(network, async (sdk) => {
-    // Build typed AssetLockProof from raw components
-    const assetLockProof = AssetLockProof.createInstantAssetLockProof(
-      assetLockProofData.instantLockBytes,
-      assetLockProofData.transactionBytes,
-      assetLockProofData.outputIndex
-    );
+    const assetLockProof = toSdkProof(assetLockProofData);
 
     // Build the asset lock private key
     const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);

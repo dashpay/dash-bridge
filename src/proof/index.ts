@@ -1,1 +1,1 @@
-export { buildInstantAssetLockProof } from './builder.js';
+export { buildInstantAssetLockProof, buildChainAssetLockProof } from './builder.js';

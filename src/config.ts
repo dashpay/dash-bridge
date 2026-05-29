@@ -10,6 +10,25 @@ export interface NetworkConfig {
   faucetBaseUrl?: string;
   dapiAddresses?: string[];
   rpcUrl?: string;
+  /**
+   * Devnet-only: opt in to the SDK's trusted-context mode. When true, the
+   * SDK prefetches a quorum context (from `trustedQuorumUrl` if set,
+   * otherwise from `https://quorums.<devnetName>.networks.dash.org`) so it
+   * can verify proofs and discover masternode addresses — same proof-bearing
+   * read/write surface as mainnet/testnet trusted.
+   */
+  useTrustedContext?: boolean;
+  /** Devnet-only: explicit quorum context URL (overrides DNS-derived URL). */
+  trustedQuorumUrl?: string;
+}
+
+/**
+ * Bare devnet name expected by the SDK's `EvoSDK.devnet` / `EvoSDK.devnetTrusted`
+ * factories. Our config names are conventionally `devnet-<name>`; the SDK
+ * derives the default trusted-quorum URL from the bare name.
+ */
+export function devnetNameForSdk(name: string): string {
+  return name.startsWith('devnet-') ? name.slice('devnet-'.length) : name;
 }
 
 export const TESTNET: NetworkConfig = {
@@ -37,38 +56,50 @@ export const MAINNET: NetworkConfig = {
   rpcUrl: 'https://rpc.digitalcash.dev',
 };
 
-export const DEVNET_PORTER: NetworkConfig = {
+export const DEVNET_PALOMA: NetworkConfig = {
   type: 'devnet',
-  name: 'devnet-porter',
-  insightApiUrl: 'https://insight.porter.networks.dash.org/insight-api',
+  name: 'devnet-paloma',
+  insightApiUrl: 'https://insight.paloma.networks.dash.org/insight-api',
   addressPrefix: 140,
   wifPrefix: 239,
   minFee: 1000,
   dustThreshold: 546,
   platformHrp: 'tdash',
   dapiAddresses: [
-    'https://44.247.149.200:1443',
-    'https://54.70.124.48:1443',
-    'https://34.209.64.250:1443',
-    'https://34.217.209.121:1443',
-    'https://44.255.39.178:1443',
-    'https://35.88.212.218:1443',
-    'https://34.221.172.217:1443',
-    'https://52.89.161.171:1443',
-    'https://35.90.237.76:1443',
-    'https://35.88.158.240:1443',
-    'https://34.221.127.165:1443',
+    'https://68.67.122.198:1443',
+    'https://68.67.122.199:1443',
+    'https://68.67.122.86:1443',
+    'https://68.67.122.197:1443',
+    'https://68.67.122.192:1443',
+    'https://68.67.122.85:1443',
+    'https://68.67.122.88:1443',
+    'https://68.67.122.206:1443',
+    'https://68.67.122.193:1443',
+    'https://68.67.122.195:1443',
+    'https://68.67.122.196:1443',
+    'https://68.67.122.87:1443',
+    'https://68.67.122.207:1443',
   ],
-  faucetBaseUrl: 'https://faucet.porter.networks.dash.org',
+  faucetBaseUrl: 'https://faucet.paloma.networks.dash.org',
+  useTrustedContext: true,
+  // No explicit trustedQuorumUrl — the SDK's default for a devnet named
+  // `paloma` resolves to `https://quorums.paloma.networks.dash.org/quorums`,
+  // which is the deployed endpoint.
 };
 
 const NETWORK_REGISTRY = new Map<string, NetworkConfig>([
   ['testnet', TESTNET],
   ['mainnet', MAINNET],
-  ['devnet-porter', DEVNET_PORTER],
+  ['devnet-paloma', DEVNET_PALOMA],
 ]);
 
 const CUSTOM_DEVNETS_KEY = 'bridge-custom-devnets';
+
+export const RESERVED_NETWORK_NAMES: ReadonlySet<string> = new Set(['testnet', 'mainnet']);
+
+export function isReservedNetworkName(name: string): boolean {
+  return RESERVED_NETWORK_NAMES.has(name);
+}
 
 function loadCustomDevnets(): NetworkConfig[] {
   try {
@@ -80,11 +111,19 @@ function loadCustomDevnets(): NetworkConfig[] {
       (c): c is NetworkConfig =>
         c &&
         typeof c.name === 'string' &&
+        !RESERVED_NETWORK_NAMES.has(c.name) &&
         c.type === 'devnet' &&
         typeof c.insightApiUrl === 'string' &&
         typeof c.addressPrefix === 'number' &&
         typeof c.wifPrefix === 'number' &&
-        typeof c.platformHrp === 'string'
+        typeof c.minFee === 'number' &&
+        typeof c.dustThreshold === 'number' &&
+        typeof c.platformHrp === 'string' &&
+        Array.isArray(c.dapiAddresses) &&
+        c.dapiAddresses.length > 0 &&
+        c.dapiAddresses.every((a: unknown) => typeof a === 'string') &&
+        (c.useTrustedContext === undefined || typeof c.useTrustedContext === 'boolean') &&
+        (c.trustedQuorumUrl === undefined || typeof c.trustedQuorumUrl === 'string')
     );
   } catch {
     return [];
@@ -92,6 +131,9 @@ function loadCustomDevnets(): NetworkConfig[] {
 }
 
 export function saveCustomDevnet(config: NetworkConfig): void {
+  if (RESERVED_NETWORK_NAMES.has(config.name)) {
+    throw new Error(`Cannot save custom devnet with reserved name "${config.name}"`);
+  }
   const customs = loadCustomDevnets().filter((c) => c.name !== config.name);
   customs.push(config);
   localStorage.setItem(CUSTOM_DEVNETS_KEY, JSON.stringify(customs));
@@ -99,6 +141,9 @@ export function saveCustomDevnet(config: NetworkConfig): void {
 }
 
 export function removeCustomDevnet(name: string): void {
+  if (RESERVED_NETWORK_NAMES.has(name)) {
+    throw new Error(`Cannot remove reserved network "${name}"`);
+  }
   const customs = loadCustomDevnets().filter((c) => c.name !== name);
   localStorage.setItem(CUSTOM_DEVNETS_KEY, JSON.stringify(customs));
   NETWORK_REGISTRY.delete(name);
@@ -110,6 +155,8 @@ export function createCustomDevnetConfig(params: {
   dapiAddresses: string[];
   rpcUrl?: string;
   faucetBaseUrl?: string;
+  useTrustedContext?: boolean;
+  trustedQuorumUrl?: string;
 }): NetworkConfig {
   return {
     type: 'devnet',
@@ -123,6 +170,8 @@ export function createCustomDevnetConfig(params: {
     dapiAddresses: params.dapiAddresses,
     rpcUrl: params.rpcUrl,
     faucetBaseUrl: params.faucetBaseUrl,
+    useTrustedContext: params.useTrustedContext,
+    trustedQuorumUrl: params.trustedQuorumUrl,
   };
 }
 

@@ -39,6 +39,7 @@ export const ErrorCodes = {
   IDENTITY_UPDATE:  'ERR-1011',
   CONFIG:           'ERR-1012',
   CONTRACT_REGISTER: 'ERR-1013',
+  CHAINLOCK:        'ERR-1014',
 } as const;
 
 /** Human-readable labels for error codes */
@@ -57,6 +58,7 @@ export const ErrorCodeLabels: Record<string, string> = {
   [ErrorCodes.IDENTITY_UPDATE]: 'Identity update failed',
   [ErrorCodes.CONFIG]:          'Configuration error',
   [ErrorCodes.CONTRACT_REGISTER]: 'Contract registration failed',
+  [ErrorCodes.CHAINLOCK]:        'Chain lock fallback failed',
 };
 
 /** Map a processing step to its error code */
@@ -66,6 +68,7 @@ const StepErrorCodes: Partial<Record<BridgeStep, string>> = {
   signing_transaction:  ErrorCodes.TX_SIGN,
   broadcasting:         ErrorCodes.BROADCAST,
   waiting_islock:       ErrorCodes.ISLOCK,
+  waiting_chainlock:    ErrorCodes.CHAINLOCK,
   registering_identity: ErrorCodes.REGISTER,
   topping_up:           ErrorCodes.TOPUP,
   sending_to_address:   ErrorCodes.SEND_ADDRESS,
@@ -404,12 +407,14 @@ export function setUtxoDetected(state: BridgeState, utxo: UTXO): BridgeState {
 
 export function setTransactionSigned(
   state: BridgeState,
-  signedTxHex: string
+  signedTxHex: string,
+  signedTxBytes?: Uint8Array
 ): BridgeState {
   return {
     ...state,
     step: 'broadcasting',
     signedTxHex,
+    signedTxBytes,
   };
 }
 
@@ -448,13 +453,86 @@ export function setIdentityRegistered(
   };
 }
 
+/**
+ * Determine whether the chainlock fallback can be offered for the given
+ * error code. Available when:
+ *   - islock retrieval failed outright (ERR-1005), OR
+ *   - Platform rejected a submission that already had a typed asset lock
+ *     proof in hand (REGISTER / TOPUP / SEND_ADDRESS), AND we still hold
+ *     the broadcast txid + signed tx bytes needed to rebuild the proof.
+ */
+function computeChainlockFallbackAvailable(
+  state: BridgeState,
+  errorCode: string
+): boolean {
+  if (errorCode === ErrorCodes.ISLOCK) {
+    return !!state.txid;
+  }
+  if (
+    errorCode === ErrorCodes.REGISTER ||
+    errorCode === ErrorCodes.TOPUP ||
+    errorCode === ErrorCodes.SEND_ADDRESS
+  ) {
+    return !!(state.txid && state.signedTxBytes);
+  }
+  return false;
+}
+
 export function setError(state: BridgeState, error: Error, errorCode?: string): BridgeState {
+  const resolvedCode = errorCode ?? StepErrorCodes[state.step] ?? ErrorCodes.UNKNOWN;
   return {
     ...state,
     step: 'error',
     error,
-    errorCode: errorCode ?? StepErrorCodes[state.step] ?? ErrorCodes.UNKNOWN,
+    errorCode: resolvedCode,
     errorStep: state.step,
+    chainlockFallbackAvailable: computeChainlockFallbackAvailable(state, resolvedCode),
+  };
+}
+
+/**
+ * Transition into the chainlock-fallback waiting step. Clears the prior
+ * error so the UI swaps the error screen for the new spinner.
+ */
+export function setChainlockFallbackStarted(state: BridgeState): BridgeState {
+  return {
+    ...state,
+    step: 'waiting_chainlock',
+    error: undefined,
+    errorCode: undefined,
+    errorStep: undefined,
+    chainlockFallbackAvailable: undefined,
+    assetLockTxBlockHeight: undefined,
+    coreChainLockedHeight: undefined,
+  };
+}
+
+/**
+ * Update the chainlock-fallback poller progress. Either height can be
+ * undefined while we wait for the first observation.
+ */
+export function setChainlockProgress(
+  state: BridgeState,
+  progress: { blockHeight?: number; chainLockedHeight?: number }
+): BridgeState {
+  return {
+    ...state,
+    assetLockTxBlockHeight: progress.blockHeight ?? state.assetLockTxBlockHeight,
+    coreChainLockedHeight: progress.chainLockedHeight ?? state.coreChainLockedHeight,
+  };
+}
+
+/**
+ * Chainlock proof assembled — flow continues via the mode-specific
+ * Platform submission, which sets its own step.
+ */
+export function setChainlockProofReady(
+  state: BridgeState,
+  proof: AssetLockProofData
+): BridgeState {
+  return {
+    ...state,
+    assetLockProof: proof,
   };
 }
 
@@ -527,6 +605,7 @@ export function getStepDescription(step: BridgeStep): string {
     signing_transaction: 'Signing...',
     broadcasting: 'Submitting to network...',
     waiting_islock: 'Confirming...',
+    waiting_chainlock: 'Waiting for chain lock...',
     registering_identity: 'Creating identity...',
     topping_up: 'Adding credits...',
     enter_recipient_address: 'Send to platform address',
@@ -572,6 +651,7 @@ export function getStepProgress(step: BridgeStep): number {
     signing_transaction: 60,
     broadcasting: 70,
     waiting_islock: 80,
+    waiting_chainlock: 85,
     registering_identity: 90,
     topping_up: 90,
     enter_recipient_address: 10,
@@ -613,6 +693,7 @@ export function isProcessingStep(step: BridgeStep): boolean {
     'signing_transaction',
     'broadcasting',
     'waiting_islock',
+    'waiting_chainlock',
     'registering_identity',
     'topping_up',
     'sending_to_address',

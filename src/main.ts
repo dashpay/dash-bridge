@@ -1,13 +1,14 @@
-import { getNetwork, initNetworkRegistry, createCustomDevnetConfig, saveCustomDevnet, MAINNET, TESTNET } from './config.js';
+import { getNetwork, initNetworkRegistry, createCustomDevnetConfig, saveCustomDevnet, isReservedNetworkName, MAINNET, TESTNET } from './config.js';
 import { publicKeyToAddress, signTransaction, generateKeyPair } from './crypto/index.js';
 import { deriveAssetLockKeyPair } from './crypto/hd.js';
-import { createAssetLockTransaction, serializeTransaction } from './transaction/index.js';
+import { createAssetLockTransaction, serializeTransaction, calculateTxId } from './transaction/index.js';
 import { InsightClient } from './api/insight.js';
 import { IslockService } from './api/islock.js';
-import { buildInstantAssetLockProof } from './proof/index.js';
+import { DAPIClient } from './api/dapi.js';
+import { buildInstantAssetLockProof, buildChainAssetLockProof } from './proof/index.js';
 import { registerIdentity, topUpIdentity, updateIdentity, sendToPlatformAddress, AddKeyConfig } from './platform/index.js';
 import { bech32m } from '@scure/base';
-import { privateKeyToWif, bytesToHex } from './utils/index.js';
+import { privateKeyToWif, bytesToHex, abortableSleep } from './utils/index.js';
 import {
   createInitialState,
   setStep,
@@ -24,6 +25,9 @@ import {
   setInstantLockReceived,
   setIdentityRegistered,
   setError,
+  setChainlockFallbackStarted,
+  setChainlockProgress,
+  setChainlockProofReady,
   toError,
   ErrorCodes,
   setDepositTimedOut,
@@ -123,6 +127,7 @@ import type {
   DpnsRegistrationResult,
   IdentityPublicKeyInfo,
   E2EMockWindow,
+  AssetLockProofData,
 } from './types.js';
 import {
   E2E_MOCK_DPNS_WIF,
@@ -146,11 +151,15 @@ function initClients(network: string): void {
 }
 
 function switchNetwork(network: string): void {
+  // Tear down any active IS lock subscriptions/polling before replacing clients
+  if (islockService) {
+    islockService.disconnect().catch((err) => console.warn('Error disconnecting IslockService:', err));
+  }
   updateState(setNetwork(state, network));
   initClients(network);
 }
 
-function showCustomDevnetModal(existing?: { name?: string; insightApiUrl?: string; dapiAddresses?: string; rpcUrl?: string; faucetBaseUrl?: string }): void {
+function showCustomDevnetModal(existing?: { name?: string; insightApiUrl?: string; dapiAddresses?: string; rpcUrl?: string; faucetBaseUrl?: string; useTrustedContext?: boolean; trustedQuorumUrl?: string }): void {
   const overlay = document.createElement('div');
   overlay.className = 'devnet-modal-overlay';
   overlay.innerHTML = `
@@ -161,6 +170,8 @@ function showCustomDevnetModal(existing?: { name?: string; insightApiUrl?: strin
       <label>DAPI Addresses (one HTTPS URL per line) <textarea id="d-dapi" placeholder="https://1.2.3.4:1443&#10;https://5.6.7.8:1443"></textarea></label>
       <label>JSON-RPC URL for IS locks (optional) <input id="d-rpc" placeholder="https://rpc.my-devnet.example.com"></label>
       <label>Faucet URL (optional) <input id="d-faucet"></label>
+      <label><input type="checkbox" id="d-trusted"> Use trusted context (verify proofs; required for top-up &amp; identity update)</label>
+      <label>Quorum context URL (optional override) <input id="d-quorum-url" placeholder="https://quorums.my-devnet.networks.dash.org"></label>
       <div class="devnet-modal-actions">
         <button class="secondary-btn" id="d-cancel">Cancel</button>
         <button class="primary-btn" id="d-save">Save &amp; Connect</button>
@@ -175,6 +186,8 @@ function showCustomDevnetModal(existing?: { name?: string; insightApiUrl?: strin
   (overlay.querySelector('#d-dapi') as HTMLTextAreaElement).value = existing?.dapiAddresses ?? '';
   (overlay.querySelector('#d-rpc') as HTMLInputElement).value = existing?.rpcUrl ?? '';
   (overlay.querySelector('#d-faucet') as HTMLInputElement).value = existing?.faucetBaseUrl ?? '';
+  (overlay.querySelector('#d-trusted') as HTMLInputElement).checked = existing?.useTrustedContext ?? false;
+  (overlay.querySelector('#d-quorum-url') as HTMLInputElement).value = existing?.trustedQuorumUrl ?? '';
 
   overlay.querySelector('#d-cancel')!.addEventListener('click', () => overlay.remove());
   overlay.querySelector('#d-save')!.addEventListener('click', () => {
@@ -183,6 +196,8 @@ function showCustomDevnetModal(existing?: { name?: string; insightApiUrl?: strin
     const dapiRaw = (overlay.querySelector('#d-dapi') as HTMLTextAreaElement).value.trim();
     const rpcUrl = (overlay.querySelector('#d-rpc') as HTMLInputElement).value.trim() || undefined;
     const faucetBaseUrl = (overlay.querySelector('#d-faucet') as HTMLInputElement).value.trim() || undefined;
+    const useTrustedContext = (overlay.querySelector('#d-trusted') as HTMLInputElement).checked || undefined;
+    const trustedQuorumUrl = (overlay.querySelector('#d-quorum-url') as HTMLInputElement).value.trim() || undefined;
     const dapiAddresses = dapiRaw.split('\n').map((s) => s.trim()).filter(Boolean);
 
     if (!name || !insightApiUrl || dapiAddresses.length === 0) {
@@ -190,7 +205,20 @@ function showCustomDevnetModal(existing?: { name?: string; insightApiUrl?: strin
       return;
     }
 
-    const config = createCustomDevnetConfig({ name, insightApiUrl, dapiAddresses, rpcUrl, faucetBaseUrl });
+    if (isReservedNetworkName(name)) {
+      alert(`"${name}" is a reserved network name. Please choose a different name.`);
+      return;
+    }
+
+    const config = createCustomDevnetConfig({
+      name,
+      insightApiUrl,
+      dapiAddresses,
+      rpcUrl,
+      faucetBaseUrl,
+      useTrustedContext,
+      trustedQuorumUrl,
+    });
     saveCustomDevnet(config);
     disconnectPlatformSdk(name);
     overlay.remove();
@@ -594,6 +622,22 @@ function setupEventListeners(container: HTMLElement) {
   if (retryBtn) {
     retryBtn.addEventListener('click', () => {
       updateState(createInitialState(state.network));
+    });
+  }
+
+  // Chainlock fallback button (offered on the error screen when applicable)
+  const chainlockFallbackBtn = container.querySelector('#chainlock-fallback-btn');
+  if (chainlockFallbackBtn) {
+    chainlockFallbackBtn.addEventListener('click', () => {
+      startChainlockFallback();
+    });
+  }
+
+  // Cancel button shown during the waiting_chainlock step
+  const chainlockCancelBtn = container.querySelector('#chainlock-cancel-btn');
+  if (chainlockCancelBtn) {
+    chainlockCancelBtn.addEventListener('click', () => {
+      cancelChainlockFallback();
     });
   }
 
@@ -1739,23 +1783,31 @@ async function startTopUp() {
 
     const signedTxBytes = serializeTransaction(signedTx);
     const signedTxHex = bytesToHex(signedTxBytes);
+    const txid = calculateTxId(signedTx);
 
-    updateState(setTransactionSigned(state, signedTxHex));
+    updateState(setTransactionSigned(state, signedTxHex, signedTxBytes));
 
-    // Step 5: Broadcast transaction
-    const txid = await insightClient.broadcastTransaction(signedTxHex);
-
-    updateState(setTransactionBroadcast(state, txid));
-
-    // Step 6: Wait for InstantSend lock
+    // Step 5: Open IS lock subscription BEFORE broadcasting — dashd does not
+    // replay historical IS locks, so we must be listening before the lock
+    // is signed (which can happen within milliseconds of broadcast).
     updateState(setStep(state, 'waiting_islock'));
-
-    console.log('Waiting for InstantSend lock...');
-    const islockBytes = await islockService.waitForInstantSendLock(
+    console.log('Opening IS lock subscription before broadcast...');
+    const islockSub = await islockService.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
       utxo
     );
+
+    // Step 6: Broadcast transaction
+    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
+    if (broadcastedTxid !== txid) {
+      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
+    }
+
+    updateState(setTransactionBroadcast(state, txid));
+
+    console.log('Waiting for InstantSend lock...');
+    const islockBytes = await islockSub.wait();
     console.log('InstantSend lock received:', islockBytes.length, 'bytes');
 
     const assetLockProof = buildInstantAssetLockProof(
@@ -1851,21 +1903,26 @@ async function startSendToAddress() {
 
     const signedTxBytes = serializeTransaction(signedTx);
     const signedTxHex = bytesToHex(signedTxBytes);
+    const txid = calculateTxId(signedTx);
 
-    updateState(setTransactionSigned(state, signedTxHex));
+    updateState(setTransactionSigned(state, signedTxHex, signedTxBytes));
 
-    // Step 5: Broadcast transaction
-    const txid = await insightClient.broadcastTransaction(signedTxHex);
-    updateState(setTransactionBroadcast(state, txid));
-
-    // Step 6: Wait for InstantSend lock
+    // Step 5: Subscribe for IS lock BEFORE broadcasting (see flow #1 for why).
     updateState(setStep(state, 'waiting_islock'));
-
-    const islockBytes = await islockService.waitForInstantSendLock(
+    const islockSub = await islockService.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
       utxo
     );
+
+    // Step 6: Broadcast transaction
+    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
+    if (broadcastedTxid !== txid) {
+      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
+    }
+    updateState(setTransactionBroadcast(state, txid));
+
+    const islockBytes = await islockSub.wait();
 
     const assetLockProof = buildInstantAssetLockProof(
       signedTxBytes,
@@ -1895,6 +1952,69 @@ async function startSendToAddress() {
   } catch (error) {
     console.error('Send to platform address error:', error);
     updateState(setError(state, toError(error)));
+  }
+}
+
+/**
+ * Wrapper around `registerIdentity` that gracefully handles
+ * already-submitted state transitions.
+ *
+ * Tenderdash (Platform's consensus layer) deduplicates state transitions
+ * by their bytes: a second submit of the same IdentityCreate is rejected
+ * with `Object already exists: tx already exists in cache`. This is what
+ * surfaces when the user retries an identity creation that actually
+ * succeeded the first time (e.g. the first attempt got a
+ * `GroveDBProof` decode error in the client AFTER Platform had committed
+ * the identity, and the user clicked Retry).
+ *
+ * The rs-sdk has matching logic (`Identity::wait_for_response`) that
+ * auto-fetches the identity on `AlreadyExists`, but the wasm-sdk doesn't,
+ * and on a NON-TRUSTED devnet we can't fetch via the SDK anyway (no
+ * quorum context = TransportNoAvailableAddresses).
+ *
+ * Strategy: catch the AlreadyExists family of errors and treat them as
+ * success, deriving the identity ID from the asset lock proof (it's
+ * deterministic). The platform-side identity is real either way.
+ */
+async function registerIdentityResilient(
+  proof: Extract<AssetLockProofData, { type: 'instant' }>,
+  assetLockPrivateKeyWif: string,
+  identityKeys: typeof state.identityKeys,
+  network: string
+): Promise<{ identityId: string; balance: number; revision: number; alreadyExisted?: boolean }> {
+  const isAlreadyExistsError = (err: unknown): boolean => {
+    const msg =
+      err && typeof err === 'object' && 'message' in err
+        ? String((err as { message: unknown }).message)
+        : String(err);
+    return (
+      msg.includes('Object already exists') ||
+      msg.includes('tx already exists in cache') ||
+      msg.includes('AlreadyExists')
+    );
+  };
+
+  try {
+    return await registerIdentity(proof, assetLockPrivateKeyWif, identityKeys, network);
+  } catch (err) {
+    if (!isAlreadyExistsError(err)) throw err;
+
+    // Platform tells us the state transition is already in its consensus
+    // pool — meaning a previous submit already created the identity. The
+    // identity ID is deterministic from the asset lock outpoint, so we
+    // can derive it from the proof and surface success.
+    console.log(
+      '[identity-create] Platform reports state transition already submitted; treating as success.'
+    );
+    const { AssetLockProof } = await import('@dashevo/evo-sdk');
+    const sdkProof = AssetLockProof.createInstantAssetLockProof(
+      proof.instantLockBytes,
+      proof.transactionBytes,
+      proof.outputIndex
+    );
+    const identityId = sdkProof.createIdentityId().toString();
+    console.log('[identity-create] Recovered identityId:', identityId);
+    return { identityId, balance: 0, revision: 0, alreadyExisted: true };
   }
 }
 
@@ -1994,23 +2114,28 @@ async function startBridge() {
 
     const signedTxBytes = serializeTransaction(signedTx);
     const signedTxHex = bytesToHex(signedTxBytes);
+    const txid = calculateTxId(signedTx);
 
-    updateState(setTransactionSigned(state, signedTxHex));
+    updateState(setTransactionSigned(state, signedTxHex, signedTxBytes));
 
-    // Step 5: Broadcast transaction
-    const txid = await insightClient.broadcastTransaction(signedTxHex);
-
-    updateState(setTransactionBroadcast(state, txid));
-
-    // Step 6: Wait for InstantSend lock
+    // Step 5: Subscribe for IS lock BEFORE broadcasting (see flow #1 for why).
     updateState(setStep(state, 'waiting_islock'));
-
-    console.log('Waiting for InstantSend lock...');
-    const islockBytes = await islockService.waitForInstantSendLock(
+    console.log('Opening IS lock subscription before broadcast...');
+    const islockSub = await islockService.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
       utxo
     );
+
+    // Step 6: Broadcast transaction
+    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
+    if (broadcastedTxid !== txid) {
+      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
+    }
+    updateState(setTransactionBroadcast(state, txid));
+
+    console.log('Waiting for InstantSend lock...');
+    const islockBytes = await islockSub.wait();
     console.log('InstantSend lock received:', islockBytes.length, 'bytes');
 
     const assetLockProof = buildInstantAssetLockProof(
@@ -2029,7 +2154,7 @@ async function startBridge() {
       network
     );
 
-    const result = await registerIdentity(
+    const result = await registerIdentityResilient(
       assetLockProof,
       assetLockPrivateKeyWif,
       state.identityKeys,
@@ -2111,23 +2236,28 @@ async function recheckDeposit() {
 
     const signedTxBytes = serializeTransaction(signedTx);
     const signedTxHex = bytesToHex(signedTxBytes);
+    const txid = calculateTxId(signedTx);
 
-    updateState(setTransactionSigned(state, signedTxHex));
+    updateState(setTransactionSigned(state, signedTxHex, signedTxBytes));
 
-    // Step 5: Broadcast transaction
-    const txid = await insightClient.broadcastTransaction(signedTxHex);
-
-    updateState(setTransactionBroadcast(state, txid));
-
-    // Step 6: Wait for InstantSend lock
+    // Step 5: Subscribe for IS lock BEFORE broadcasting (see flow #1 for why).
     updateState(setStep(state, 'waiting_islock'));
-
-    console.log('Waiting for InstantSend lock...');
-    const islockBytes = await islockService.waitForInstantSendLock(
+    console.log('Opening IS lock subscription before broadcast...');
+    const islockSub = await islockService.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
       utxo
     );
+
+    // Step 6: Broadcast transaction
+    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
+    if (broadcastedTxid !== txid) {
+      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
+    }
+    updateState(setTransactionBroadcast(state, txid));
+
+    console.log('Waiting for InstantSend lock...');
+    const islockBytes = await islockSub.wait();
     console.log('InstantSend lock received:', islockBytes.length, 'bytes');
 
     const assetLockProof = buildInstantAssetLockProof(
@@ -2165,7 +2295,7 @@ async function recheckDeposit() {
     } else if (state.mode === 'create') {
       // Create mode — register identity
       updateState(setStep(state, 'registering_identity'));
-      const result = await registerIdentity(
+      const result = await registerIdentityResilient(
         assetLockProof,
         assetLockPrivateKeyWif,
         state.identityKeys,
@@ -2184,6 +2314,229 @@ async function recheckDeposit() {
   } catch (error) {
     console.error('Bridge error:', error);
     updateState(setError(state, toError(error)));
+  }
+}
+
+// ============================================================================
+// ChainLock Fallback
+// ============================================================================
+
+/**
+ * Active poller controller for the chainlock fallback. Module-scoped so the
+ * cancel button can abort it without threading it through render state.
+ */
+let chainlockController: AbortController | null = null;
+
+/**
+ * Run the mode-appropriate Platform submission with the supplied proof.
+ * Shared by the chainlock fallback path; mirrors the per-mode tail of the
+ * happy-path bridge flows (see startBridge / startTopUp / startSendToAddress).
+ */
+async function runPlatformSubmission(
+  assetLockProof: import('./types.js').AssetLockProofData,
+  assetLockPrivateKeyWif: string
+): Promise<void> {
+  if (state.mode === 'topup') {
+    updateState(setStep(state, 'topping_up'));
+    await topUpIdentity(
+      state.targetIdentityId!,
+      assetLockProof,
+      assetLockPrivateKeyWif,
+      state.network
+    );
+    updateState(setTopUpComplete(state));
+    return;
+  }
+
+  if (state.mode === 'send_to_address') {
+    updateState(setStep(state, 'sending_to_address'));
+    await sendToPlatformAddress(
+      state.recipientPlatformAddress!,
+      assetLockProof,
+      assetLockPrivateKeyWif,
+      state.network
+    );
+    updateState(setSendToAddressComplete(state));
+    return;
+  }
+
+  if (state.mode === 'create') {
+    updateState(setStep(state, 'registering_identity'));
+    // registerIdentityResilient derives the identity ID from the asset lock
+    // outpoint on AlreadyExists, which only applies to instant proofs here.
+    // Chain proofs go straight to registerIdentity.
+    let result;
+    if (assetLockProof.type === 'instant') {
+      result = await registerIdentityResilient(
+        assetLockProof,
+        assetLockPrivateKeyWif,
+        state.identityKeys,
+        state.network
+      );
+    } else {
+      result = await registerIdentity(
+        assetLockProof,
+        assetLockPrivateKeyWif,
+        state.identityKeys,
+        state.network
+      );
+    }
+    updateState(setIdentityRegistered(state, result.identityId));
+    downloadKeyBackup(state);
+
+    if (await autoPublishContractIfNeeded(result.identityId)) return;
+    return;
+  }
+
+  throw new Error(`runPlatformSubmission: unexpected mode '${state.mode}'`);
+}
+
+/**
+ * Cancel an in-flight chainlock fallback and return to the prior error screen
+ * (with a generic CHAINLOCK error code so the user understands what happened).
+ */
+function cancelChainlockFallback(): void {
+  if (!chainlockController) return;
+  chainlockController.abort();
+  chainlockController = null;
+  updateState(setError(state, new Error('Chainlock fallback cancelled'), ErrorCodes.CHAINLOCK));
+}
+
+/**
+ * Begin the chainlock fallback flow: poll Insight for the asset-lock tx's
+ * confirming block, poll Platform (with DAPI JSON-RPC as backup) for the
+ * chain-locked tip, and once `coreChainLockedHeight >= blockHeight` build a
+ * chain asset lock proof and resubmit the original Platform operation.
+ */
+async function startChainlockFallback(): Promise<void> {
+  if (!state.txid || !state.assetLockKeyPair) {
+    console.error('Chainlock fallback unavailable: missing txid or asset lock key pair');
+    return;
+  }
+
+  if (chainlockController) {
+    chainlockController.abort();
+  }
+  chainlockController = new AbortController();
+  const signal = chainlockController.signal;
+
+  updateState(setChainlockFallbackStarted(state));
+
+  const network = getNetwork(state.network);
+  const txid = state.txid;
+  const dapiClient = new DAPIClient({ network: state.network, rpcUrl: network.rpcUrl });
+
+  // Poll #1: asset lock tx block height via Insight.
+  const blockHeightPromise = insightClient.waitForBlockHeight(
+    txid,
+    5000,
+    signal,
+    (info) => {
+      if (info.blockheight !== undefined) {
+        updateState(setChainlockProgress(state, { blockHeight: info.blockheight }));
+      }
+    }
+  );
+
+  // Poll #2: chain-locked Dash Core height. DAPI JSON-RPC
+  // `getbestchainlock` first (when an rpcUrl is configured), then direct
+  // gRPC `platform.getStatus()` via @dashevo/dapi-client. We intentionally
+  // do NOT use `sdk.system.status()`: in pre-dev.7 builds the testnet
+  // trusted context returned testnet-cached values on devnets. SDK
+  // 3.1.0-dev.7 fixes this with per-devnet trusted contexts, but the
+  // direct dapi-client call works uniformly across trusted and
+  // non-trusted devnets, so we keep it.
+  const chainLockPoll = (async (): Promise<void> => {
+    while (!signal.aborted) {
+      let height: number | undefined;
+      try {
+        const observed = await dapiClient.getBestChainLock();
+        if (observed) height = observed.height;
+      } catch (error) {
+        console.warn('getBestChainLock failed:', error);
+      }
+      if (height === undefined) {
+        try {
+          height = await islockService.getCoreChainLockedHeight();
+        } catch (error) {
+          console.warn('platform.getStatus core chain locked height failed:', error);
+        }
+      }
+      if (height !== undefined) {
+        updateState(setChainlockProgress(state, { chainLockedHeight: height }));
+      }
+      await abortableSleep(5000, signal);
+    }
+  })();
+  chainLockPoll.catch(() => {});
+
+  // Tracks whether we've already handed off to the Platform submission. Once
+  // true, errors should use the step's natural error code (REGISTER / TOPUP /
+  // SEND_ADDRESS), NOT ErrorCodes.CHAINLOCK — so the user sees the actual
+  // submission failure rather than a generic chainlock label.
+  let submissionStarted = false;
+
+  try {
+    console.log('[chainlock-fallback] waiting for asset lock tx to be mined…');
+    const blockHeight = await blockHeightPromise;
+    console.log(`[chainlock-fallback] asset lock tx confirmed at block ${blockHeight}`);
+
+    // Wait for an actual chain-lock observation that buries the tx's block.
+    // No confirmations-based fallback — submitting a chain proof without
+    // having seen a real chain-locked tip would just be guessing, and
+    // Platform would reject it anyway.
+    while (!signal.aborted) {
+      const chainLockedHeight = state.coreChainLockedHeight;
+      if (chainLockedHeight !== undefined && chainLockedHeight >= blockHeight) {
+        break;
+      }
+      await abortableSleep(2000, signal);
+    }
+
+    if (signal.aborted) {
+      return;
+    }
+
+    const chainLockedHeight = state.coreChainLockedHeight!;
+    // Use the tx's confirming block height as the proof value (the minimum
+    // valid value, and the one Platform can unambiguously correlate back to
+    // the asset lock tx). The observed chain-lock tip just tells us Platform
+    // has caught up far enough to verify.
+    console.log(
+      `[chainlock-fallback] chain locked through block ${chainLockedHeight} (>= ${blockHeight}); ` +
+        `building chain asset lock proof for ${txid}:0 with coreChainLockedHeight=${blockHeight}`
+    );
+    const proof = buildChainAssetLockProof(txid, 0, blockHeight);
+    updateState(setChainlockProofReady(state, proof));
+
+    // Stop the chain-locked-height poller now that we've armed the proof.
+    // The blockHeightPromise has already resolved.
+    chainlockController.abort();
+    chainlockController = null;
+
+    const assetLockPrivateKeyWif = privateKeyToWif(
+      state.assetLockKeyPair.privateKey,
+      network
+    );
+
+    submissionStarted = true;
+    console.log('[chainlock-fallback] submitting chain proof to Platform…');
+    await runPlatformSubmission(proof, assetLockPrivateKeyWif);
+    console.log('[chainlock-fallback] Platform submission resolved');
+  } catch (error) {
+    if (signal.aborted) {
+      // Already transitioned to error via cancelChainlockFallback.
+      return;
+    }
+    console.error('Chainlock fallback error:', error);
+    // If runPlatformSubmission failed, let the step's natural error code apply
+    // (REGISTER / TOPUP / SEND_ADDRESS) instead of masking it as CHAINLOCK.
+    const errorCode = submissionStarted ? undefined : ErrorCodes.CHAINLOCK;
+    updateState(setError(state, toError(error), errorCode));
+  } finally {
+    if (chainlockController?.signal === signal) {
+      chainlockController = null;
+    }
   }
 }
 

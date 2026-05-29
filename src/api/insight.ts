@@ -1,6 +1,7 @@
 import type { UTXO, TxInfo } from '../types.js';
 import type { NetworkConfig } from '../config.js';
 import { withRetry, type RetryOptions } from '../utils/retry.js';
+import { abortableSleep } from '../utils/sleep.js';
 
 export interface InsightApiResponse<T> {
   success: boolean;
@@ -78,12 +79,50 @@ export class InsightClient {
 
       const data = await response.json();
 
+      // Insight returns blockheight: -1 while the tx is unconfirmed.
+      const rawHeight =
+        typeof data.blockheight === 'number' ? data.blockheight : undefined;
+      const blockheight =
+        rawHeight !== undefined && rawHeight >= 0 ? rawHeight : undefined;
+
       return {
         txid: data.txid,
         confirmations: data.confirmations || 0,
         txlock: data.txlock || false,
+        blockheight,
       };
     }, retryOptions);
+  }
+
+  /**
+   * Poll until the tx is mined into a block and Insight reports a block
+   * height. Resolves with the block height. Aborts when `signal` fires.
+   *
+   * @param onPoll - Optional callback invoked on each poll with the latest
+   *   TxInfo, so the caller can drive UI progress.
+   */
+  async waitForBlockHeight(
+    txid: string,
+    pollIntervalMs: number = 5000,
+    signal?: AbortSignal,
+    onPoll?: (info: TxInfo) => void
+  ): Promise<number> {
+    while (!signal?.aborted) {
+      try {
+        const info = await this.getTransaction(txid);
+        onPoll?.(info);
+        if (info.blockheight !== undefined) {
+          return info.blockheight;
+        }
+      } catch (error) {
+        // Tx may not be in the mempool yet, or transient API error — keep polling.
+        console.warn('waitForBlockHeight: polling error', error);
+      }
+
+      await abortableSleep(pollIntervalMs, signal);
+    }
+
+    throw new Error(`Block-height polling aborted for ${txid}`);
   }
 
   /**

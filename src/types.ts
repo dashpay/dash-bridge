@@ -17,6 +17,8 @@ export interface TxInfo {
   txid: string;
   confirmations: number;
   txlock?: boolean;
+  /** Block height the tx is confirmed in. Undefined while in mempool. */
+  blockheight?: number;
 }
 
 export interface PublicKeyInfo {
@@ -156,6 +158,7 @@ export type BridgeStep =
   | 'signing_transaction'
   | 'broadcasting'
   | 'waiting_islock'
+  | 'waiting_chainlock'      // Fallback: waiting for asset lock tx confirmation + chain lock
   | 'registering_identity'
   | 'topping_up'          // Top-up: calling sdk.identities.topUp()
   | 'enter_recipient_address' // Send to address: user enters recipient bech32m address
@@ -197,11 +200,25 @@ export interface RetryStatus {
   lastError?: string;
 }
 
-export interface AssetLockProofData {
-  transactionBytes: Uint8Array;
-  instantLockBytes: Uint8Array;
-  outputIndex: number;
-}
+/**
+ * Asset lock proof data, tagged by variant so the platform layer can build
+ * the corresponding typed SDK proof. Instant proofs ship the islock + tx
+ * bytes; chain proofs ship only the outpoint plus the chain-locked height
+ * that buries the confirming block.
+ */
+export type AssetLockProofData =
+  | {
+      type: 'instant';
+      transactionBytes: Uint8Array;
+      instantLockBytes: Uint8Array;
+      outputIndex: number;
+    }
+  | {
+      type: 'chain';
+      coreChainLockedHeight: number;
+      txid: string;
+      vout: number;
+    };
 
 export interface BridgeState {
   step: BridgeStep;
@@ -219,9 +236,17 @@ export interface BridgeState {
   detectedUtxo?: UTXO;
   depositAmount?: bigint;
   signedTxHex?: string;
+  /** Raw bytes of the signed asset lock tx — kept so the chainlock fallback can re-build proofs without re-parsing hex. */
+  signedTxBytes?: Uint8Array;
   txid?: string;
   instantLockBytes?: Uint8Array;
   assetLockProof?: AssetLockProofData;
+  /** Block height of the asset lock tx, observed via Insight. Populated while in waiting_chainlock. */
+  assetLockTxBlockHeight?: number;
+  /** Last-seen chain-locked tip height from Platform (sdk.system.status()). Populated while in waiting_chainlock. */
+  coreChainLockedHeight?: number;
+  /** When true, the error screen offers a "Use chainlock proof instead" recovery button. */
+  chainlockFallbackAvailable?: boolean;
   identityId?: string;
   error?: Error;
   /** Error code for user-facing display (e.g., "ERR-1006") */
