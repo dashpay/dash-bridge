@@ -53,6 +53,23 @@ export async function fetchNetworkStatus(
     if (HEALTH_RANK[level] > HEALTH_RANK[health]) health = level;
   };
 
+  // Apply a two-tier threshold to a metric: at/above `stalledAt` is a stall,
+  // at/above `degradedAt` is degraded. Both tiers record the same reason.
+  const applyThreshold = (
+    value: number,
+    degradedAt: number,
+    stalledAt: number,
+    reason: string
+  ): void => {
+    if (value >= stalledAt) {
+      escalate('stalled');
+      reasons.push(reason);
+    } else if (value >= degradedAt) {
+      escalate('degraded');
+      reasons.push(reason);
+    }
+  };
+
   const coreReachable = coreHeight !== undefined;
   const platformReachable = platform !== undefined;
 
@@ -81,17 +98,12 @@ export async function fetchNetworkStatus(
   let chainLockLag: number | undefined;
   if (coreHeight !== undefined && coreChainLockedHeight !== undefined) {
     chainLockLag = coreHeight - coreChainLockedHeight;
-    if (chainLockLag >= CHAIN_LOCK_LAG_STALLED) {
-      escalate('stalled');
-      reasons.push(
-        `Platform chain-lock is ${chainLockLag} blocks behind Core (${coreChainLockedHeight} vs ${coreHeight})`
-      );
-    } else if (chainLockLag >= CHAIN_LOCK_LAG_DEGRADED) {
-      escalate('degraded');
-      reasons.push(
-        `Platform chain-lock is ${chainLockLag} blocks behind Core (${coreChainLockedHeight} vs ${coreHeight})`
-      );
-    }
+    applyThreshold(
+      chainLockLag,
+      CHAIN_LOCK_LAG_DEGRADED,
+      CHAIN_LOCK_LAG_STALLED,
+      `Platform chain-lock is ${chainLockLag} blocks behind Core (${coreChainLockedHeight} vs ${coreHeight})`
+    );
   }
 
   // Platform block age: stale Tenderdash blocks mean consensus is stuck.
@@ -101,13 +113,12 @@ export async function fetchNetworkStatus(
   let platformBlockAgeMs: number | undefined;
   if (platformBlockTimeMs !== undefined && platformBlockTimeMs > 0) {
     platformBlockAgeMs = checkedAtMs - platformBlockTimeMs;
-    if (platformBlockAgeMs >= PLATFORM_BLOCK_AGE_STALLED_MS) {
-      escalate('stalled');
-      reasons.push(`Latest Platform block is ${formatAge(platformBlockAgeMs)} old`);
-    } else if (platformBlockAgeMs >= PLATFORM_BLOCK_AGE_DEGRADED_MS) {
-      escalate('degraded');
-      reasons.push(`Latest Platform block is ${formatAge(platformBlockAgeMs)} old`);
-    }
+    applyThreshold(
+      platformBlockAgeMs,
+      PLATFORM_BLOCK_AGE_DEGRADED_MS,
+      PLATFORM_BLOCK_AGE_STALLED_MS,
+      `Latest Platform block is ${formatAge(platformBlockAgeMs)} old`
+    );
   }
 
   return {

@@ -1,4 +1,4 @@
-import type { BridgeState, KeyType, KeyPurpose, SecurityLevel } from '../types.js';
+import type { BridgeState, KeyType, KeyPurpose, SecurityLevel, NetworkHealth } from '../types.js';
 import { getStepProgress, getStepDescription, ErrorCodes, ErrorCodeLabels } from './state.js';
 import { shouldShowContestedWarning, countUsernameStatuses } from '../platform/dpns.js';
 import { generateQRCodeDataUrl } from './qrcode.js';
@@ -10,7 +10,7 @@ import { formatAge } from '../api/network-status.js';
 
 /** Dot color + label for each network-health verdict. */
 const NETWORK_HEALTH_META: Record<
-  import('../types.js').NetworkHealth,
+  NetworkHealth,
   { label: string; dotClass: string }
 > = {
   healthy: { label: 'Network healthy', dotClass: 'healthy' },
