@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { ErrorCodes, createInitialState, setError } from './state.js';
+import { ErrorCodes, createInitialState, getStepDescription, setError } from './state.js';
 import type { BridgeState } from '../types.js';
 
 function baseState(): BridgeState {
@@ -52,5 +52,11 @@ describe('setError chainlockFallbackAvailable gating', () => {
     };
     const result = setError(state, new Error('broadcast fail'), ErrorCodes.BROADCAST);
     expect(result.chainlockFallbackAvailable).toBe(false);
+  });
+});
+
+describe('step descriptions', () => {
+  it('uses explicit Dash Platform preparation copy for the key-generation step', () => {
+    expect(getStepDescription('generating_keys')).toBe('Preparing Dash Platform...');
   });
 });

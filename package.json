@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:build-artifacts": "npm run build && node scripts/check-build-artifacts.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {

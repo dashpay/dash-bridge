@@ -1,4 +1,4 @@
-function cached<T>(load: () => Promise<T>): () => Promise<T> {
+export function createCachedLoader<T>(load: () => Promise<T>): () => Promise<T> {
   let promise: Promise<T> | null = null;
   return () => {
     if (!promise) {
@@ -11,12 +11,12 @@ function cached<T>(load: () => Promise<T>): () => Promise<T> {
   };
 }
 
-export const loadPlatformModule = cached(() => import('./index.js'));
-export const loadDpnsModule = cached(() => import('./dpns.js'));
-export const loadContractModule = cached(() => import('./contract.js'));
-export const loadPlatformClientModule = cached(() => import('./client.js'));
-export const loadFeeEstimatorModule = cached(() => import('dash-contract-fee-estimator'));
-export const loadIslockModule = cached(() => import('../api/islock.js'));
+export const loadPlatformModule = createCachedLoader(() => import('./index.js'));
+export const loadDpnsModule = createCachedLoader(() => import('./dpns.js'));
+export const loadContractModule = createCachedLoader(() => import('./contract.js'));
+export const loadPlatformClientModule = createCachedLoader(() => import('./client.js'));
+export const loadFeeEstimatorModule = createCachedLoader(() => import('dash-contract-fee-estimator'));
+export const loadIslockModule = createCachedLoader(() => import('../api/islock.js'));
 
 export function warmDashModules(): Promise<PromiseSettledResult<unknown>[]> {
   return Promise.allSettled([
