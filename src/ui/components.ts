@@ -1,6 +1,6 @@
 import type { BridgeState, KeyType, KeyPurpose, SecurityLevel, NetworkHealth } from '../types.js';
 import { getStepProgress, getStepDescription, ErrorCodes, ErrorCodeLabels } from './state.js';
-import { shouldShowContestedWarning, countUsernameStatuses } from '../platform/dpns.js';
+import { shouldShowContestedWarning, countUsernameStatuses } from '../platform/dpns-utils.js';
 import { generateQRCodeDataUrl } from './qrcode.js';
 import { privateKeyToWif } from '../utils/wif.js';
 import { bytesToHex } from '../utils/hex.js';

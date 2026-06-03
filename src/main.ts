@@ -3,11 +3,10 @@ import { publicKeyToAddress, signTransaction, generateKeyPair } from './crypto/i
 import { deriveAssetLockKeyPair } from './crypto/hd.js';
 import { createAssetLockTransaction, serializeTransaction, calculateTxId } from './transaction/index.js';
 import { InsightClient } from './api/insight.js';
-import { IslockService } from './api/islock.js';
+import type { IslockService } from './api/islock.js';
 import { fetchNetworkStatus } from './api/network-status.js';
 import { DAPIClient } from './api/dapi.js';
 import { buildInstantAssetLockProof, buildChainAssetLockProof } from './proof/index.js';
-import { registerIdentity, topUpIdentity, updateIdentity, sendToPlatformAddress, AddKeyConfig } from './platform/index.js';
 import { bech32m } from '@scure/base';
 import { privateKeyToWif, bytesToHex, abortableSleep } from './utils/index.js';
 import {
@@ -102,11 +101,6 @@ import {
   requestTestnetFunds,
 } from './api/faucet.js';
 import {
-  checkMultipleAvailability,
-  registerMultipleNames,
-  getIdentityPublicKeys,
-} from './platform/dpns.js';
-import {
   findMatchingKeyIndex,
   isSecurityLevelAllowedForDpns,
   isPurposeAllowedForDpns,
@@ -114,26 +108,71 @@ import {
   getPurposeName,
   generateIdentityKey,
 } from './crypto/keys.js';
-import { publishContract, extractDocumentSchemas } from './platform/contract.js';
-import { getIdentityBalanceAndRevision, disconnectPlatformSdk } from './platform/client.js';
-import { estimateContractFee, parseContractJson } from 'dash-contract-fee-estimator';
+import {
+  loadContractModule,
+  loadDpnsModule,
+  loadFeeEstimatorModule,
+  loadIslockModule,
+  loadPlatformClientModule,
+  loadPlatformModule,
+  warmDashModules,
+} from './platform/loaders.js';
+import { loadSdkModule } from './platform/sdkModule.js';
 import type { KeyType, KeyPurpose, SecurityLevel, ManageNewKeyConfig, AssetLockProofData } from './types.js';
+import type { AddKeyConfig } from './platform/index.js';
 import type { BridgeState } from './types.js';
 
 // Global state
 let state: BridgeState;
 let insightClient: InsightClient;
-let islockService: IslockService;
+let islockService: IslockService | undefined;
+let clientInitPromise: Promise<void> | undefined;
+let warmupScheduled = false;
+let warmupStarted = false;
 
-function initClients(network: string): void {
+async function initClients(network: string): Promise<void> {
   const config = getNetwork(network);
   insightClient = new InsightClient(config);
+  const { IslockService } = await loadIslockModule();
   islockService = new IslockService({
     network,
     rpcUrl: config.rpcUrl,
     dapiAddresses: config.dapiAddresses,
   });
   startNetworkStatusPolling();
+}
+
+function ensureClients(): Promise<void> {
+  if (!clientInitPromise) {
+    clientInitPromise = initClients(state.network).catch((err) => {
+      clientInitPromise = undefined;
+      throw err;
+    });
+  }
+  return clientInitPromise;
+}
+
+function scheduleDashWarmup(): void {
+  if (warmupScheduled || warmupStarted) return;
+  warmupScheduled = true;
+
+  const requestIdle = (window as typeof window & {
+    requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+  }).requestIdleCallback;
+
+  if (requestIdle) {
+    requestIdle(preloadDashWarmup, { timeout: 1500 });
+  } else {
+    window.setTimeout(preloadDashWarmup, 1000);
+  }
+}
+
+function preloadDashWarmup(): void {
+  if (warmupStarted) return;
+  warmupScheduled = true;
+  warmupStarted = true;
+  void warmDashModules();
+  void ensureClients().catch((err) => console.warn('Dash warmup failed:', err));
 }
 
 // ── Network-status polling ──────────────────────────────────────────────────
@@ -157,6 +196,7 @@ function stopNetworkStatusPolling(): void {
 }
 
 function startNetworkStatusPolling(): void {
+  if (!insightClient || !islockService) return;
   stopNetworkStatusPolling();
   const generation = networkStatusGeneration;
   const insight = insightClient;
@@ -187,7 +227,11 @@ function switchNetwork(network: string): void {
     islockService.disconnect().catch((err) => console.warn('Error disconnecting IslockService:', err));
   }
   updateState(setNetwork(state, network));
-  initClients(network);
+  clientInitPromise = undefined;
+  warmupScheduled = false;
+  warmupStarted = false;
+  void ensureClients().catch((err) => console.warn('Client initialization failed:', err));
+  scheduleDashWarmup();
 }
 
 function showCustomDevnetModal(existing?: { name?: string; insightApiUrl?: string; dapiAddresses?: string; rpcUrl?: string; faucetBaseUrl?: string; useTrustedContext?: boolean; trustedQuorumUrl?: string }): void {
@@ -251,7 +295,9 @@ function showCustomDevnetModal(existing?: { name?: string; insightApiUrl?: strin
       trustedQuorumUrl,
     });
     saveCustomDevnet(config);
-    disconnectPlatformSdk(name);
+    void loadPlatformClientModule()
+      .then(({ disconnectPlatformSdk }) => disconnectPlatformSdk(name))
+      .catch((err) => console.warn('Could not clear Platform SDK cache:', err));
     overlay.remove();
     switchNetwork(name);
   });
@@ -286,7 +332,6 @@ function init() {
 
   // Initialize state
   state = createInitialState(network);
-  initClients(network);
 
   // Deep-link: ?address=<bech32m> opens send-to-address mode with address pre-filled
   if (addressParam && validatePlatformAddress(addressParam, network)) {
@@ -300,15 +345,7 @@ function init() {
     state = setMode(state, 'contract');
     const contractParam = urlParams.get('contract');
     if (contractParam) {
-      try {
-        const jsonStr = atob(contractParam.replace(/-/g, '+').replace(/_/g, '/'));
-        const json = JSON.parse(jsonStr);
-        const parsed = parseContractJson(json);
-        const estimate = estimateContractFee(parsed);
-        state = setContractJson(state, JSON.stringify(json, null, 2), parsed, estimate, undefined);
-      } catch {
-        // Invalid contract param, ignore
-      }
+      void hydrateContractDeepLink(contractParam);
     }
   }
 
@@ -318,6 +355,36 @@ function init() {
     render(state, container);
     setupEventListeners(container);
   }
+
+  scheduleDashWarmup();
+}
+
+async function hydrateContractDeepLink(contractParam: string): Promise<void> {
+  try {
+    const jsonStr = atob(contractParam.replace(/-/g, '+').replace(/_/g, '/'));
+    const json = JSON.parse(jsonStr);
+    const { parsed, estimate } = await parseAndEstimateContract(json);
+    updateState(setContractJson(state, JSON.stringify(json, null, 2), parsed, estimate, undefined));
+  } catch {
+    // Invalid contract param, ignore
+  }
+}
+
+async function getIdentityPublicKeys(identityId: string, network: string) {
+  const { getIdentityPublicKeys } = await loadDpnsModule();
+  return getIdentityPublicKeys(identityId, network);
+}
+
+async function getIdentityBalanceAndRevision(identityId: string, network: string) {
+  const { getIdentityBalanceAndRevision } = await loadPlatformClientModule();
+  return getIdentityBalanceAndRevision(identityId, network);
+}
+
+async function parseAndEstimateContract(json: unknown) {
+  const { parseContractJson, estimateContractFee } = await loadFeeEstimatorModule();
+  const parsed = parseContractJson(json);
+  const estimate = estimateContractFee(parsed);
+  return { parsed, estimate };
 }
 
 /**
@@ -375,6 +442,13 @@ function updateState(newState: BridgeState) {
  * Setup event listeners
  */
 function setupEventListeners(container: HTMLElement) {
+  const attachDashWarmup = (element: Element | null): void => {
+    if (!element) return;
+    element.addEventListener('pointerenter', preloadDashWarmup, { once: true });
+    element.addEventListener('focus', preloadDashWarmup, { once: true });
+    element.addEventListener('touchstart', preloadDashWarmup, { once: true });
+  };
+
   // Network selector buttons (testnet, mainnet)
   container.querySelectorAll('.network-btn[data-network]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -411,6 +485,7 @@ function setupEventListeners(container: HTMLElement) {
 
   // Mode selection buttons (init page)
   const modeCreateBtn = container.querySelector('#mode-create-btn');
+  attachDashWarmup(modeCreateBtn);
   if (modeCreateBtn) {
     modeCreateBtn.addEventListener('click', () => {
       updateState(setMode(state, 'create'));
@@ -418,6 +493,7 @@ function setupEventListeners(container: HTMLElement) {
   }
 
   const modeTopUpBtn = container.querySelector('#mode-topup-btn');
+  attachDashWarmup(modeTopUpBtn);
   if (modeTopUpBtn) {
     modeTopUpBtn.addEventListener('click', () => {
       updateState(setMode(state, 'topup'));
@@ -426,6 +502,7 @@ function setupEventListeners(container: HTMLElement) {
 
   // Platform Address mode button (init page)
   const modeSendToAddressBtn = container.querySelector('#mode-send-to-address-btn');
+  attachDashWarmup(modeSendToAddressBtn);
   if (modeSendToAddressBtn) {
     modeSendToAddressBtn.addEventListener('click', () => {
       updateState(setMode(state, 'send_to_address'));
@@ -616,6 +693,7 @@ function setupEventListeners(container: HTMLElement) {
 
   // DPNS mode button (init page)
   const modeDpnsBtn = container.querySelector('#mode-dpns-btn');
+  attachDashWarmup(modeDpnsBtn);
   if (modeDpnsBtn) {
     modeDpnsBtn.addEventListener('click', () => {
       updateState(setMode(state, 'dpns'));
@@ -900,6 +978,7 @@ function setupEventListeners(container: HTMLElement) {
 
   // Manage mode button (init page)
   const modeManageBtn = container.querySelector('#mode-manage-btn');
+  attachDashWarmup(modeManageBtn);
   if (modeManageBtn) {
     modeManageBtn.addEventListener('click', () => {
       updateState(setMode(state, 'manage'));
@@ -1311,6 +1390,7 @@ function setupEventListeners(container: HTMLElement) {
 
   // Contract mode button (init page)
   const modeContractBtn = container.querySelector('#mode-contract-btn');
+  attachDashWarmup(modeContractBtn);
   if (modeContractBtn) {
     modeContractBtn.addEventListener('click', () => {
       updateState(setMode(state, 'contract'));
@@ -1417,7 +1497,7 @@ function setupEventListeners(container: HTMLElement) {
     let contractDebounceTimer: ReturnType<typeof setTimeout>;
     contractJsonInput.addEventListener('input', () => {
       clearTimeout(contractDebounceTimer);
-      contractDebounceTimer = setTimeout(() => {
+      contractDebounceTimer = setTimeout(async () => {
         const raw = contractJsonInput.value.trim();
         if (!raw) {
           updateState(setContractJson(state, '', undefined, undefined, undefined));
@@ -1425,8 +1505,7 @@ function setupEventListeners(container: HTMLElement) {
         }
         try {
           const json = JSON.parse(raw);
-          const parsed = parseContractJson(json);
-          const estimate = estimateContractFee(parsed);
+          const { parsed, estimate } = await parseAndEstimateContract(json);
           updateState(setContractJson(state, raw, parsed, estimate, undefined));
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -1588,10 +1667,12 @@ function showValidationError(message: string): void {
  */
 async function startTopUp() {
   try {
+    updateState(setStep(state, 'generating_keys'));
+    await ensureClients();
+    const islock = islockService!;
     const network = getNetwork(state.network);
 
     // Step 1: Generate random one-time key pair (NOT HD-derived)
-    updateState(setStep(state, 'generating_keys'));
 
     const assetLockKeyPair = generateKeyPair();
     const depositAddress = publicKeyToAddress(assetLockKeyPair.publicKey, network);
@@ -1654,7 +1735,7 @@ async function startTopUp() {
     // is signed (which can happen within milliseconds of broadcast).
     updateState(setStep(state, 'waiting_islock'));
     console.log('Opening IS lock subscription before broadcast...');
-    const islockSub = await islockService.subscribeForInstantSendLock(
+    const islockSub = await islock.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
       utxo
@@ -1688,6 +1769,7 @@ async function startTopUp() {
       network
     );
 
+    const { topUpIdentity } = await loadPlatformModule();
     await topUpIdentity(
       state.targetIdentityId!,
       assetLockProof,
@@ -1708,10 +1790,12 @@ async function startTopUp() {
  */
 async function startSendToAddress() {
   try {
+    updateState(setStep(state, 'generating_keys'));
+    await ensureClients();
+    const islock = islockService!;
     const network = getNetwork(state.network);
 
     // Step 1: Generate random one-time key pair
-    updateState(setStep(state, 'generating_keys'));
 
     const assetLockKeyPair = generateKeyPair();
     const depositAddress = publicKeyToAddress(assetLockKeyPair.publicKey, network);
@@ -1768,7 +1852,7 @@ async function startSendToAddress() {
 
     // Step 5: Subscribe for IS lock BEFORE broadcasting (see flow #1 for why).
     updateState(setStep(state, 'waiting_islock'));
-    const islockSub = await islockService.subscribeForInstantSendLock(
+    const islockSub = await islock.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
       utxo
@@ -1799,6 +1883,7 @@ async function startSendToAddress() {
       network
     );
 
+    const { sendToPlatformAddress } = await loadPlatformModule();
     await sendToPlatformAddress(
       state.recipientPlatformAddress!,
       assetLockProof,
@@ -1854,6 +1939,7 @@ async function registerIdentityResilient(
   };
 
   try {
+    const { registerIdentity } = await loadPlatformModule();
     return await registerIdentity(proof, assetLockPrivateKeyWif, identityKeys, network);
   } catch (err) {
     if (!isAlreadyExistsError(err)) throw err;
@@ -1865,7 +1951,7 @@ async function registerIdentityResilient(
     console.log(
       '[identity-create] Platform reports state transition already submitted; treating as success.'
     );
-    const { AssetLockProof } = await import('@dashevo/evo-sdk');
+    const { AssetLockProof } = await loadSdkModule();
     const sdkProof = AssetLockProof.createInstantAssetLockProof(
       proof.instantLockBytes,
       proof.transactionBytes,
@@ -1891,6 +1977,8 @@ async function startBridge() {
 
     // Step 1: Derive asset lock key from mnemonic (identity keys are pre-configured in state)
     updateState(setStep(state, 'generating_keys'));
+    await ensureClients();
+    const islock = islockService!;
 
     const { privateKey, publicKey } = deriveAssetLockKeyPair(state.mnemonic, state.network);
     const assetLockKeyPair = { privateKey, publicKey };
@@ -1953,7 +2041,7 @@ async function startBridge() {
     // Step 5: Subscribe for IS lock BEFORE broadcasting (see flow #1 for why).
     updateState(setStep(state, 'waiting_islock'));
     console.log('Opening IS lock subscription before broadcast...');
-    const islockSub = await islockService.subscribeForInstantSendLock(
+    const islockSub = await islock.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
       utxo
@@ -2017,6 +2105,8 @@ async function recheckDeposit() {
     console.error('No deposit address available');
     return;
   }
+  await ensureClients();
+  const islock = islockService!;
 
   // Reset timeout state and start polling again
   updateState(setDepositTimedOut(state, false, 0));
@@ -2072,7 +2162,7 @@ async function recheckDeposit() {
     // Step 5: Subscribe for IS lock BEFORE broadcasting (see flow #1 for why).
     updateState(setStep(state, 'waiting_islock'));
     console.log('Opening IS lock subscription before broadcast...');
-    const islockSub = await islockService.subscribeForInstantSendLock(
+    const islockSub = await islock.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
       utxo
@@ -2105,6 +2195,7 @@ async function recheckDeposit() {
 
     if (state.mode === 'topup') {
       updateState(setStep(state, 'topping_up'));
+      const { topUpIdentity } = await loadPlatformModule();
       await topUpIdentity(
         state.targetIdentityId!,
         assetLockProof,
@@ -2114,6 +2205,7 @@ async function recheckDeposit() {
       updateState(setTopUpComplete(state));
     } else if (state.mode === 'send_to_address') {
       updateState(setStep(state, 'sending_to_address'));
+      const { sendToPlatformAddress } = await loadPlatformModule();
       await sendToPlatformAddress(
         state.recipientPlatformAddress!,
         assetLockProof,
@@ -2167,6 +2259,7 @@ async function runPlatformSubmission(
 ): Promise<void> {
   if (state.mode === 'topup') {
     updateState(setStep(state, 'topping_up'));
+    const { topUpIdentity } = await loadPlatformModule();
     await topUpIdentity(
       state.targetIdentityId!,
       assetLockProof,
@@ -2179,6 +2272,7 @@ async function runPlatformSubmission(
 
   if (state.mode === 'send_to_address') {
     updateState(setStep(state, 'sending_to_address'));
+    const { sendToPlatformAddress } = await loadPlatformModule();
     await sendToPlatformAddress(
       state.recipientPlatformAddress!,
       assetLockProof,
@@ -2203,6 +2297,7 @@ async function runPlatformSubmission(
         state.network
       );
     } else {
+      const { registerIdentity } = await loadPlatformModule();
       result = await registerIdentity(
         assetLockProof,
         assetLockPrivateKeyWif,
@@ -2250,6 +2345,8 @@ async function startChainlockFallback(): Promise<void> {
   const signal = chainlockController.signal;
 
   updateState(setChainlockFallbackStarted(state));
+  await ensureClients();
+  const islock = islockService!;
 
   const network = getNetwork(state.network);
   const txid = state.txid;
@@ -2286,7 +2383,7 @@ async function startChainlockFallback(): Promise<void> {
       }
       if (height === undefined) {
         try {
-          height = await islockService.getCoreChainLockedHeight();
+          height = await islock.getCoreChainLockedHeight();
         } catch (error) {
           console.warn('platform.getStatus core chain locked height failed:', error);
         }
@@ -2407,6 +2504,7 @@ async function startContractRegistration() {
     updateState(setContractRegistering(state));
 
     const contractJson = JSON.parse(state.contractJson);
+    const { extractDocumentSchemas, publishContract } = await loadContractModule();
     const documentSchemas = extractDocumentSchemas(contractJson);
     const tokens = contractJson.tokens;
 
@@ -2446,6 +2544,7 @@ async function startDpnsCheck() {
     updateState(setDpnsChecking(state));
 
     // Check availability for all valid usernames
+    const { checkMultipleAvailability } = await loadDpnsModule();
     const results = await checkMultipleAvailability(validUsernames, state.network);
 
     // Update state with results
@@ -2486,6 +2585,7 @@ async function startDpnsRegistration() {
     updateState(setDpnsRegistering(state));
 
     // Register all available usernames
+    const { registerMultipleNames } = await loadDpnsModule();
     const results = await registerMultipleNames(
       availableUsernames,
       identityId,
@@ -2550,6 +2650,7 @@ async function startManageUpdate() {
     }
 
     // Execute update
+    const { updateIdentity } = await loadPlatformModule();
     const result = await updateIdentity(
       state.targetIdentityId,
       state.managePrivateKeyWif,

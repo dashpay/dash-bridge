@@ -9,6 +9,8 @@ declare const Cap: {
   };
 };
 
+let capWidgetPromise: Promise<void> | null = null;
+
 /** Default timeout for faucet API requests (30 seconds) */
 const REQUEST_TIMEOUT_MS = 30000;
 
@@ -101,6 +103,8 @@ export async function getFaucetStatus(baseUrl: string): Promise<FaucetStatus> {
  * Uses the global Cap class from @cap.js/widget loaded via CDN
  */
 export async function solveCap(capEndpoint: string): Promise<string> {
+  await loadCapWidget();
+
   if (typeof Cap === 'undefined') {
     throw new Error('CAP widget not loaded. Please refresh the page.');
   }
@@ -113,6 +117,36 @@ export async function solveCap(capEndpoint: string): Promise<string> {
   }
 
   return result.token;
+}
+
+function loadCapWidget(): Promise<void> {
+  if (typeof Cap !== 'undefined') {
+    return Promise.resolve();
+  }
+
+  if (!capWidgetPromise) {
+    capWidgetPromise = new Promise<void>((resolve, reject) => {
+      const existing = document.querySelector<HTMLScriptElement>('script[data-cap-widget]');
+      if (existing) {
+        existing.addEventListener('load', () => resolve(), { once: true });
+        existing.addEventListener('error', () => reject(new Error('Failed to load CAP widget')), { once: true });
+        return;
+      }
+
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/@cap.js/widget';
+      script.async = true;
+      script.dataset.capWidget = 'true';
+      script.addEventListener('load', () => resolve(), { once: true });
+      script.addEventListener('error', () => reject(new Error('Failed to load CAP widget')), { once: true });
+      document.head.appendChild(script);
+    }).catch((err) => {
+      capWidgetPromise = null;
+      throw err;
+    });
+  }
+
+  return capWidgetPromise;
 }
 
 /**

@@ -15,6 +15,10 @@ export default defineConfig({
   ],
   build: {
     target: 'es2020',
+    modulePreload: {
+      resolveDependencies: (_filename, deps) =>
+        deps.filter((dep) => !/evo-sdk|dapi-client|dashcore-lib|dapi-subscription/.test(dep)),
+    },
     commonjsOptions: {
       transformMixedEsModules: true,
     },
