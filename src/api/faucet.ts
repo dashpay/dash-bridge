@@ -13,6 +13,7 @@ let capWidgetPromise: Promise<void> | null = null;
 
 /** Default timeout for faucet API requests (30 seconds) */
 const REQUEST_TIMEOUT_MS = 30000;
+const CAP_WIDGET_SRC = 'https://cdn.jsdelivr.net/npm/@cap.js/widget@0.1.54';
 
 export interface FaucetStatus {
   status: string;
@@ -126,19 +127,56 @@ function loadCapWidget(): Promise<void> {
 
   if (!capWidgetPromise) {
     capWidgetPromise = new Promise<void>((resolve, reject) => {
+      const watchScript = (script: HTMLScriptElement) => {
+        let settled = false;
+        const timeoutId = setTimeout(() => {
+          rejectScript(new Error('Timed out loading CAP widget'));
+        }, REQUEST_TIMEOUT_MS);
+
+        const cleanup = () => {
+          settled = true;
+          clearTimeout(timeoutId);
+          script.removeEventListener('load', handleLoad);
+          script.removeEventListener('error', handleError);
+        };
+
+        const rejectScript = (error: Error) => {
+          if (settled) return;
+          cleanup();
+          script.remove();
+          reject(error);
+        };
+
+        const handleLoad = () => {
+          if (settled) return;
+          cleanup();
+          if (typeof Cap === 'undefined') {
+            script.remove();
+            reject(new Error('CAP widget loaded without exposing Cap'));
+            return;
+          }
+          resolve();
+        };
+
+        const handleError = () => {
+          rejectScript(new Error('Failed to load CAP widget'));
+        };
+
+        script.addEventListener('load', handleLoad, { once: true });
+        script.addEventListener('error', handleError, { once: true });
+      };
+
       const existing = document.querySelector<HTMLScriptElement>('script[data-cap-widget]');
       if (existing) {
-        existing.addEventListener('load', () => resolve(), { once: true });
-        existing.addEventListener('error', () => reject(new Error('Failed to load CAP widget')), { once: true });
+        watchScript(existing);
         return;
       }
 
       const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/npm/@cap.js/widget';
+      script.src = CAP_WIDGET_SRC;
       script.async = true;
       script.dataset.capWidget = 'true';
-      script.addEventListener('load', () => resolve(), { once: true });
-      script.addEventListener('error', () => reject(new Error('Failed to load CAP widget')), { once: true });
+      watchScript(script);
       document.head.appendChild(script);
     }).catch((err) => {
       capWidgetPromise = null;

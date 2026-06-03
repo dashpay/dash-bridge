@@ -8,6 +8,7 @@ describe('shouldPreloadDashChunk', () => {
     expect(shouldPreloadDashChunk('assets/dapi-client-Bn7.js')).toBe(false);
     expect(shouldPreloadDashChunk('assets/dashcore-lib-Cx9.js')).toBe(false);
     expect(shouldPreloadDashChunk('assets/dapi-subscription-Dk2.js')).toBe(false);
+    expect(shouldPreloadDashChunk('assets/islock-Ea3.js')).toBe(false);
   });
 
   it('keeps normal chunks preloadable', () => {
