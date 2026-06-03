@@ -1,12 +1,17 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+// Guard the Lighthouse fix: the initial page must not preload or statically
+// import the heavy Dash SDK/DAPI chunks that are meant to stay lazy-loaded.
 const distDir = new URL('../dist/', import.meta.url);
 const indexPath = new URL('index.html', distDir);
 const heavyChunkPattern = /(?:evo-sdk|dapi-client|dashcore-lib|dapi-subscription|islock)/;
 
 function fail(message) {
-  console.error(`Build artifact smoke check failed: ${message}`);
+  console.error(`::error title=Build artifact smoke check failed::${message}`);
+  console.error('\nBUILD ARTIFACT CHECK FAILED');
+  console.error(message);
+  console.error('');
   process.exit(1);
 }
 
