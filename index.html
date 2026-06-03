@@ -2493,6 +2493,287 @@
       letter-spacing: 0.03em;
       margin-top: 2px;
     }
+
+    /* ============================================================================
+       Mobile (≤600px)
+       ============================================================================ */
+    @media (max-width: 600px) {
+      body {
+        padding: 10px;
+        align-items: flex-start;
+      }
+
+      .bridge-container {
+        padding: 20px 16px;
+        border-radius: 12px;
+      }
+
+      h1 {
+        font-size: 1.4rem;
+      }
+
+      header {
+        margin-bottom: 20px;
+      }
+
+      /* Network selector: allow wrap, drop max-widths so buttons fit */
+      .network-selector {
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .network-btn {
+        max-width: none;
+        padding: 12px 14px;
+        font-size: 0.9rem;
+      }
+
+      .devnet-dropdown {
+        max-width: none;
+        flex-basis: 100%;
+      }
+
+      /* Mode buttons */
+      .mode-btn {
+        padding: 18px;
+      }
+
+      /* Primary/secondary buttons */
+      .primary-btn {
+        padding: 16px 24px;
+        font-size: 1rem;
+      }
+
+      /* Configure keys row: stack label above controls, each select on its own row */
+      .key-row {
+        flex-wrap: wrap;
+        padding: 12px;
+        gap: 8px;
+      }
+
+      .key-name {
+        width: 100%;
+      }
+
+      .key-config {
+        flex-wrap: wrap;
+        width: 100%;
+      }
+
+      .key-config select {
+        flex: 1 1 100%;
+        font-size: 0.85rem;
+        min-width: 0;
+      }
+
+      .key-config .key-purpose-select {
+        min-width: 0;
+      }
+
+      .key-config .remove-key-btn {
+        align-self: flex-end;
+        width: 44px;
+        height: 44px;
+        font-size: 1.1rem;
+      }
+
+      /* Nav / action buttons: stack full-width */
+      .nav-buttons {
+        flex-direction: column;
+      }
+
+      .nav-buttons .primary-btn,
+      .nav-buttons .secondary-btn {
+        width: 100%;
+        white-space: normal;
+      }
+
+      .error-actions .primary-btn,
+      .error-actions .secondary-btn {
+        flex: 1 1 100%;
+      }
+
+      .dpns-action-buttons .primary-btn,
+      .dpns-action-buttons .secondary-btn,
+      .manage-action-buttons .primary-btn,
+      .manage-action-buttons .secondary-btn {
+        width: 100%;
+      }
+
+      /* Deposit screen */
+      .deposit-headline {
+        font-size: 1.1rem;
+      }
+
+      .qr-container {
+        padding: 12px;
+        max-width: 100%;
+      }
+
+      .qr-container img {
+        max-width: 100%;
+        height: auto;
+      }
+
+      .address-display {
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .address {
+        font-size: 0.8rem;
+        padding: 10px 12px;
+        width: 100%;
+      }
+
+      /* Mnemonic: 2 columns on small screens */
+      .mnemonic-section {
+        padding: 18px;
+      }
+
+      .mnemonic-words {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px;
+      }
+
+      .mnemonic-word {
+        font-size: 0.85rem;
+        padding: 8px 10px;
+      }
+
+      /* Processing details */
+      .processing-headline {
+        font-size: 1.2rem;
+      }
+
+      .processing-details {
+        padding: 14px;
+      }
+
+      /* Manage keys rows */
+      .manage-key-row {
+        padding: 12px;
+        font-size: 0.85rem;
+      }
+
+      .manage-key-row .key-disable-toggle {
+        margin-left: 0;
+        width: 100%;
+      }
+
+      .add-key-config {
+        gap: 8px;
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .add-key-config select {
+        flex: 1 1 100%;
+        width: 100%;
+        min-width: 0;
+      }
+
+      .add-key-config .manage-key-purpose-select {
+        min-width: 0;
+      }
+
+      .add-key-config .remove-manage-new-key-btn {
+        align-self: flex-end;
+        width: 44px;
+        height: 44px;
+      }
+
+      /* DPNS username row */
+      .dpns-username-row {
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .dpns-username-input-wrapper {
+        flex: 1 1 100%;
+        order: 1;
+      }
+
+      .dpns-username-status {
+        flex: 1;
+        text-align: left;
+        order: 2;
+        min-width: 0;
+      }
+
+      .remove-dpns-username-btn {
+        order: 3;
+        width: 44px;
+        height: 44px;
+      }
+
+      .dpns-username-input {
+        padding: 12px 14px;
+        font-size: 1rem;
+      }
+
+      /* Input with button (fetch identity) */
+      .input-with-button {
+        flex-direction: column;
+      }
+
+      .fetch-btn {
+        width: 100%;
+      }
+
+      /* Devnet modal */
+      .devnet-modal {
+        padding: 20px;
+        width: 95%;
+      }
+
+      .devnet-modal-actions {
+        flex-direction: column-reverse;
+      }
+
+      .devnet-modal-actions .primary-btn,
+      .devnet-modal-actions .secondary-btn {
+        width: 100%;
+      }
+
+      /* Faucet hero */
+      .faucet-section.faucet-hero {
+        padding: 18px;
+      }
+
+      .faucet-btn.faucet-btn-hero {
+        padding: 14px 24px;
+        font-size: 1rem;
+        width: 100%;
+      }
+
+      /* Identity / contract id rows */
+      .id-row {
+        flex-wrap: wrap;
+      }
+
+      .id-row .identity-id {
+        font-size: 0.8rem;
+      }
+
+      /* Fee table — let it scroll if too wide */
+      .fee-breakdown {
+        overflow-x: auto;
+      }
+
+      .fee-table {
+        font-size: 0.8rem;
+      }
+
+      /* Complete stats: shrink padding */
+      .complete-stats {
+        gap: 8px;
+      }
+
+      .stat {
+        padding: 8px 10px;
+      }
+    }
   </style>
 </head>
 <body>
