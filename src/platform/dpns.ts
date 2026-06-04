@@ -1,4 +1,3 @@
-import { IdentitySigner } from '@dashevo/evo-sdk';
 import type { DpnsUsernameEntry, DpnsRegistrationResult, IdentityPublicKeyInfo } from '../types.js';
 import { withRetry, type RetryOptions } from '../utils/retry.js';
 import {
@@ -6,6 +5,21 @@ import {
   fetchIdentityWithSdk,
   withConnectedPlatformSdk,
 } from './client.js';
+import { loadSdkModule } from './sdkModule.js';
+import {
+  convertToHomographSafe,
+  isContestedUsername,
+} from './dpns-utils.js';
+
+export {
+  validateDpnsLabel,
+  convertToHomographSafe,
+  isContestedUsername,
+  createUsernameEntry,
+  createEmptyUsernameEntry,
+  shouldShowContestedWarning,
+  countUsernameStatuses,
+} from './dpns-utils.js';
 
 /**
  * Fetch an identity's public keys from the network
@@ -78,111 +92,6 @@ export async function getIdentityPublicKeys(
 
   console.log('Parsed keys:', result);
   return result;
-}
-
-/**
- * Validate a DPNS label according to platform rules:
- * - 3-63 characters
- * - Alphanumeric first and last character
- * - Hyphens allowed in middle (no consecutive hyphens)
- * - Lowercase only (will be normalized)
- */
-export function validateDpnsLabel(label: string): { isValid: boolean; error?: string } {
-  if (!label) {
-    return { isValid: false, error: 'Username is required' };
-  }
-
-  const normalized = label.toLowerCase();
-
-  if (normalized.length < 3) {
-    return { isValid: false, error: 'Minimum 3 characters' };
-  }
-
-  if (normalized.length > 63) {
-    return { isValid: false, error: 'Maximum 63 characters' };
-  }
-
-  // Must start with alphanumeric
-  if (!/^[a-z0-9]/.test(normalized)) {
-    return { isValid: false, error: 'Must start with letter or number' };
-  }
-
-  // Must end with alphanumeric
-  if (!/[a-z0-9]$/.test(normalized)) {
-    return { isValid: false, error: 'Must end with letter or number' };
-  }
-
-  // Only alphanumeric and hyphens allowed
-  if (!/^[a-z0-9-]+$/.test(normalized)) {
-    return { isValid: false, error: 'Only letters, numbers, and hyphens allowed' };
-  }
-
-  // No consecutive hyphens
-  if (/--/.test(normalized)) {
-    return { isValid: false, error: 'No consecutive hyphens allowed' };
-  }
-
-  return { isValid: true };
-}
-
-/**
- * Convert label to homograph-safe form
- * o -> 0, i -> 1, l -> 1
- */
-export function convertToHomographSafe(label: string): string {
-  return label
-    .toLowerCase()
-    .replace(/o/g, '0')
-    .replace(/[il]/g, '1');
-}
-
-/**
- * Determine if a username is contested
- * Contested: 3-19 chars, only contains [a-z, 0, 1, -] after normalization
- * Non-contested: 20+ chars OR contains digits 2-9
- */
-export function isContestedUsername(normalizedLabel: string): boolean {
-  // 20+ chars is always non-contested
-  if (normalizedLabel.length >= 20) {
-    return false;
-  }
-
-  // Contains digits 2-9 is non-contested
-  if (/[2-9]/.test(normalizedLabel)) {
-    return false;
-  }
-
-  // 3-19 chars with only [a-z, 0, 1, -] is contested
-  return /^[a-z01-]+$/.test(normalizedLabel);
-}
-
-/**
- * Create a validated username entry from a label
- */
-export function createUsernameEntry(label: string): DpnsUsernameEntry {
-  const normalized = convertToHomographSafe(label);
-  const validation = validateDpnsLabel(label);
-
-  return {
-    label,
-    normalizedLabel: normalized,
-    isValid: validation.isValid,
-    validationError: validation.error,
-    isContested: validation.isValid ? isContestedUsername(normalized) : undefined,
-    status: validation.isValid ? 'pending' : 'invalid',
-  };
-}
-
-/**
- * Create an empty username entry
- */
-export function createEmptyUsernameEntry(): DpnsUsernameEntry {
-  return {
-    label: '',
-    normalizedLabel: '',
-    isValid: false,
-    status: 'pending',
-  };
 }
 
 /**
@@ -272,6 +181,7 @@ export async function registerDpnsName(
         throw new Error(`Identity key ${publicKeyId} not found`);
       }
 
+      const { IdentitySigner } = await loadSdkModule();
       const signer = new IdentitySigner();
       signer.addKeyFromWif(privateKeyWif);
 
@@ -339,39 +249,4 @@ export async function registerMultipleNames(
   }
 
   return results;
-}
-
-/**
- * Check if all available usernames in a list are contested
- * Used to determine if warning should be shown
- */
-export function shouldShowContestedWarning(usernames: DpnsUsernameEntry[]): boolean {
-  const validAvailable = usernames.filter((u) => u.isValid && u.isAvailable);
-
-  // No valid available names - no warning needed
-  if (validAvailable.length === 0) {
-    return false;
-  }
-
-  // All valid+available names are contested
-  return validAvailable.every((u) => u.isContested);
-}
-
-/**
- * Count of each username status category
- */
-export function countUsernameStatuses(usernames: DpnsUsernameEntry[]): {
-  available: number;
-  taken: number;
-  invalid: number;
-  contested: number;
-  nonContested: number;
-} {
-  const available = usernames.filter((u) => u.isValid && u.isAvailable).length;
-  const taken = usernames.filter((u) => u.isValid && u.isAvailable === false).length;
-  const invalid = usernames.filter((u) => !u.isValid).length;
-  const contested = usernames.filter((u) => u.isValid && u.isAvailable && u.isContested).length;
-  const nonContested = usernames.filter((u) => u.isValid && u.isAvailable && !u.isContested).length;
-
-  return { available, taken, invalid, contested, nonContested };
 }
