@@ -22,6 +22,7 @@ export {
   ErrorCodeLabels,
   setDepositTimedOut,
   setNetwork,
+  setNetworkStatus,
   getStepDescription,
   getStepProgress,
   isProcessingStep,

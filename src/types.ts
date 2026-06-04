@@ -220,6 +220,42 @@ export type AssetLockProofData =
       vout: number;
     };
 
+/**
+ * Overall network-health verdict shown in the header.
+ * - `healthy`: Core and Platform are both advancing in lock-step.
+ * - `degraded`: a mild lag (chain-lock or Platform block age) worth surfacing.
+ * - `stalled`: Platform consensus is stuck while Core keeps moving (or a side
+ *   is unreachable enough to be unusable).
+ * - `unknown`: we couldn't gather enough signal to judge.
+ */
+export type NetworkHealth = 'healthy' | 'degraded' | 'stalled' | 'unknown';
+
+/**
+ * Snapshot of network health derived from Insight (Core) and DAPI/Platform
+ * status. Lets the UI warn when Platform consensus stalls while Core keeps
+ * producing blocks — the failure mode where the app sees deposits confirm but
+ * identity registration hangs.
+ */
+export interface NetworkStatus {
+  health: NetworkHealth;
+  /** Core block height from Insight (`/status?q=getInfo` → `info.blocks`). */
+  coreHeight?: number;
+  /** Platform's view of the chain-locked Core height (getStatus chain.coreChainLockedHeight). */
+  coreChainLockedHeight?: number;
+  /** Tenderdash/Platform latest block height. */
+  platformBlockHeight?: number;
+  /** Tenderdash latest block time, ms since epoch. */
+  platformBlockTimeMs?: number;
+  /** coreHeight − coreChainLockedHeight, when both are known. */
+  chainLockLag?: number;
+  /** now − platformBlockTimeMs, when known. */
+  platformBlockAgeMs?: number;
+  /** Human-readable explanations for a degraded/stalled verdict. */
+  reasons: string[];
+  /** When this snapshot was taken, ms since epoch. */
+  checkedAtMs: number;
+}
+
 export interface BridgeState {
   step: BridgeStep;
   network: string;
@@ -227,6 +263,8 @@ export interface BridgeState {
   mode: BridgeMode;
   /** Current network retry status (for displaying retry indicator) */
   retryStatus?: RetryStatus;
+  /** Latest network-health snapshot for the header indicator */
+  networkStatus?: NetworkStatus;
   /** BIP39 mnemonic (12 words) for HD key derivation */
   mnemonic?: string;
   assetLockKeyPair?: KeyPair;

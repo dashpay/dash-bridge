@@ -1,6 +1,7 @@
-import { EvoSDK } from '@dashevo/evo-sdk';
+import type { EvoSDK } from '@dashevo/evo-sdk';
 import { withRetry, type RetryOptions } from '../utils/retry.js';
 import { devnetNameForSdk, getNetwork } from '../config.js';
+import { loadSdkModule } from './sdkModule.js';
 
 export type PlatformNetwork = string;
 
@@ -30,7 +31,8 @@ const PLATFORM_OPERATION_TIMEOUT_MS = 45000;
 
 const sdkCache = new Map<string, EvoSDK>();
 
-function createPlatformSdk(network: PlatformNetwork): EvoSDK {
+async function createPlatformSdk(network: PlatformNetwork): Promise<EvoSDK> {
+  const { EvoSDK } = await loadSdkModule();
   const options = { settings: PLATFORM_REQUEST_SETTINGS };
   const config = getNetwork(network);
 
@@ -84,7 +86,7 @@ export async function connectPlatformSdk(
     return cached;
   }
 
-  const sdk = createPlatformSdk(network);
+  const sdk = await createPlatformSdk(network);
 
   console.log(`Connecting to ${network}...`);
   await withRetry(() => sdk.connect(), retryOptions);

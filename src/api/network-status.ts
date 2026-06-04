@@ -1,0 +1,176 @@
+import type { InsightClient } from './insight.js';
+import type { IslockService } from './islock.js';
+import type { NetworkHealth, NetworkStatus } from '../types.js';
+
+/**
+ * Network-health heuristics. Tuned for Dash Platform: a healthy chain-lock
+ * tracks Core within a handful of blocks, and Tenderdash produces blocks every
+ * few seconds, so a Platform block more than a few minutes old means consensus
+ * is stalling.
+ */
+const CHAIN_LOCK_LAG_DEGRADED = 8; // blocks behind Core's tip
+const CHAIN_LOCK_LAG_STALLED = 30;
+const PLATFORM_BLOCK_AGE_DEGRADED_MS = 5 * 60_000;
+const PLATFORM_BLOCK_AGE_STALLED_MS = 15 * 60_000;
+
+// Escalation ranking for the worst-wins verdict. `unknown` is intentionally
+// omitted: it is only ever produced by the explicit early-return path (both
+// sources unreachable) and is never passed to `escalate()`.
+const HEALTH_RANK: Record<Exclude<NetworkHealth, 'unknown'>, number> = {
+  healthy: 0,
+  degraded: 1,
+  stalled: 2,
+};
+
+/**
+ * Gather Core (Insight) and Platform (DAPI) status and derive an overall
+ * health verdict. Both sources are queried in parallel and tolerated
+ * individually: a verdict is produced from whatever responds.
+ */
+export async function fetchNetworkStatus(
+  insight: InsightClient,
+  islock: IslockService
+): Promise<NetworkStatus> {
+  const checkedAtMs = Date.now();
+
+  // Route the chain-lock source the same way the islock flow is routed:
+  //   - mainnet/testnet (JSON-RPC available): read Core's best chain-lock over
+  //     JSON-RPC. The dapi-client DAPI path can't resolve a masternode address
+  //     in a browser there (seed/SML resolution fails on bad certs + CORS), so
+  //     we deliberately avoid it.
+  //   - devnets (no JSON-RPC, explicit dapiAddresses): read full Platform
+  //     status over DAPI, which also yields Tenderdash block height + age.
+  const useDapiPlatformStatus = !islock.supportsJsonRpc;
+
+  // Bound the Insight retry so a flaky endpoint can't stretch one poll past the
+  // 30s interval (the dapi-client / JSON-RPC calls have their own timeouts).
+  const [coreResult, secondaryResult] = await Promise.allSettled([
+    insight.getBlockHeight({ maxAttempts: 1 }),
+    useDapiPlatformStatus ? islock.getPlatformStatus() : islock.getBestChainLock(),
+  ]);
+
+  const coreHeight = coreResult.status === 'fulfilled' ? coreResult.value : undefined;
+
+  let coreChainLockedHeight: number | undefined;
+  let platformBlockHeight: number | undefined;
+  let platformBlockTimeMs: number | undefined;
+  let secondaryReachable: boolean;
+
+  if (useDapiPlatformStatus) {
+    // Settled value is the getPlatformStatus() shape on this branch.
+    const platform =
+      secondaryResult.status === 'fulfilled'
+        ? (secondaryResult.value as Awaited<ReturnType<IslockService['getPlatformStatus']>>)
+        : undefined;
+    secondaryReachable = platform !== undefined;
+    coreChainLockedHeight = platform?.coreChainLockedHeight;
+    platformBlockHeight = platform?.latestBlockHeight;
+    platformBlockTimeMs = platform?.latestBlockTimeMs;
+  } else {
+    // A null result (no chain lock observed yet) still means the endpoint
+    // answered — only a rejection counts as unreachable.
+    secondaryReachable = secondaryResult.status === 'fulfilled';
+    const chainLock =
+      secondaryResult.status === 'fulfilled'
+        ? (secondaryResult.value as Awaited<ReturnType<IslockService['getBestChainLock']>>)
+        : undefined;
+    coreChainLockedHeight = chainLock?.height;
+  }
+
+  const reasons: string[] = [];
+  let health: Exclude<NetworkHealth, 'unknown'> = 'healthy';
+  const escalate = (level: Exclude<NetworkHealth, 'unknown'>): void => {
+    if (HEALTH_RANK[level] > HEALTH_RANK[health]) health = level;
+  };
+
+  // Apply a two-tier threshold to a metric: at/above `stalledAt` is a stall,
+  // at/above `degradedAt` is degraded. Both tiers record the same reason.
+  const applyThreshold = (
+    value: number,
+    degradedAt: number,
+    stalledAt: number,
+    reason: string
+  ): void => {
+    if (value >= stalledAt) {
+      escalate('stalled');
+      reasons.push(reason);
+    } else if (value >= degradedAt) {
+      escalate('degraded');
+      reasons.push(reason);
+    }
+  };
+
+  const coreReachable = coreHeight !== undefined;
+
+  // Nothing answered — we can't say anything useful.
+  if (!coreReachable && !secondaryReachable) {
+    return {
+      health: 'unknown',
+      reasons: ['Could not reach Insight or the chain-lock source'],
+      checkedAtMs,
+    };
+  }
+
+  if (!coreReachable) {
+    escalate('degraded');
+    reasons.push('Insight (Core) unreachable');
+  }
+  if (!secondaryReachable) {
+    // "Unreachable" is a transport failure, not an observed consensus stall —
+    // flag it as degraded so a transient error doesn't fire a false red
+    // "stalled" alarm. A genuine stall shows up via the lag/age checks below.
+    escalate('degraded');
+    reasons.push(
+      useDapiPlatformStatus ? 'Platform (DAPI) status unreachable' : 'Chain-lock RPC unreachable'
+    );
+  }
+
+  // Chain-lock lag: Core's tip advancing while the chain-locked height trails.
+  let chainLockLag: number | undefined;
+  if (coreHeight !== undefined && coreChainLockedHeight !== undefined) {
+    chainLockLag = coreHeight - coreChainLockedHeight;
+    applyThreshold(
+      chainLockLag,
+      CHAIN_LOCK_LAG_DEGRADED,
+      CHAIN_LOCK_LAG_STALLED,
+      `Chain-lock is ${chainLockLag} blocks behind Core (${coreChainLockedHeight} vs ${coreHeight})`
+    );
+  }
+
+  // Platform block age: stale Tenderdash blocks mean consensus is stuck.
+  // DAPI's getStatus time.block is Unix milliseconds (13 digits, e.g.
+  // 1780014886480), distinct from time.local which is Unix seconds — so it's
+  // directly comparable to Date.now().
+  let platformBlockAgeMs: number | undefined;
+  if (platformBlockTimeMs !== undefined && platformBlockTimeMs > 0) {
+    platformBlockAgeMs = checkedAtMs - platformBlockTimeMs;
+    applyThreshold(
+      platformBlockAgeMs,
+      PLATFORM_BLOCK_AGE_DEGRADED_MS,
+      PLATFORM_BLOCK_AGE_STALLED_MS,
+      `Latest Platform block is ${formatAge(platformBlockAgeMs)} old`
+    );
+  }
+
+  return {
+    health,
+    coreHeight,
+    coreChainLockedHeight,
+    platformBlockHeight,
+    platformBlockTimeMs,
+    chainLockLag,
+    platformBlockAgeMs,
+    reasons,
+    checkedAtMs,
+  };
+}
+
+/** Compact human-readable age, e.g. "12m" or "3h 5m". */
+export function formatAge(ms: number): string {
+  const totalMinutes = Math.floor(ms / 60_000);
+  if (totalMinutes < 1) return '<1m';
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours === 0) return `${minutes}m`;
+  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+}

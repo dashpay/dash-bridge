@@ -1,15 +1,9 @@
-import {
+import type {
   AssetLockProof,
-  Identity,
-  IdentityPublicKey,
   IdentityPublicKeyInCreation,
-  IdentitySigner,
-  OutPoint,
-  PrivateKey,
-  PlatformAddressSigner,
-  type PurposeLike,
-  type SecurityLevelLike,
-  type KeyTypeLike,
+  PurposeLike,
+  SecurityLevelLike,
+  KeyTypeLike,
 } from '@dashevo/evo-sdk';
 import { sha256 } from '@noble/hashes/sha256';
 import { ripemd160 } from '@noble/hashes/ripemd160';
@@ -19,6 +13,7 @@ import { bytesToHex } from '../utils/hex.js';
 import { describeIslock, diffIslockInputsAgainstTx } from '../utils/islock-debug.js';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 import dashcoreLib from '@dashevo/dashcore-lib';
+import { loadSdkModule } from './sdkModule.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const DashcoreTransaction = (dashcoreLib as any).Transaction;
@@ -42,7 +37,8 @@ function hash160(data: Uint8Array): Uint8Array {
 /**
  * Build the typed SDK AssetLockProof from our discriminated proof data.
  */
-function toSdkProof(data: AssetLockProofData): AssetLockProof {
+async function toSdkProof(data: AssetLockProofData): Promise<AssetLockProof> {
+  const { AssetLockProof, OutPoint } = await loadSdkModule();
   if (data.type === 'instant') {
     return AssetLockProof.createInstantAssetLockProof(
       data.instantLockBytes,
@@ -264,7 +260,13 @@ export async function registerIdentity(
 ): Promise<{ identityId: string; balance: number; revision: number }> {
   logAssetLockProofForDebug(assetLockProofData, network, 'registerIdentity');
   return withConnectedPlatformSdk(network, async (sdk) => {
-    const proof = toSdkProof(assetLockProofData);
+    const {
+      Identity,
+      IdentityPublicKey,
+      IdentitySigner,
+      PrivateKey,
+    } = await loadSdkModule();
+    const proof = await toSdkProof(assetLockProofData);
     const identityId = proof.createIdentityId().toString();
     console.log('[islock-debug] Derived identityId from proof:', identityId);
     const identity = new Identity(identityId);
@@ -418,7 +420,8 @@ export async function topUpIdentity(
       throw new Error(`Identity not found: ${identityId}`);
     }
 
-    const proof = toSdkProof(assetLockProofData);
+    const { PrivateKey } = await loadSdkModule();
+    const proof = await toSdkProof(assetLockProofData);
     const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);
 
     console.log('Topping up identity:', identityId);
@@ -489,6 +492,7 @@ export async function updateIdentity(
         throw new Error(`Identity not found: ${identityId}`);
       }
 
+      const { IdentityPublicKeyInCreation, IdentitySigner } = await loadSdkModule();
       const signer = new IdentitySigner();
       signer.addKeyFromWif(privateKeyWif);
 
@@ -583,7 +587,8 @@ export async function sendToPlatformAddress(
     `sendToPlatformAddress:${recipientAddress}`
   );
   return withConnectedPlatformSdk(network, async (sdk) => {
-    const assetLockProof = toSdkProof(assetLockProofData);
+    const { PlatformAddressSigner, PrivateKey } = await loadSdkModule();
+    const assetLockProof = await toSdkProof(assetLockProofData);
 
     // Build the asset lock private key
     const assetLockPrivateKey = PrivateKey.fromWIF(assetLockPrivateKeyWif);
