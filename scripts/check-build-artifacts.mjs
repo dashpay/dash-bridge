@@ -5,7 +5,11 @@ import { join } from 'node:path';
 // import the heavy Dash SDK/DAPI chunks that are meant to stay lazy-loaded.
 const distDir = new URL('../dist/', import.meta.url);
 const indexPath = new URL('index.html', distDir);
-const heavyChunkPattern = /(?:evo-sdk|dapi-client|dashcore-lib|dapi-subscription|islock)/;
+// Single source of truth for heavy Dash chunk names; kept in sync with
+// HEAVY_DASH_CHUNK_PATTERN in src/config/vite-preload.ts.
+const HEAVY_CHUNK_NAMES = ['evo-sdk', 'dapi-client', 'dashcore-lib', 'dapi-subscription', 'islock'];
+const CHUNK_ALTERNATION = HEAVY_CHUNK_NAMES.join('|');
+const heavyChunkPattern = new RegExp(`(?:${CHUNK_ALTERNATION})`);
 
 function fail(message) {
   console.error(`::error title=Build artifact smoke check failed::${message}`);
@@ -49,8 +53,10 @@ if (!entrySrc) {
 const entryRelativePath = entrySrc.replace(/^\//, '').replace(/^.*?(assets\/)/, '$1');
 const entryPath = join(distDir.pathname, entryRelativePath);
 const entryChunk = readBuiltFile(entryPath);
-const staticImportPattern =
-  /\bimport\s*(?:["'][^"']*(?:evo-sdk|dapi-client|dashcore-lib|dapi-subscription|islock)[^"']*["']|[\w*{}\s,]+from\s*["'][^"']*(?:evo-sdk|dapi-client|dashcore-lib|dapi-subscription|islock)[^"']*["'])/;
+const heavySpecifier = `["'][^"']*(?:${CHUNK_ALTERNATION})[^"']*["']`;
+const staticImportPattern = new RegExp(
+  `\\bimport\\s*(?:${heavySpecifier}|[\\w*{}\\s,]+from\\s*${heavySpecifier})`
+);
 
 if (staticImportPattern.test(entryChunk)) {
   fail('entry chunk statically imports a heavy Dash chunk');
