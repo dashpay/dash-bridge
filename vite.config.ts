@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import { nodePolyfills } from 'vite-plugin-node-polyfills';
+import { shouldPreloadDashChunk } from './src/config/vite-preload.js';
 
 export default defineConfig({
   base: process.env.BASE_PATH || '/',
@@ -15,6 +16,10 @@ export default defineConfig({
   ],
   build: {
     target: 'es2020',
+    modulePreload: {
+      resolveDependencies: (_filename, deps) =>
+        deps.filter(shouldPreloadDashChunk),
+    },
     commonjsOptions: {
       transformMixedEsModules: true,
     },

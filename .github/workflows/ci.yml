@@ -23,5 +23,7 @@ jobs:
         run: npx tsc --noEmit
       - name: Build
         run: npm run build
+      - name: Build artifact smoke check
+        run: node scripts/check-build-artifacts.mjs
       - name: Test
-        run: npm test -- --run --passWithNoTests
+        run: npm test

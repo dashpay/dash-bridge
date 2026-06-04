@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 import {
   ErrorCodes,
   createInitialState,
+  getStepDescription,
   setError,
   setMode,
   updateIdentityKey,
@@ -132,5 +133,11 @@ describe('updateManageNewKey security level coercion', () => {
     };
     const updated = updateManageNewKey(state, 'test-1', { purpose: 'ENCRYPTION' });
     expect(updated.manageKeysToAdd![0].securityLevel).toBe('MEDIUM');
+  });
+});
+
+describe('step descriptions', () => {
+  it('uses explicit Dash Platform preparation copy for the key-generation step', () => {
+    expect(getStepDescription('generating_keys')).toBe('Preparing Dash Platform...');
   });
 });

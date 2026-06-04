@@ -11,13 +11,14 @@ import type {
   IdentityPublicKeyInfo,
   ManageNewKeyConfig,
   AssetLockProofData,
+  NetworkStatus,
 } from '../types.js';
 import {
   generateDefaultIdentityKeysHD,
   generateIdentityKeyFromMnemonic,
 } from '../crypto/keys.js';
 import { generateNewMnemonic } from '../crypto/hd.js';
-import { createEmptyUsernameEntry, createUsernameEntry } from '../platform/dpns.js';
+import { createEmptyUsernameEntry, createUsernameEntry } from '../platform/dpns-utils.js';
 
 /**
  * Error codes for user-facing display.
@@ -542,6 +543,16 @@ export function setChainlockProofReady(
 }
 
 /**
+ * Update the network-health snapshot shown in the header indicator.
+ */
+export function setNetworkStatus(
+  state: BridgeState,
+  networkStatus: NetworkStatus
+): BridgeState {
+  return { ...state, networkStatus };
+}
+
+/**
  * Set network (re-derives identity keys for new network from same mnemonic)
  */
 export function setNetwork(
@@ -603,7 +614,7 @@ export function getStepDescription(step: BridgeStep): string {
     init: 'Ready to start',
     configure_keys: 'Configure your keys',
     enter_identity: 'Top up identity',
-    generating_keys: 'Setting up...',
+    generating_keys: 'Preparing Dash Platform...',
     awaiting_deposit: 'Fund your identity',
     detecting_deposit: 'Fund your identity',
     building_transaction: 'Preparing transaction...',

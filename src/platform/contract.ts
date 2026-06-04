@@ -1,6 +1,6 @@
-import { IdentitySigner, DataContract } from '@dashevo/evo-sdk';
 import { withRetry, type RetryOptions } from '../utils/retry.js';
 import { fetchIdentityWithSdk, withConnectedPlatformSdk } from './client.js';
+import { loadSdkModule } from './sdkModule.js';
 
 /**
  * Publish a data contract on Dash Platform.
@@ -32,6 +32,7 @@ export async function publishContract(
       throw new Error(`Identity key ${publicKeyId} not found`);
     }
 
+    const { IdentitySigner, DataContract } = await loadSdkModule();
     const signer = new IdentitySigner();
     signer.addKeyFromWif(privateKeyWif);
 

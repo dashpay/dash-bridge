@@ -65,10 +65,14 @@ export const DEVNET_PALOMA: NetworkConfig = {
   minFee: 1000,
   dustThreshold: 546,
   platformHrp: 'tdash',
+  // Paloma HP masternodes. The full inventory (dash-network-configs
+  // devnet-paloma.inventory) lists 13, but .86/.87/.196/.207 are currently
+  // dead at the TLS/gRPC layer (connection reset before handshake), so they're
+  // pruned to stop the SDK rotating into them. Restore from the inventory once
+  // those nodes are healthy again.
   dapiAddresses: [
     'https://68.67.122.198:1443',
     'https://68.67.122.199:1443',
-    'https://68.67.122.86:1443',
     'https://68.67.122.197:1443',
     'https://68.67.122.192:1443',
     'https://68.67.122.85:1443',
@@ -76,9 +80,6 @@ export const DEVNET_PALOMA: NetworkConfig = {
     'https://68.67.122.206:1443',
     'https://68.67.122.193:1443',
     'https://68.67.122.195:1443',
-    'https://68.67.122.196:1443',
-    'https://68.67.122.87:1443',
-    'https://68.67.122.207:1443',
   ],
   faucetBaseUrl: 'https://faucet.paloma.networks.dash.org',
   useTrustedContext: true,
