@@ -65,11 +65,12 @@ export class IslockService {
   }
 
   /**
-   * Open IS lock sources (DAPI bloom subscription + optional JSON-RPC polling)
-   * before broadcasting. Returns a handle whose `.wait()` resolves with the
-   * IS lock bytes once available. This avoids the race where dashd signs the
-   * IS lock between broadcast and subscribe (subscriptions don't replay
-   * historical IS locks).
+   * Open the IS lock source before broadcasting and return a handle whose
+   * `.wait()` resolves with the IS lock bytes once available. Devnets without
+   * RPC use the DAPI bloom subscription, which must be established before
+   * broadcast because subscriptions don't replay historical IS locks.
+   * Mainnet/testnet use JSON-RPC polling, which can recover by txid and avoids
+   * browser-hostile dapi-client stream discovery.
    */
   async subscribeForInstantSendLock(
     txid: string,
@@ -101,34 +102,12 @@ export class IslockService {
       };
     }
 
-    // Race JSON-RPC polling against DAPI subscription — first success wins.
-    // Each source gets its own AbortController so the loser is cancelled as
-    // soon as the race settles.
+    // JSON-RPC backed networks (mainnet/testnet) should not touch dapi-client
+    // stream setup here. Browser seed/SML discovery can fail on TLS-hostname
+    // validation and report "No available addresses", which would block the
+    // broadcast even though the RPC islock endpoint is sufficient.
     const jsonRpcController = new AbortController();
-    const dapiController = new AbortController();
-    const tripwireController = new AbortController();
-    this.startLockStatusTripwire(txid, tripwireController.signal);
-
-    // The DAPI bloom subscription is best-effort here: JSON-RPC polling is the
-    // reliable path on testnet/mainnet. The subscription's setup hits
-    // dapi-client masternode address resolution, which can throw "No available
-    // addresses" on those networks (no explicit dapiAddresses). Don't let that
-    // abort the whole wait — fall back to JSON-RPC polling alone.
-    let dapiSub: { wait: () => Promise<Uint8Array> } | null = null;
-    try {
-      dapiSub = await this.subscriptionClient.subscribeForInstantSendLock(
-        txid,
-        publicKey,
-        utxo,
-        timeoutMs,
-        onProgress,
-        dapiController.signal
-      );
-    } catch (error) {
-      console.warn(
-        `[islock] DAPI bloom subscription unavailable; using JSON-RPC polling only: ${(error as Error).message}`
-      );
-    }
+    onProgress?.('Polling InstantSend lock...');
 
     const jsonRpcPromise = this.jsonRpcClient.waitForInstantSendLock(
       txid,
@@ -137,47 +116,22 @@ export class IslockService {
       jsonRpcController.signal
     );
 
-    jsonRpcPromise.catch(() => {});
-    const dapiPromise = dapiSub?.wait();
-    dapiPromise?.catch(() => {});
-
     const raceStart = Date.now();
-    async function tagged(
-      source: string,
-      promise: Promise<Uint8Array>
-    ): Promise<{ source: string; bytes: Uint8Array }> {
-      const bytes = await promise;
-      return { source, bytes };
-    }
-
-    const racePromise = (async (): Promise<Uint8Array> => {
-      const contenders = [tagged('json-rpc', jsonRpcPromise)];
-      if (dapiPromise) {
-        contenders.push(tagged('dapi-subscription', dapiPromise));
-      }
+    const waitPromise = (async (): Promise<Uint8Array> => {
       try {
-        const winner = await Promise.any(contenders);
+        const bytes = await jsonRpcPromise;
         const elapsedMs = Date.now() - raceStart;
         console.log(
-          `[islock-debug] IS lock race won by ${winner.source} for txid=${txid} in ${elapsedMs}ms`
+          `[islock-debug] IS lock received via json-rpc for txid=${txid} in ${elapsedMs}ms`
         );
-        return winner.bytes;
-      } catch (error) {
-        if (error instanceof AggregateError) {
-          throw new Error(
-            `All IS lock sources failed: ${error.errors.map((e) => (e as Error).message).join('; ')}`
-          );
-        }
-        throw error;
+        return bytes;
       } finally {
         jsonRpcController.abort();
-        dapiController.abort();
-        tripwireController.abort();
       }
     })();
-    racePromise.catch(() => {});
+    waitPromise.catch(() => {});
 
-    return { wait: () => racePromise };
+    return { wait: () => waitPromise };
   }
 
   async waitForInstantSendLock(
