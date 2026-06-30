@@ -2504,14 +2504,11 @@ async function startContractRegistration() {
     updateState(setContractRegistering(state));
 
     const contractJson = JSON.parse(state.contractJson);
-    const { extractDocumentSchemas, publishContract } = await loadContractModule();
-    const documentSchemas = extractDocumentSchemas(contractJson);
-    const tokens = contractJson.tokens;
+    const { publishContract } = await loadContractModule();
 
     const result = await publishContract(
       identityId,
-      documentSchemas,
-      tokens,
+      contractJson,
       publicKeyId,
       privateKeyWif,
       state.network,
