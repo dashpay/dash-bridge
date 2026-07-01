@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { describe, it, expect, beforeAll } from 'vitest';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import cbor from 'cbor';
@@ -9,8 +9,14 @@ import { decodeSmlDiff } from './sml.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = resolve(__dirname, '../../scripts/fixtures/sml-paloma-snapshot.bin');
 
-describe('decodeSmlDiff', () => {
-  const bytes = new Uint8Array(readFileSync(FIXTURE));
+// Fixture is a developer-only devnet snapshot not checked into the repo; skip when absent.
+const describeWithFixture = existsSync(FIXTURE) ? describe : describe.skip;
+
+describeWithFixture('decodeSmlDiff', () => {
+  let bytes!: Uint8Array;
+  beforeAll(() => {
+    bytes = new Uint8Array(readFileSync(FIXTURE));
+  });
 
   it('decodes the captured devnet-paloma CBOR snapshot', () => {
     const diff = decodeSmlDiff(bytes);

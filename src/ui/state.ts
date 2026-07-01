@@ -307,6 +307,11 @@ export function updateIdentityKey(
       effectiveSecurityLevel = 'CRITICAL';
     }
 
+    // ENCRYPTION and DECRYPTION purposes only allow MEDIUM security level
+    if ((effectivePurpose === 'ENCRYPTION' || effectivePurpose === 'DECRYPTION') && effectiveSecurityLevel !== 'MEDIUM') {
+      effectiveSecurityLevel = 'MEDIUM';
+    }
+
     // If keyType changed, regenerate with new type using HD derivation
     if (updates.keyType && updates.keyType !== key.keyType) {
       return generateIdentityKeyFromMnemonic(
@@ -1135,6 +1140,11 @@ export function updateManageNewKey(
       // TRANSFER purpose only allows CRITICAL security level
       if (effectivePurpose === 'TRANSFER' && effectiveSecurityLevel !== 'CRITICAL') {
         effectiveSecurityLevel = 'CRITICAL';
+      }
+
+      // ENCRYPTION and DECRYPTION purposes only allow MEDIUM security level
+      if ((effectivePurpose === 'ENCRYPTION' || effectivePurpose === 'DECRYPTION') && effectiveSecurityLevel !== 'MEDIUM') {
+        effectiveSecurityLevel = 'MEDIUM';
       }
 
       return {

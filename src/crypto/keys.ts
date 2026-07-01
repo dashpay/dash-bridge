@@ -125,7 +125,7 @@ export function updateKeyType(
 }
 
 /**
- * Generate default identity keys (5 keys)
+ * Generate default identity keys (6 keys)
  * @deprecated Use generateDefaultIdentityKeysHD for HD derivation
  */
 export function generateDefaultIdentityKeys(
@@ -137,6 +137,7 @@ export function generateDefaultIdentityKeys(
     generateIdentityKey(2, 'Critical Auth', 'ECDSA_SECP256K1', 'AUTHENTICATION', 'CRITICAL', network),
     generateIdentityKey(3, 'Transfer', 'ECDSA_SECP256K1', 'TRANSFER', 'CRITICAL', network),
     generateIdentityKey(4, 'Encryption', 'ECDSA_SECP256K1', 'ENCRYPTION', 'MEDIUM', network),
+    generateIdentityKey(5, 'Decryption', 'ECDSA_SECP256K1', 'DECRYPTION', 'MEDIUM', network),
   ];
 }
 
@@ -214,6 +215,7 @@ export function generateDefaultIdentityKeysHD(
     generateIdentityKeyFromMnemonic(2, 'Critical Auth', 'ECDSA_SECP256K1', 'AUTHENTICATION', 'CRITICAL', network, mnemonic, 2),
     generateIdentityKeyFromMnemonic(3, 'Transfer', 'ECDSA_SECP256K1', 'TRANSFER', 'CRITICAL', network, mnemonic, 3),
     generateIdentityKeyFromMnemonic(4, 'Encryption', 'ECDSA_SECP256K1', 'ENCRYPTION', 'MEDIUM', network, mnemonic, 4),
+    generateIdentityKeyFromMnemonic(5, 'Decryption', 'ECDSA_SECP256K1', 'DECRYPTION', 'MEDIUM', network, mnemonic, 5),
   ];
 }
 
