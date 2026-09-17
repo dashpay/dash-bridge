@@ -129,11 +129,14 @@ export class DAPISubscriptionClient {
     onProgress?.('Listening for InstantSend lock...');
 
     const lockPromise = new Promise<Uint8Array>((resolve, reject) => {
+      let settled = false;
       const onAbort = (): void => {
         finish(() => reject(new Error(`InstantSend lock subscription aborted for ${txid}`)));
       };
 
       const finish = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timeoutId);
         signal?.removeEventListener('abort', onAbort);
         try { stream.cancel(); } catch { /* ignore */ }

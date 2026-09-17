@@ -11,6 +11,7 @@ export interface NetworkConfig {
   platformHrp: string;
   faucetBaseUrl?: string;
   dapiAddresses?: string[];
+  /** Optional InstantSend fast path; chain-proof recovery uses Platform directly. */
   rpcUrl?: string;
   /**
    * Devnet-only: opt in to the SDK's trusted-context mode. When true, the
@@ -44,7 +45,6 @@ export const TESTNET: NetworkConfig = {
   dustThreshold: 546,
   platformHrp: 'tdash',
   faucetBaseUrl: 'https://faucet.thepasta.org',
-  rpcUrl: 'https://trpc.digitalcash.dev',
 };
 
 export const MAINNET: NetworkConfig = {
@@ -57,7 +57,6 @@ export const MAINNET: NetworkConfig = {
   minFee: 1000,
   dustThreshold: 546,
   platformHrp: 'dash',
-  rpcUrl: 'https://rpc.digitalcash.dev',
 };
 
 export const DEVNET_MOUTAI: NetworkConfig = {

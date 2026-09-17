@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 // Guard the Lighthouse fix: the initial page must not preload or statically
@@ -60,6 +60,15 @@ const staticImportPattern = new RegExp(
 
 if (staticImportPattern.test(entryChunk)) {
   fail('entry chunk statically imports a heavy Dash chunk');
+}
+
+// The production bundle must not silently reintroduce a Digital Cash endpoint
+// through either application config or a transitive dependency.
+for (const name of readdirSync(new URL('assets/', distDir))) {
+  if (!name.endsWith('.js')) continue;
+  if (readBuiltFile(new URL(`assets/${name}`, distDir)).includes('digitalcash.dev')) {
+    fail(`Digital Cash endpoint found in ${name}`);
+  }
 }
 
 console.log('Build artifact smoke check passed');

@@ -2,6 +2,7 @@ import { DAPIClient, type DAPIConfig } from './dapi.js';
 import { DAPISubscriptionClient, type DAPISubscriptionConfig } from './dapi-subscription.js';
 import type { RetryOptions } from '../utils/retry.js';
 import { abortableSleep } from '../utils/sleep.js';
+import { fetchPlatformStatus, type PlatformStatus } from '../platform/status.js';
 
 export interface IslockServiceConfig {
   network: string;
@@ -14,7 +15,7 @@ export class IslockService {
   private readonly subscriptionClient: DAPISubscriptionClient;
   private readonly hasJsonRpc: boolean;
 
-  constructor(config: IslockServiceConfig) {
+  constructor(private readonly config: IslockServiceConfig) {
     const jsonRpcConfig: DAPIConfig = { network: config.network, rpcUrl: config.rpcUrl };
     this.jsonRpcClient = new DAPIClient(jsonRpcConfig);
     this.hasJsonRpc = this.jsonRpcClient.hasRpcUrl;
@@ -69,8 +70,8 @@ export class IslockService {
    * `.wait()` resolves with the IS lock bytes once available. Devnets without
    * RPC use the DAPI bloom subscription, which must be established before
    * broadcast because subscriptions don't replay historical IS locks.
-   * Mainnet/testnet use JSON-RPC polling, which can recover by txid and avoids
-   * browser-hostile dapi-client stream discovery.
+   * Public networks without a configured RPC provider request chain recovery.
+   * Explicit RPC URLs enable polling by txid without legacy seed discovery.
    */
   async subscribeForInstantSendLock(
     txid: string,
@@ -79,19 +80,29 @@ export class IslockService {
     timeoutMs: number = 60000,
     onRetry?: RetryOptions['onRetry'],
     onProgress?: (message: string) => void
-  ): Promise<{ wait: () => Promise<Uint8Array> }> {
+  ): Promise<{ wait: () => Promise<Uint8Array>; cancel: () => void }> {
+    if (!this.hasJsonRpc && (this.config.network === 'mainnet' || this.config.network === 'testnet')) {
+      // Public networks can operate entirely through chain proofs when the
+      // optional RPC URL is omitted/disabled. Never start legacy seed discovery.
+      return {
+        wait: async () => { throw new Error('InstantSend RPC is disabled; use a chain proof'); },
+        cancel: () => {},
+      };
+    }
     if (!this.hasJsonRpc) {
       // DAPI subscription only — establish the stream, then return.
+      const tripwireController = new AbortController();
       const sub = await this.subscriptionClient.subscribeForInstantSendLock(
         txid,
         publicKey,
         utxo,
         timeoutMs,
-        onProgress
+        onProgress,
+        tripwireController.signal
       );
-      const tripwireController = new AbortController();
       this.startLockStatusTripwire(txid, tripwireController.signal);
       return {
+        cancel: () => tripwireController.abort(),
         wait: async () => {
           try {
             return await sub.wait();
@@ -102,7 +113,7 @@ export class IslockService {
       };
     }
 
-    // JSON-RPC backed networks (mainnet/testnet) should not touch dapi-client
+    // Networks with an explicit RPC URL should not touch dapi-client
     // stream setup here. Browser seed/SML discovery can fail on TLS-hostname
     // validation and report "No available addresses", which would block the
     // broadcast even though the RPC islock endpoint is sufficient.
@@ -131,7 +142,7 @@ export class IslockService {
     })();
     waitPromise.catch(() => {});
 
-    return { wait: () => waitPromise };
+    return { wait: () => waitPromise, cancel: () => jsonRpcController.abort() };
   }
 
   async waitForInstantSendLock(
@@ -146,21 +157,12 @@ export class IslockService {
     return sub.wait();
   }
 
-  /**
-   * Direct gRPC read of the Platform chain-locked Dash Core height.
-   * Used by the chainlock fallback — see DAPISubscriptionClient
-   * for why this bypasses `sdk.system.status()`.
-   */
+  /** Platform-observed chain lock, independent of the optional RPC host. */
   async getCoreChainLockedHeight(): Promise<number | undefined> {
-    return this.subscriptionClient.getCoreChainLockedHeight();
+    return (await this.getPlatformStatus()).coreChainLockedHeight;
   }
 
-  /**
-   * Whether a JSON-RPC endpoint is configured (mainnet/testnet). Devnets have
-   * none and must read Platform status over DAPI instead. The network-status
-   * poller uses this to avoid the dapi-client seed/SML address resolution,
-   * which can't complete in a browser on mainnet/testnet.
-   */
+  /** Whether an optional Core JSON-RPC fast path is configured. */
   get supportsJsonRpc(): boolean {
     return this.hasJsonRpc;
   }
@@ -174,16 +176,11 @@ export class IslockService {
     return this.jsonRpcClient.getBestChainLock();
   }
 
-  /**
-   * Read Platform/Tenderdash status (chain-locked Core height, latest Platform
-   * block height + timestamp) over DAPI. Used by the network-health indicator
-   * on devnets (which have explicit dapiAddresses).
-   */
-  async getPlatformStatus(): Promise<{
-    coreChainLockedHeight?: number;
-    latestBlockHeight?: number;
-    latestBlockTimeMs?: number;
-  }> {
+  /** Public networks use EvoSDK discovery; devnets keep explicit DAPI nodes. */
+  async getPlatformStatus(): Promise<PlatformStatus> {
+    if (this.config.network === 'mainnet' || this.config.network === 'testnet') {
+      return fetchPlatformStatus(this.config.network);
+    }
     return this.subscriptionClient.getPlatformStatus();
   }
 
