@@ -1,5 +1,4 @@
 /** Optional JSON-RPC fast path for retrieving InstantSend locks by txid. */
-import { MAINNET, TESTNET } from '../config.js';
 import { fetchJson } from '../utils/fetch-json.js';
 import type { RetryOptions } from '../utils/retry.js';
 import { describeIslock } from '../utils/islock-debug.js';
@@ -18,8 +17,7 @@ export class DAPIClient {
 
   constructor(config: DAPIConfig) {
     this.network = config.network;
-    this.rpcUrl = config.rpcUrl ?? (config.network === 'mainnet'
-      ? MAINNET.rpcUrl : config.network === 'testnet' ? TESTNET.rpcUrl : undefined);
+    this.rpcUrl = config.rpcUrl;
   }
 
   get hasRpcUrl(): boolean {

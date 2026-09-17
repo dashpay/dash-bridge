@@ -5,19 +5,24 @@ import { DAPIClient } from './dapi.js';
 const txid = '22'.repeat(32);
 const lockHex = '0101' + '11'.repeat(32) + '00000000' + txid + '33'.repeat(32) + '44'.repeat(96);
 const fetchMock = vi.fn();
-const client = new DAPIClient({ network: 'testnet' });
+const client = new DAPIClient({ network: 'testnet', rpcUrl: 'https://rpc.example.invalid' });
 const reply = (result: unknown) => ({ ok: true, json: async () => ({ result }) });
 
 beforeEach(() => { vi.useFakeTimers(); vi.stubGlobal('fetch', fetchMock); fetchMock.mockReset(); });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('optional InstantSend RPC', () => {
+  it('has no provider when no URL is configured', () => {
+    expect(new DAPIClient({ network: 'testnet' }).hasRpcUrl).toBe(false);
+    expect(new DAPIClient({ network: 'mainnet' }).hasRpcUrl).toBe(false);
+  });
+
   it('polls empty results and returns a valid matching lock', async () => {
     fetchMock.mockResolvedValueOnce(reply([])).mockResolvedValue(reply([{ txid, hex: lockHex }]));
     const result = client.waitForInstantSendLock(txid);
     await vi.advanceTimersByTimeAsync(2000);
     await expect(result).resolves.toEqual(new Uint8Array(Buffer.from(lockHex, 'hex')));
-    expect(fetchMock.mock.calls[0][0]).toBe('https://trpc.digitalcash.dev');
+    expect(fetchMock.mock.calls[0][0]).toBe('https://rpc.example.invalid');
   });
 
   it('yields after three blocked requests instead of polling forever', async () => {

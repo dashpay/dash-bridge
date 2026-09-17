@@ -15,7 +15,7 @@ vi.mock('./dapi.js', () => ({
   DAPIClient: vi.fn().mockImplementation((config: { network: string; rpcUrl?: string }) => ({
     network: config.network,
     get hasRpcUrl() {
-      return config.rpcUrl !== undefined ? !!config.rpcUrl : config.network === 'mainnet' || config.network === 'testnet';
+      return !!config.rpcUrl;
     },
     waitForInstantSendLock: mocks.waitForInstantSendLock,
     getBestChainLock: mocks.getBestChainLock,
@@ -42,10 +42,10 @@ describe('IslockService', () => {
     mocks.getTransactionLockStatus.mockResolvedValue(null);
   });
 
-  it('uses JSON-RPC only on mainnet to avoid browser DAPI stream discovery', async () => {
+  it('uses explicitly configured RPC without browser DAPI stream discovery', async () => {
     const bytes = new Uint8Array([1, 2, 3]);
     mocks.waitForInstantSendLock.mockResolvedValue(bytes);
-    const service = new IslockService({ network: 'mainnet' });
+    const service = new IslockService({ network: 'mainnet', rpcUrl: 'https://rpc.example.invalid' });
     const progress: string[] = [];
 
     const handle = await service.subscribeForInstantSendLock(
@@ -66,8 +66,8 @@ describe('IslockService', () => {
     await expect(handle.wait()).resolves.toBe(bytes);
   });
 
-  it('can disable public-network RPC without starting legacy seed discovery', async () => {
-    const service = new IslockService({ network: 'testnet', rpcUrl: '' });
+  it.each(['mainnet', 'testnet'])('uses chain proofs on %s without legacy seed discovery', async (network) => {
+    const service = new IslockService({ network });
     const handle = await service.subscribeForInstantSendLock('txid', new Uint8Array([4]), { txid: 'prevout', vout: 0 });
     await expect(handle.wait()).rejects.toThrow('disabled');
     expect(mocks.waitForInstantSendLock).not.toHaveBeenCalled();

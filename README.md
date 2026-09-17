@@ -95,10 +95,12 @@ MIT
 
 ## Service resilience
 
-Digital Cash RPC is an optional InstantSend fast path. If it is blocked or
-unavailable, an already-broadcast asset lock automatically waits for mining and
-a Platform-observed chain lock, then continues with a chain proof. This can take
-several minutes. The wait can be cancelled and resumed without another broadcast.
+Mainnet and testnet work without Digital Cash RPC. After broadcasting an asset
+lock, the bridge waits for mining and a Platform-observed chain lock, then
+continues with a chain proof. This can take several minutes. The wait can be
+cancelled and resumed without another broadcast. Devnets retain their existing
+InstantSend subscription or explicitly configured RPC, with chain recovery if
+the lock cannot be retrieved after broadcast.
 
 See [the dependency review](docs/rpc-dependency-review.md) for the deployed
-baseline, remaining dependencies, other RPC consumers, and outage-test coverage.
+baseline, remaining bridge dependencies, and outage-test coverage.

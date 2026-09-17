@@ -910,7 +910,7 @@ function renderProcessingStep(state: BridgeState): HTMLElement {
   const subtitle = document.createElement('p');
   subtitle.className = 'processing-subtitle';
   subtitle.textContent = isChainlock
-    ? 'Falling back from InstantSend. Polling for confirmation and chain lock — this can take a few minutes on mainnet/testnet.'
+    ? 'Waiting for your deposit transaction to be mined and chain-locked. This can take a few minutes.'
     : isSendToAddress
       ? 'Sending credits to the platform address.'
       : isTopUp
