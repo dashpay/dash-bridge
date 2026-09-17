@@ -64,4 +64,17 @@ describe('chain proof readiness', () => {
     await assertion;
     expect(progress).not.toHaveBeenCalled();
   });
+
+  it('settles cancellation while Platform status is still pending', async () => {
+    getTransaction.mockResolvedValue({ blockheight: 100 });
+    getCoreChainLockedHeight.mockReturnValue(new Promise(() => {}));
+    const controller = new AbortController();
+    const progress = vi.fn();
+    const rejected = vi.fn();
+    void waitForChainLock('tx', insight, islock, controller.signal, progress).catch(rejected);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rejected).toHaveBeenCalledWith(new Error('Chain-lock wait cancelled'));
+    expect(progress).not.toHaveBeenCalled();
+  });
 });

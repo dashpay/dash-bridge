@@ -58,8 +58,9 @@ Recovery can take minutes while the transaction is mined and Platform observes
 its chain lock. It cannot complete if Platform consensus stalls or the remaining
 required services are unreachable. The wait is cancellable. Individual public
 Platform status reads have a 20-second wall-clock guard; SDK requests retain
-normal node rotation/retry behavior. The wrapper does not cancel an underlying
-WASM request, but a late result cannot submit a proof after cancellation.
+normal node rotation/retry behavior. Cancellation releases the recovery wait
+immediately. It does not cancel an underlying WASM request, but a late result
+cannot submit a proof after cancellation.
 
 ## Remaining bridge dependencies
 
@@ -72,6 +73,10 @@ WASM request, but a late result cannot submit a proof after cancellation.
 | `faucet.thepasta.org` and CAPTCHA services | Optional testnet funding button | Users can fund the deposit address themselves. This is not required to bridge their own funds. |
 | Platform Explorer links | External transaction/identity viewing | Display/navigation only; not part of proof creation or submission. |
 | Cloudflare + GitHub Pages | Deliver the app | No alternate app origin is configured in this repository. |
+
+Devnet subscription setup still relies on the existing DAPI timeouts/retries.
+Caller cancellation while obtaining the initial height or opening the stream
+is a separate follow-up; public-network funding does not use this setup path.
 
 ## Validation
 
@@ -87,6 +92,9 @@ WASM request, but a late result cannot submit a proof after cancellation.
   send-to-address, and deposit recheck. Every test blocks the domain with a DNS
   error and asserts zero requests to it. Broadcast and Platform submission are fixtures;
   these tests do not spend funds.
+- Regression cases verify prompt cancellation with a pending Platform read and
+  recovery using the locally calculated transaction ID when Insight returns a
+  mismatched ID after accepting a broadcast.
 - A separate live, read-only Chromium check blocked both Digital Cash RPC
   hosts and exercised the new `IslockService`/`fetchNetworkStatus` code. Testnet
   reported Core 1,555,588 / Platform chain-lock 1,555,586; mainnet reported

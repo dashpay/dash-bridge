@@ -11,11 +11,27 @@ export async function waitForChainLock(
   onProgress: (progress: { blockHeight?: number; chainLockedHeight?: number }) => void
 ): Promise<number> {
   while (!signal.aborted) {
-    const [tx, chain] = await Promise.allSettled([
-      insight.getTransaction(txid, { maxAttempts: 1 }, signal),
-      islock.getCoreChainLockedHeight(),
-    ]);
-    if (signal.aborted) break;
+    // Platform reads cannot be aborted inside the SDK. Release this wait
+    // promptly and ignore their eventual results when the user cancels.
+    let onAbort = (): void => {};
+    const cancelled = new Promise<null>((resolve) => {
+      onAbort = () => resolve(null);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    let results;
+    try {
+      results = await Promise.race([
+        Promise.allSettled([
+          insight.getTransaction(txid, { maxAttempts: 1 }, signal),
+          islock.getCoreChainLockedHeight(),
+        ]),
+        cancelled,
+      ]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+    if (!results || signal.aborted) break;
+    const [tx, chain] = results;
     const blockHeight = tx.status === 'fulfilled' ? tx.value.blockheight : undefined;
     const chainLockedHeight = chain.status === 'fulfilled' ? chain.value : undefined;
     onProgress({ blockHeight, chainLockedHeight });

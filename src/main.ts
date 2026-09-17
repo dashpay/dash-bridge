@@ -2903,8 +2903,8 @@ async function broadcastAndWaitForLock(
   try {
     updateState(setStep(state, 'broadcasting'));
     const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) throw new Error('Broadcast returned a different transaction ID');
     updateState(setTransactionBroadcast(state, txid));
+    if (broadcastedTxid !== txid) throw new Error('Broadcast returned a different transaction ID');
     try {
       return await subscription.wait();
     } catch (error) {

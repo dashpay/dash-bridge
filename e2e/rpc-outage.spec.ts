@@ -6,7 +6,7 @@ import { E2E_MOCK_IDENTITY_ID } from '../src/e2e-mock-constants';
 // Exercise real signing/orchestration, intercepting every external request.
 // No fixture can fund, broadcast, or submit a real transaction.
 for (const network of ['mainnet', 'testnet']) {
-  for (const flow of ['create', 'topup', 'send', 'recheck', 'cancel'] as const) {
+  for (const flow of ['create', 'topup', 'send', 'recheck', 'cancel', 'mismatch'] as const) {
     test(`${network} ${flow} works without Digital Cash RPC`, async ({ page }) => {
       test.setTimeout(60000);
       let txid = '';
@@ -49,7 +49,7 @@ for (const network of ['mainnet', 'testnet']) {
             const raw = Buffer.from(route.request().postDataJSON().rawtx, 'hex');
             const hash = createHash('sha256').update(createHash('sha256').update(raw).digest()).digest();
             txid = hash.reverse().toString('hex');
-            await route.fulfill(json({ txid }));
+            await route.fulfill(json({ txid: flow === 'mismatch' ? 'b'.repeat(64) : txid }));
           } else if (url.pathname.includes('/tx/')) {
             await route.fulfill(json({ txid, blockheight: 100, confirmations: 1 }));
           } else await route.fulfill(json({ info: { blocks: 100 } }));
@@ -77,6 +77,11 @@ for (const network of ['mainnet', 'testnet']) {
         await expect(page.locator('#recheck-deposit-btn')).toBeVisible();
         depositReady = true;
         await page.click('#recheck-deposit-btn');
+      }
+      if (flow === 'mismatch') {
+        await expect(page.getByText('Broadcast returned a different transaction ID', { exact: true })).toBeVisible({ timeout: 40000 });
+        await expect(page.locator('.error-code-badge')).toHaveText('ERR-1005');
+        await page.click('#chainlock-fallback-btn');
       }
       await expect(page.getByRole('heading', { name: 'Waiting for chain lock', exact: true })).toBeVisible({ timeout: 40000 });
       expect(broadcasts).toBe(1);
