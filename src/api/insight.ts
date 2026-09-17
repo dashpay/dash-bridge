@@ -2,6 +2,7 @@ import type { UTXO, TxInfo } from '../types.js';
 import type { NetworkConfig } from '../config.js';
 import { withRetry, type RetryOptions } from '../utils/retry.js';
 import { abortableSleep } from '../utils/sleep.js';
+import { fetchJson } from '../utils/fetch-json.js';
 
 export interface InsightApiResponse<T> {
   success: boolean;
@@ -50,13 +51,7 @@ export class InsightClient {
    */
   async getBlockHeight(retryOptions?: RetryOptions): Promise<number> {
     return withRetry(async () => {
-      const response = await fetch(`${this.baseUrl}/status?q=getInfo`);
-
-      if (!response.ok) {
-        throw new Error(`Insight API error: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
+      const data = await fetchJson(`${this.baseUrl}/status?q=getInfo`);
       const blocks = data?.info?.blocks;
       if (typeof blocks !== 'number') {
         throw new Error('Insight getInfo response missing info.blocks');
@@ -91,15 +86,10 @@ export class InsightClient {
   /**
    * Get transaction details
    */
-  async getTransaction(txid: string, retryOptions?: RetryOptions): Promise<TxInfo> {
+  async getTransaction(txid: string, retryOptions?: RetryOptions, signal?: AbortSignal): Promise<TxInfo> {
     return withRetry(async () => {
-      const response = await fetch(`${this.baseUrl}/tx/${txid}`);
-
-      if (!response.ok) {
-        throw new Error(`Failed to get transaction: ${response.status}`);
-      }
-
-      const data = await response.json();
+      const data = await fetchJson(`${this.baseUrl}/tx/${txid}`, { signal });
+      if (data.txid !== txid) throw new Error('Insight returned a different transaction');
 
       // Insight returns blockheight: -1 while the tx is unconfirmed.
       const rawHeight =

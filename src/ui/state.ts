@@ -512,6 +512,7 @@ export function setIdentityRegistered(
  * Determine whether the chainlock fallback can be offered for the given
  * error code. Available when:
  *   - islock retrieval failed outright (ERR-1005), OR
+ *   - A chain-lock wait was cancelled/failed and the same tx can be resumed.
  *   - Platform rejected a submission that already had a typed asset lock
  *     proof in hand (REGISTER / TOPUP / SEND_ADDRESS), AND we still hold
  *     the broadcast txid + signed tx bytes needed to rebuild the proof.
@@ -520,7 +521,7 @@ function computeChainlockFallbackAvailable(
   state: BridgeState,
   errorCode: string
 ): boolean {
-  if (errorCode === ErrorCodes.ISLOCK) {
+  if (errorCode === ErrorCodes.ISLOCK || errorCode === ErrorCodes.CHAINLOCK) {
     return !!state.txid;
   }
   if (
@@ -572,8 +573,8 @@ export function setChainlockProgress(
 ): BridgeState {
   return {
     ...state,
-    assetLockTxBlockHeight: progress.blockHeight ?? state.assetLockTxBlockHeight,
-    coreChainLockedHeight: progress.chainLockedHeight ?? state.coreChainLockedHeight,
+    assetLockTxBlockHeight: progress.blockHeight,
+    coreChainLockedHeight: progress.chainLockedHeight,
   };
 }
 

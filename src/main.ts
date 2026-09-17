@@ -12,10 +12,10 @@ import { createAssetLockTransaction, serializeTransaction, calculateTxId } from 
 import { InsightClient } from './api/insight.js';
 import type { IslockService } from './api/islock.js';
 import { fetchNetworkStatus } from './api/network-status.js';
-import { DAPIClient } from './api/dapi.js';
+import { waitForChainLock } from './api/chainlock.js';
 import { buildInstantAssetLockProof, buildChainAssetLockProof } from './proof/index.js';
 import { bech32m } from '@scure/base';
-import { privateKeyToWif, bytesToHex, abortableSleep } from './utils/index.js';
+import { privateKeyToWif, bytesToHex } from './utils/index.js';
 import {
   createInitialState,
   setStep,
@@ -2416,28 +2416,8 @@ async function startTopUp() {
 
     updateState(setTransactionSigned(state, signedTxHex, signedTxBytes));
 
-    // Step 5: Open IS lock subscription BEFORE broadcasting — dashd does not
-    // replay historical IS locks, so we must be listening before the lock
-    // is signed (which can happen within milliseconds of broadcast).
-    updateState(setStep(state, 'waiting_islock'));
-    console.log('Opening IS lock subscription before broadcast...');
-    const islockSub = await islock.subscribeForInstantSendLock(
-      txid,
-      assetLockKeyPair.publicKey,
-      utxo
-    );
-
-    // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
-
-    updateState(setTransactionBroadcast(state, txid));
-
-    console.log('Waiting for InstantSend lock...');
-    const islockBytes = await islockSub.wait();
-    console.log('InstantSend lock received:', islockBytes.length, 'bytes');
+    const islockBytes = await broadcastAndWaitForLock(islock, txid, signedTxHex, assetLockKeyPair.publicKey, utxo);
+    if (!islockBytes) return; // Chain-proof recovery completed or was cancelled.
 
     const assetLockProof = buildInstantAssetLockProof(
       signedTxBytes,
@@ -2539,22 +2519,8 @@ async function startSendToAddress() {
 
     updateState(setTransactionSigned(state, signedTxHex, signedTxBytes));
 
-    // Step 5: Subscribe for IS lock BEFORE broadcasting (see flow #1 for why).
-    updateState(setStep(state, 'waiting_islock'));
-    const islockSub = await islock.subscribeForInstantSendLock(
-      txid,
-      assetLockKeyPair.publicKey,
-      utxo
-    );
-
-    // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
-    updateState(setTransactionBroadcast(state, txid));
-
-    const islockBytes = await islockSub.wait();
+    const islockBytes = await broadcastAndWaitForLock(islock, txid, signedTxHex, assetLockKeyPair.publicKey, utxo);
+    if (!islockBytes) return; // Chain-proof recovery completed or was cancelled.
 
     const assetLockProof = buildInstantAssetLockProof(
       signedTxBytes,
@@ -2755,25 +2721,8 @@ async function startBridge() {
 
     updateState(setTransactionSigned(state, signedTxHex, signedTxBytes));
 
-    // Step 5: Subscribe for IS lock BEFORE broadcasting (see flow #1 for why).
-    updateState(setStep(state, 'waiting_islock'));
-    console.log('Opening IS lock subscription before broadcast...');
-    const islockSub = await islock.subscribeForInstantSendLock(
-      txid,
-      assetLockKeyPair.publicKey,
-      utxo
-    );
-
-    // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
-    updateState(setTransactionBroadcast(state, txid));
-
-    console.log('Waiting for InstantSend lock...');
-    const islockBytes = await islockSub.wait();
-    console.log('InstantSend lock received:', islockBytes.length, 'bytes');
+    const islockBytes = await broadcastAndWaitForLock(islock, txid, signedTxHex, assetLockKeyPair.publicKey, utxo);
+    if (!islockBytes) return; // Chain-proof recovery completed or was cancelled.
 
     const assetLockProof = buildInstantAssetLockProof(
       signedTxBytes,
@@ -2879,25 +2828,8 @@ async function recheckDeposit() {
 
     updateState(setTransactionSigned(state, signedTxHex, signedTxBytes));
 
-    // Step 5: Subscribe for IS lock BEFORE broadcasting (see flow #1 for why).
-    updateState(setStep(state, 'waiting_islock'));
-    console.log('Opening IS lock subscription before broadcast...');
-    const islockSub = await islock.subscribeForInstantSendLock(
-      txid,
-      assetLockKeyPair.publicKey,
-      utxo
-    );
-
-    // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
-    updateState(setTransactionBroadcast(state, txid));
-
-    console.log('Waiting for InstantSend lock...');
-    const islockBytes = await islockSub.wait();
-    console.log('InstantSend lock received:', islockBytes.length, 'bytes');
+    const islockBytes = await broadcastAndWaitForLock(islock, txid, signedTxHex, assetLockKeyPair.publicKey, utxo);
+    if (!islockBytes) return; // Chain-proof recovery completed or was cancelled.
 
     const assetLockProof = buildInstantAssetLockProof(
       signedTxBytes,
@@ -2955,6 +2887,33 @@ async function recheckDeposit() {
   } catch (error) {
     console.error('Bridge error:', error);
     updateState(setError(state, toError(error)));
+  }
+}
+
+/** Subscribe before broadcast, then recover the same transaction if IS fails. */
+async function broadcastAndWaitForLock(
+  islock: IslockService,
+  txid: string,
+  signedTxHex: string,
+  publicKey: Uint8Array,
+  utxo: { txid: string; vout: number }
+): Promise<Uint8Array | null> {
+  updateState(setStep(state, 'waiting_islock'));
+  const subscription = await islock.subscribeForInstantSendLock(txid, publicKey, utxo);
+  try {
+    updateState(setStep(state, 'broadcasting'));
+    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
+    if (broadcastedTxid !== txid) throw new Error('Broadcast returned a different transaction ID');
+    updateState(setTransactionBroadcast(state, txid));
+    try {
+      return await subscription.wait();
+    } catch (error) {
+      console.warn('InstantSend unavailable; waiting for a chain proof:', error);
+      await startChainlockFallback();
+      return null;
+    }
+  } finally {
+    subscription.cancel();
   }
 }
 
@@ -3048,7 +3007,7 @@ function cancelChainlockFallback(): void {
 
 /**
  * Begin the chainlock fallback flow: poll Insight for the asset-lock tx's
- * confirming block, poll Platform (with DAPI JSON-RPC as backup) for the
+ * confirming block, poll Platform independently of JSON-RPC for the
  * chain-locked tip, and once `coreChainLockedHeight >= blockHeight` build a
  * chain asset lock proof and resubmit the original Platform operation.
  */
@@ -3065,99 +3024,23 @@ async function startChainlockFallback(): Promise<void> {
   const signal = chainlockController.signal;
 
   updateState(setChainlockFallbackStarted(state));
-  await ensureClients();
-  const islock = islockService!;
-
-  const network = getNetwork(state.network);
-  const txid = state.txid;
-  const dapiClient = new DAPIClient({ network: state.network, rpcUrl: network.rpcUrl });
-
-  // Poll #1: asset lock tx block height via Insight.
-  const blockHeightPromise = insightClient.waitForBlockHeight(
-    txid,
-    5000,
-    signal,
-    (info) => {
-      if (info.blockheight !== undefined) {
-        updateState(setChainlockProgress(state, { blockHeight: info.blockheight }));
-      }
-    }
-  );
-
-  // Poll #2: chain-locked Dash Core height. DAPI JSON-RPC
-  // `getbestchainlock` first (when an rpcUrl is configured), then direct
-  // gRPC `platform.getStatus()` via @dashevo/dapi-client. We intentionally
-  // do NOT use `sdk.system.status()`: in pre-dev.7 builds the testnet
-  // trusted context returned testnet-cached values on devnets. SDK
-  // 3.1.0-dev.7 fixes this with per-devnet trusted contexts, but the
-  // direct dapi-client call works uniformly across trusted and
-  // non-trusted devnets, so we keep it.
-  const chainLockPoll = (async (): Promise<void> => {
-    while (!signal.aborted) {
-      let height: number | undefined;
-      try {
-        const observed = await dapiClient.getBestChainLock();
-        if (observed) height = observed.height;
-      } catch (error) {
-        console.warn('getBestChainLock failed:', error);
-      }
-      if (height === undefined) {
-        try {
-          height = await islock.getCoreChainLockedHeight();
-        } catch (error) {
-          console.warn('platform.getStatus core chain locked height failed:', error);
-        }
-      }
-      if (height !== undefined) {
-        updateState(setChainlockProgress(state, { chainLockedHeight: height }));
-      }
-      await abortableSleep(5000, signal);
-    }
-  })();
-  chainLockPoll.catch(() => {});
-
-  // Tracks whether we've already handed off to the Platform submission. Once
-  // true, errors should use the step's natural error code (REGISTER / TOPUP /
-  // SEND_ADDRESS), NOT ErrorCodes.CHAINLOCK — so the user sees the actual
-  // submission failure rather than a generic chainlock label.
   let submissionStarted = false;
-
   try {
-    console.log('[chainlock-fallback] waiting for asset lock tx to be mined…');
-    const blockHeight = await blockHeightPromise;
-    console.log(`[chainlock-fallback] asset lock tx confirmed at block ${blockHeight}`);
-
-    // Wait for an actual chain-lock observation that buries the tx's block.
-    // No confirmations-based fallback — submitting a chain proof without
-    // having seen a real chain-locked tip would just be guessing, and
-    // Platform would reject it anyway.
-    while (!signal.aborted) {
-      const chainLockedHeight = state.coreChainLockedHeight;
-      if (chainLockedHeight !== undefined && chainLockedHeight >= blockHeight) {
-        break;
-      }
-      await abortableSleep(2000, signal);
-    }
-
-    if (signal.aborted) {
-      return;
-    }
-
-    const chainLockedHeight = state.coreChainLockedHeight!;
-    // Use the tx's confirming block height as the proof value (the minimum
-    // valid value, and the one Platform can unambiguously correlate back to
-    // the asset lock tx). The observed chain-lock tip just tells us Platform
-    // has caught up far enough to verify.
-    console.log(
-      `[chainlock-fallback] chain locked through block ${chainLockedHeight} (>= ${blockHeight}); ` +
-        `building chain asset lock proof for ${txid}:0 with coreChainLockedHeight=${blockHeight}`
+    await ensureClients();
+    const network = getNetwork(state.network);
+    const txid = state.txid;
+    const blockHeight = await waitForChainLock(
+      txid,
+      insightClient,
+      islockService!,
+      signal,
+      (progress) => updateState(setChainlockProgress(state, progress))
     );
+    if (signal.aborted) return;
     const proof = buildChainAssetLockProof(txid, 0, blockHeight);
     updateState(setChainlockProofReady(state, proof));
-
-    // Stop the chain-locked-height poller now that we've armed the proof.
-    // The blockHeightPromise has already resolved.
-    chainlockController.abort();
+    // There are no outstanding pollers now. Cancellation is no longer offered
+    // once the Platform submission begins.
     chainlockController = null;
 
     const assetLockPrivateKeyWif = privateKeyToWif(
@@ -3181,6 +3064,7 @@ async function startChainlockFallback(): Promise<void> {
     updateState(setError(state, toError(error), errorCode));
   } finally {
     if (chainlockController?.signal === signal) {
+      chainlockController.abort();
       chainlockController = null;
     }
   }

@@ -8,9 +8,8 @@ type PlatformStatus = Awaited<ReturnType<IslockService['getPlatformStatus']>>;
 type ChainLock = Awaited<ReturnType<IslockService['getBestChainLock']>>;
 
 /**
- * Build stub clients. `platform` selects the DAPI path (devnet:
- * supportsJsonRpc=false); `chainLock` selects the JSON-RPC path
- * (mainnet/testnet: supportsJsonRpc=true).
+ * Platform is preferred on all networks; chainLock supplies an optional
+ * Core-only RPC backup when Platform status is unavailable.
  */
 function makeClients(opts: {
   coreHeight?: number | Error;
@@ -121,15 +120,15 @@ describe('fetchNetworkStatus (DAPI / devnet path)', () => {
   });
 });
 
-describe('fetchNetworkStatus (JSON-RPC / mainnet-testnet path)', () => {
-  it('reports healthy when Core chain-lock tracks the tip', async () => {
+describe('fetchNetworkStatus (Core RPC health backup)', () => {
+  it('reports degraded when only Core chain-lock is reachable', async () => {
     const { insight, islock } = makeClients({
       coreHeight: 10_700,
       chainLock: { height: 10_699 },
     });
 
     const status = await fetchNetworkStatus(insight, islock);
-    expect(status.health).toBe('healthy');
+    expect(status.health).toBe('degraded');
     expect(status.coreChainLockedHeight).toBe(10_699);
     expect(status.chainLockLag).toBe(1);
     // No Tenderdash block age signal on this path.
@@ -147,19 +146,19 @@ describe('fetchNetworkStatus (JSON-RPC / mainnet-testnet path)', () => {
     expect(status.chainLockLag).toBe(50);
   });
 
-  it('stays healthy (no lag signal) when no chain lock observed yet', async () => {
+  it('stays degraded when only RPC answers with no chain lock', async () => {
     const { insight, islock } = makeClients({
       coreHeight: 10_700,
       chainLock: null,
     });
 
     const status = await fetchNetworkStatus(insight, islock);
-    expect(status.health).toBe('healthy');
+    expect(status.health).toBe('degraded');
     expect(status.coreChainLockedHeight).toBeUndefined();
     expect(status.chainLockLag).toBeUndefined();
   });
 
-  it('reports the RPC source (not Platform) when the chain-lock RPC fails', async () => {
+  it('reports unavailable Platform status when both secondary sources fail', async () => {
     const { insight, islock } = makeClients({
       coreHeight: 10_700,
       chainLock: new Error('rpc down'),
@@ -167,8 +166,7 @@ describe('fetchNetworkStatus (JSON-RPC / mainnet-testnet path)', () => {
 
     const status = await fetchNetworkStatus(insight, islock);
     expect(status.health).toBe('degraded');
-    expect(status.reasons.join(' ')).toMatch(/RPC/i);
-    expect(status.reasons.join(' ')).not.toMatch(/Platform/i);
+    expect(status.reasons.join(' ')).toMatch(/Platform/i);
   });
 });
 

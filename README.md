@@ -92,3 +92,13 @@ This project automatically deploys to GitHub Pages on push to `main` via GitHub 
 ## License
 
 MIT
+
+## Service resilience
+
+Digital Cash RPC is an optional InstantSend fast path. If it is blocked or
+unavailable, an already-broadcast asset lock automatically waits for mining and
+a Platform-observed chain lock, then continues with a chain proof. This can take
+several minutes. The wait can be cancelled and resumed without another broadcast.
+
+See [the dependency review](docs/rpc-dependency-review.md) for the deployed
+baseline, remaining dependencies, other RPC consumers, and outage-test coverage.

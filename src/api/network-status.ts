@@ -33,49 +33,26 @@ export async function fetchNetworkStatus(
 ): Promise<NetworkStatus> {
   const checkedAtMs = Date.now();
 
-  // Route the chain-lock source the same way the islock flow is routed:
-  //   - mainnet/testnet (JSON-RPC available): read Core's best chain-lock over
-  //     JSON-RPC. The dapi-client DAPI path can't resolve a masternode address
-  //     in a browser there (seed/SML resolution fails on bad certs + CORS), so
-  //     we deliberately avoid it.
-  //   - devnets (no JSON-RPC, explicit dapiAddresses): read full Platform
-  //     status over DAPI, which also yields Tenderdash block height + age.
-  const useDapiPlatformStatus = !islock.supportsJsonRpc;
-
-  // Bound the Insight retry so a flaky endpoint can't stretch one poll past the
-  // 30s interval (the dapi-client / JSON-RPC calls have their own timeouts).
-  const [coreResult, secondaryResult] = await Promise.allSettled([
+  // Platform status uses EvoSDK on public networks and explicit DAPI nodes on
+  // devnets. The optional Core RPC is only a degraded health backup.
+  const [coreResult, platformResult] = await Promise.allSettled([
     insight.getBlockHeight({ maxAttempts: 1 }),
-    useDapiPlatformStatus ? islock.getPlatformStatus() : islock.getBestChainLock(),
+    islock.getPlatformStatus(),
   ]);
-
   const coreHeight = coreResult.status === 'fulfilled' ? coreResult.value : undefined;
-
-  let coreChainLockedHeight: number | undefined;
-  let platformBlockHeight: number | undefined;
-  let platformBlockTimeMs: number | undefined;
-  let secondaryReachable: boolean;
-
-  if (useDapiPlatformStatus) {
-    // Settled value is the getPlatformStatus() shape on this branch.
-    const platform =
-      secondaryResult.status === 'fulfilled'
-        ? (secondaryResult.value as Awaited<ReturnType<IslockService['getPlatformStatus']>>)
-        : undefined;
-    secondaryReachable = platform !== undefined;
-    coreChainLockedHeight = platform?.coreChainLockedHeight;
-    platformBlockHeight = platform?.latestBlockHeight;
-    platformBlockTimeMs = platform?.latestBlockTimeMs;
-  } else {
-    // A null result (no chain lock observed yet) still means the endpoint
-    // answered — only a rejection counts as unreachable.
-    secondaryReachable = secondaryResult.status === 'fulfilled';
-    const chainLock =
-      secondaryResult.status === 'fulfilled'
-        ? (secondaryResult.value as Awaited<ReturnType<IslockService['getBestChainLock']>>)
-        : undefined;
-    coreChainLockedHeight = chainLock?.height;
+  const platform = platformResult.status === 'fulfilled' ? platformResult.value : undefined;
+  let coreChainLockedHeight = platform?.coreChainLockedHeight;
+  const platformBlockHeight = platform?.latestBlockHeight;
+  const platformBlockTimeMs = platform?.latestBlockTimeMs;
+  let rpcReachable = false;
+  if (!platform && islock.supportsJsonRpc) {
+    try {
+      const lock = await islock.getBestChainLock();
+      coreChainLockedHeight = lock?.height;
+      rpcReachable = true;
+    } catch { /* Both providers may be blocked; report unavailable below. */ }
   }
+  const secondaryReachable = platform !== undefined || rpcReachable;
 
   const reasons: string[] = [];
   let health: Exclude<NetworkHealth, 'unknown'> = 'healthy';
@@ -115,13 +92,13 @@ export async function fetchNetworkStatus(
     escalate('degraded');
     reasons.push('Insight (Core) unreachable');
   }
-  if (!secondaryReachable) {
+  if (!platform) {
     // "Unreachable" is a transport failure, not an observed consensus stall —
     // flag it as degraded so a transient error doesn't fire a false red
     // "stalled" alarm. A genuine stall shows up via the lag/age checks below.
     escalate('degraded');
     reasons.push(
-      useDapiPlatformStatus ? 'Platform (DAPI) status unreachable' : 'Chain-lock RPC unreachable'
+      rpcReachable ? 'Platform status unreachable; using Core RPC chain-lock only' : 'Platform status unreachable'
     );
   }
 
