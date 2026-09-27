@@ -1,4 +1,4 @@
-import type { InsightClient } from './insight.js';
+import type { CoreClient } from './core.js';
 import type { IslockService } from './islock.js';
 import type { NetworkHealth, NetworkStatus } from '../types.js';
 
@@ -23,20 +23,20 @@ const HEALTH_RANK: Record<Exclude<NetworkHealth, 'unknown'>, number> = {
 };
 
 /**
- * Gather Core (Insight) and Platform (DAPI) status and derive an overall
+ * Gather DAPI Core and Platform status and derive an overall
  * health verdict. Both sources are queried in parallel and tolerated
  * individually: a verdict is produced from whatever responds.
  */
 export async function fetchNetworkStatus(
-  insight: InsightClient,
+  core: CoreClient,
   islock: IslockService
 ): Promise<NetworkStatus> {
   const checkedAtMs = Date.now();
 
-  // Platform status uses EvoSDK on public networks and explicit DAPI nodes on
-  // devnets. The optional Core RPC is only a degraded health backup.
+  // Both Core and Platform status are read from DAPI. A partial DAPI outage is
+  // reported as degraded instead of silently falling back to a separate API.
   const [coreResult, platformResult] = await Promise.allSettled([
-    insight.getBlockHeight({ maxAttempts: 1 }),
+    core.getBlockHeight({ maxAttempts: 1 }),
     islock.getPlatformStatus(),
   ]);
   const coreHeight = coreResult.status === 'fulfilled' ? coreResult.value : undefined;
@@ -44,15 +44,7 @@ export async function fetchNetworkStatus(
   let coreChainLockedHeight = platform?.coreChainLockedHeight;
   const platformBlockHeight = platform?.latestBlockHeight;
   const platformBlockTimeMs = platform?.latestBlockTimeMs;
-  let rpcReachable = false;
-  if (!platform && islock.supportsJsonRpc) {
-    try {
-      const lock = await islock.getBestChainLock();
-      coreChainLockedHeight = lock?.height;
-      rpcReachable = true;
-    } catch { /* Both providers may be blocked; report unavailable below. */ }
-  }
-  const secondaryReachable = platform !== undefined || rpcReachable;
+  const secondaryReachable = platform !== undefined;
 
   const reasons: string[] = [];
   let health: Exclude<NetworkHealth, 'unknown'> = 'healthy';
@@ -83,14 +75,14 @@ export async function fetchNetworkStatus(
   if (!coreReachable && !secondaryReachable) {
     return {
       health: 'unknown',
-      reasons: ['Could not reach Insight or the chain-lock source'],
+      reasons: ['Could not reach DAPI Core or Platform'],
       checkedAtMs,
     };
   }
 
   if (!coreReachable) {
     escalate('degraded');
-    reasons.push('Insight (Core) unreachable');
+    reasons.push('DAPI Core unreachable');
   }
   if (!platform) {
     // "Unreachable" is a transport failure, not an observed consensus stall —
@@ -98,7 +90,7 @@ export async function fetchNetworkStatus(
     // "stalled" alarm. A genuine stall shows up via the lag/age checks below.
     escalate('degraded');
     reasons.push(
-      rpcReachable ? 'Platform status unreachable; using Core RPC chain-lock only' : 'Platform status unreachable'
+      'Platform status unreachable'
     );
   }
 

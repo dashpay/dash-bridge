@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { waitForChainLock } from './chainlock.js';
-import type { InsightClient } from './insight.js';
+import type { CoreClient } from './core.js';
 import type { IslockService } from './islock.js';
 
 const getTransaction = vi.fn();
 const getCoreChainLockedHeight = vi.fn();
-const insight = { getTransaction } as unknown as InsightClient;
+const insight = { getTransaction } as unknown as CoreClient;
 const islock = { getCoreChainLockedHeight } as unknown as IslockService;
 
 beforeEach(() => { vi.useFakeTimers(); vi.resetAllMocks(); });

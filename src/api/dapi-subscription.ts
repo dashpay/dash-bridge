@@ -4,6 +4,7 @@ import DAPIClientModule from '@dashevo/dapi-client';
 import dashcoreLib from '@dashevo/dashcore-lib';
 import { hash160 } from '../crypto/hash.js';
 import { describeIslock } from '../utils/islock-debug.js';
+import type { RetryOptions } from '../utils/retry.js';
 
 interface BloomFilterStatic {
   create(elements: number, falsePositiveRate: number, nTweak: number, nFlags: number): {
@@ -213,6 +214,114 @@ export class DAPISubscriptionClient {
 
   async disconnect(): Promise<void> {
     try { await this.dapiClient.disconnect(); } catch { /* ignore */ }
+  }
+
+  /** Scan recent blocks and the live stream for P2PKH outputs to a key hash. */
+  async scanUtxos(
+    pubKeyHash: Uint8Array,
+    timeoutMs = 5000,
+    signal?: AbortSignal,
+    _retryOptions?: RetryOptions,
+  ): Promise<import('../types.js').UTXO[]> {
+    const currentHeight = await this.dapiClient.core.getBestBlockHeight();
+    const stream = await this.dapiClient.core.subscribeToTransactionsWithProofs(
+      this.createAddressBloomFilter(pubKeyHash),
+      { fromBlockHeight: Math.max(1, currentHeight - 100), count: 0, sendTransactionHashes: true },
+    );
+    const found = new Map<string, import('../types.js').UTXO>();
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        signal?.removeEventListener('abort', onAbort);
+        try { stream.cancel(); } catch { /* ignore */ }
+        resolve();
+      };
+      const onAbort = (): void => finish();
+      const timeoutId = setTimeout(finish, timeoutMs);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      stream.on('data', (response: unknown) => {
+        for (const tx of this.rawTransactions(response)) {
+          const parsed = this.parseTransaction(tx, pubKeyHash);
+          for (const spent of parsed.spent) found.delete(spent);
+          for (const utxo of parsed.utxos) found.set(`${utxo.txid}:${utxo.vout}`, utxo);
+        }
+      });
+      stream.on('error', finish);
+      stream.on('end', finish);
+    });
+    return [...found.values()];
+  }
+
+  /** Wait for a sufficient output while preserving every matching output seen. */
+  async waitForUtxo(
+    pubKeyHash: Uint8Array,
+    minAmount: number,
+    timeoutMs = 120000,
+    onTotal?: (total: number) => void,
+    onRetry?: RetryOptions['onRetry'],
+  ): Promise<{ utxo: import('../types.js').UTXO | null; totalAmount: number; timedOut: boolean }> {
+    const deadline = Date.now() + timeoutMs;
+    let lastTotal = 0;
+    while (Date.now() < deadline) {
+      try {
+        const remaining = Math.max(1, deadline - Date.now());
+        const utxos = await this.scanUtxos(pubKeyHash, Math.min(remaining, 10_000));
+        lastTotal = utxos.reduce((sum, utxo) => sum + utxo.satoshis, 0);
+        onTotal?.(lastTotal);
+        const sufficient = utxos.filter((utxo) => utxo.satoshis >= minAmount);
+        if (sufficient.length) {
+          return { utxo: sufficient.sort((a, b) => b.satoshis - a.satoshis)[0], totalAmount: lastTotal, timedOut: false };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      } catch (error) {
+        onRetry?.(1, 3, error);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+    return { utxo: null, totalAmount: lastTotal, timedOut: true };
+  }
+
+  private createAddressBloomFilter(pubKeyHash: Uint8Array): { vData: Uint8Array; nHashFuncs: number; nTweak: number; nFlags: number } {
+    const filter = BloomFilter.create(2, 0.01, Math.floor(Math.random() * 0xffffffff), BloomFilter.BLOOM_UPDATE_ALL);
+    const hash = Buffer.from(pubKeyHash);
+    filter.insert(hash);
+    filter.insert(Buffer.concat([Buffer.from([0x76, 0xa9, 0x14]), hash, Buffer.from([0x88, 0xac])]));
+    return { vData: new Uint8Array(filter.vData), nHashFuncs: filter.nHashFuncs, nTweak: filter.nTweak, nFlags: filter.nFlags };
+  }
+
+  private rawTransactions(response: unknown): Uint8Array[] {
+    const raw = (response as any).getRawTransactions?.();
+    const list = raw?.getTransactionsList_asU8?.() || raw?.getTransactionsList?.();
+    return Array.isArray(list) ? list.map((tx: Uint8Array | Buffer) => tx instanceof Uint8Array ? tx : new Uint8Array(tx)) : [];
+  }
+
+  private parseTransaction(txBytes: Uint8Array, pubKeyHash: Uint8Array): {
+    utxos: import('../types.js').UTXO[];
+    spent: string[];
+  } {
+    try {
+      const Transaction = (dashcoreLib as any).Transaction;
+      const tx = new Transaction(Buffer.from(txBytes));
+      const txid = tx.hash;
+      const expected = Buffer.from(pubKeyHash);
+      const spent = (tx.inputs ?? []).map((input: any) => {
+        const hash = Buffer.from(input.prevTxId ?? input.prevTxHash ?? []).reverse().toString('hex');
+        return `${hash}:${input.outputIndex}`;
+      });
+      const utxos = tx.outputs.flatMap((output: any, vout: number) => {
+        const script = output.script;
+        if (!script.isPublicKeyHashOut?.()) return [];
+        const hash = script.getPublicKeyHash?.();
+        if (!hash || !expected.equals(hash)) return [];
+        return [{ txid, vout, satoshis: Number(output.satoshis), scriptPubKey: script.toHex(), confirmations: 0 }];
+      });
+      return { utxos, spent };
+    } catch {
+      return { utxos: [], spent: [] };
+    }
   }
 
   /**

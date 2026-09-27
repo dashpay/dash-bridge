@@ -28,10 +28,18 @@ declare module '@dashevo/dapi-client' {
     cancel(): void;
   }
 
+  interface TransactionResponse {
+    getHeight(): number;
+    getConfirmations(): number;
+    isInstantLocked(): boolean;
+    isChainLocked(): boolean;
+    getTransaction(): Buffer;
+  }
+
   interface CoreMethods {
     getBestBlockHeight(): Promise<number>;
     broadcastTransaction(transaction: Buffer | Uint8Array): Promise<string>;
-    getTransaction(txid: string): Promise<Buffer>;
+    getTransaction(txid: string): Promise<TransactionResponse>;
     subscribeToTransactionsWithProofs(
       bloomFilter: BloomFilterParams,
       options?: SubscribeOptions

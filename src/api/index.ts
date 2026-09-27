@@ -1,2 +1,1 @@
-export { InsightClient } from './insight.js';
-export { DAPIClient } from './dapi.js';
+export { CoreClient } from './core.js';

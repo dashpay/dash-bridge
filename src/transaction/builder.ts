@@ -92,7 +92,7 @@ export function createAssetLockTransaction(
   }
 
   // Create input from UTXO
-  // TXID from Insight is in display order (big-endian), reverse for internal order
+  // Core APIs expose TXIDs in display order (big-endian), reverse for internal order
   const txidBytes = reverseBytes(hexToBytes(utxo.txid));
 
   const vin: CTxIn[] = [

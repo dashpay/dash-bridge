@@ -9,7 +9,7 @@ import {
 import { extractErrorMessage } from './utils/errors.js';
 import { deriveAssetLockKeyPair } from './crypto/hd.js';
 import { createAssetLockTransaction, serializeTransaction, calculateTxId } from './transaction/index.js';
-import { InsightClient } from './api/insight.js';
+import { CoreClient } from './api/core.js';
 import type { IslockService } from './api/islock.js';
 import { fetchNetworkStatus } from './api/network-status.js';
 import { waitForChainLock } from './api/chainlock.js';
@@ -206,7 +206,7 @@ import {
 
 // Global state
 let state: BridgeState;
-let insightClient: InsightClient;
+let coreClient: CoreClient;
 let islockService: IslockService | undefined;
 let clientInitPromise: Promise<void> | undefined;
 let warmupScheduled = false;
@@ -214,11 +214,10 @@ let warmupStarted = false;
 
 async function initClients(network: string): Promise<void> {
   const config = getNetwork(network);
-  insightClient = new InsightClient(config);
+  coreClient = new CoreClient(config);
   const { IslockService } = await loadIslockModule();
   islockService = new IslockService({
     network,
-    rpcUrl: config.rpcUrl,
     dapiAddresses: config.dapiAddresses,
   });
   startNetworkStatusPolling();
@@ -258,7 +257,7 @@ function preloadDashWarmup(): void {
 }
 
 // ── Network-status polling ──────────────────────────────────────────────────
-// Periodically compares Core (Insight) height against Platform (DAPI) status
+// Periodically compares DAPI Core height against Platform status
 // so the header can warn when Platform consensus stalls while Core keeps
 // moving. Re-renders only when the health verdict (or its reasons) changes, to
 // avoid disrupting the UI on every tick.
@@ -278,15 +277,14 @@ function stopNetworkStatusPolling(): void {
 }
 
 function startNetworkStatusPolling(): void {
-  if (!insightClient || !islockService) return;
+  if (!coreClient || !islockService) return;
   stopNetworkStatusPolling();
   const generation = networkStatusGeneration;
-  const insight = insightClient;
   const islock = islockService;
 
   const poll = async (): Promise<void> => {
     try {
-      const status = await fetchNetworkStatus(insight, islock);
+      const status = await fetchNetworkStatus(coreClient, islock);
       // Ignore results from a superseded network/client.
       if (generation !== networkStatusGeneration) return;
 
@@ -316,16 +314,14 @@ function switchNetwork(network: string): void {
   scheduleDashWarmup();
 }
 
-function showCustomDevnetModal(existing?: { name?: string; insightApiUrl?: string; dapiAddresses?: string; rpcUrl?: string; faucetBaseUrl?: string; useTrustedContext?: boolean; trustedQuorumUrl?: string }): void {
+function showCustomDevnetModal(existing?: { name?: string; dapiAddresses?: string; faucetBaseUrl?: string; useTrustedContext?: boolean; trustedQuorumUrl?: string }): void {
   const overlay = document.createElement('div');
   overlay.className = 'devnet-modal-overlay';
   overlay.innerHTML = `
     <div class="devnet-modal">
       <h2>Custom devnet</h2>
       <label>Name <input id="d-name" placeholder="my-devnet"></label>
-      <label>Insight API URL <input id="d-insight" placeholder="https://insight.my-devnet.example.com/insight-api"></label>
       <label>DAPI Addresses (one HTTPS URL per line) <textarea id="d-dapi" placeholder="https://1.2.3.4:1443&#10;https://5.6.7.8:1443"></textarea></label>
-      <label>JSON-RPC URL for IS locks (optional) <input id="d-rpc" placeholder="https://rpc.my-devnet.example.com"></label>
       <label>Faucet URL (optional) <input id="d-faucet"></label>
       <label><input type="checkbox" id="d-trusted"> Use trusted context (verify proofs; required for top-up &amp; identity update)</label>
       <label>Quorum context URL (optional override) <input id="d-quorum-url" placeholder="https://quorums.my-devnet.networks.dash.org"></label>
@@ -339,9 +335,7 @@ function showCustomDevnetModal(existing?: { name?: string; insightApiUrl?: strin
 
   // Populate via DOM properties to avoid XSS from stored values
   (overlay.querySelector('#d-name') as HTMLInputElement).value = existing?.name ?? '';
-  (overlay.querySelector('#d-insight') as HTMLInputElement).value = existing?.insightApiUrl ?? '';
   (overlay.querySelector('#d-dapi') as HTMLTextAreaElement).value = existing?.dapiAddresses ?? '';
-  (overlay.querySelector('#d-rpc') as HTMLInputElement).value = existing?.rpcUrl ?? '';
   (overlay.querySelector('#d-faucet') as HTMLInputElement).value = existing?.faucetBaseUrl ?? '';
   (overlay.querySelector('#d-trusted') as HTMLInputElement).checked = existing?.useTrustedContext ?? false;
   (overlay.querySelector('#d-quorum-url') as HTMLInputElement).value = existing?.trustedQuorumUrl ?? '';
@@ -349,16 +343,14 @@ function showCustomDevnetModal(existing?: { name?: string; insightApiUrl?: strin
   overlay.querySelector('#d-cancel')!.addEventListener('click', () => overlay.remove());
   overlay.querySelector('#d-save')!.addEventListener('click', () => {
     const name = (overlay.querySelector('#d-name') as HTMLInputElement).value.trim();
-    const insightApiUrl = (overlay.querySelector('#d-insight') as HTMLInputElement).value.trim();
     const dapiRaw = (overlay.querySelector('#d-dapi') as HTMLTextAreaElement).value.trim();
-    const rpcUrl = (overlay.querySelector('#d-rpc') as HTMLInputElement).value.trim() || undefined;
     const faucetBaseUrl = (overlay.querySelector('#d-faucet') as HTMLInputElement).value.trim() || undefined;
     const useTrustedContext = (overlay.querySelector('#d-trusted') as HTMLInputElement).checked || undefined;
     const trustedQuorumUrl = (overlay.querySelector('#d-quorum-url') as HTMLInputElement).value.trim() || undefined;
     const dapiAddresses = dapiRaw.split('\n').map((s) => s.trim()).filter(Boolean);
 
-    if (!name || !insightApiUrl || dapiAddresses.length === 0) {
-      alert('Name, Insight API URL, and at least one DAPI address are required');
+    if (!name || dapiAddresses.length === 0) {
+      alert('Name and at least one DAPI address are required');
       return;
     }
 
@@ -369,9 +361,7 @@ function showCustomDevnetModal(existing?: { name?: string; insightApiUrl?: strin
 
     const config = createCustomDevnetConfig({
       name,
-      insightApiUrl,
       dapiAddresses,
-      rpcUrl,
       faucetBaseUrl,
       useTrustedContext,
       trustedQuorumUrl,
@@ -2374,7 +2364,7 @@ async function startTopUp() {
     updateState(setStep(stateWithKeys, 'detecting_deposit'));
 
     const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
-    const depositResult = await insightClient.waitForUtxo(
+    const depositResult = await coreClient.waitForUtxo(
       depositAddress,
       minAmount,
       120000, // 2 minutes before showing recheck button
@@ -2479,7 +2469,7 @@ async function startSendToAddress() {
     updateState(setStep(stateWithKeys, 'detecting_deposit'));
 
     const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
-    const depositResult = await insightClient.waitForUtxo(
+    const depositResult = await coreClient.waitForUtxo(
       depositAddress,
       minAmount,
       120000,
@@ -2679,7 +2669,7 @@ async function startBridge() {
     updateState(setStep(state, 'detecting_deposit'));
 
     const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
-    const depositResult = await insightClient.waitForUtxo(
+    const depositResult = await coreClient.waitForUtxo(
       depositAddress,
       minAmount,
       120000, // 2 minutes before showing recheck button
@@ -2781,7 +2771,7 @@ async function recheckDeposit() {
   updateState(setDepositTimedOut(state, false, 0));
 
   const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
-  const depositResult = await insightClient.waitForUtxo(
+  const depositResult = await coreClient.waitForUtxo(
     state.depositAddress,
     minAmount,
     120000, // 2 minutes before showing recheck button
@@ -2902,7 +2892,7 @@ async function broadcastAndWaitForLock(
   const subscription = await islock.subscribeForInstantSendLock(txid, publicKey, utxo);
   try {
     updateState(setStep(state, 'broadcasting'));
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
+    const broadcastedTxid = await coreClient.broadcastTransaction(signedTxHex);
     updateState(setTransactionBroadcast(state, txid));
     if (broadcastedTxid !== txid) throw new Error('Broadcast returned a different transaction ID');
     try {
@@ -3006,8 +2996,8 @@ function cancelChainlockFallback(): void {
 }
 
 /**
- * Begin the chainlock fallback flow: poll Insight for the asset-lock tx's
- * confirming block, poll Platform independently of JSON-RPC for the
+ * Begin the chainlock fallback flow: poll DAPI Core for the asset-lock tx's
+ * confirming block, poll Platform independently of any Core RPC relay for the
  * chain-locked tip, and once `coreChainLockedHeight >= blockHeight` build a
  * chain asset lock proof and resubmit the original Platform operation.
  */
@@ -3031,7 +3021,7 @@ async function startChainlockFallback(): Promise<void> {
     const txid = state.txid;
     const blockHeight = await waitForChainLock(
       txid,
-      insightClient,
+      coreClient,
       islockService!,
       signal,
       (progress) => updateState(setChainlockProgress(state, progress))
@@ -3877,7 +3867,7 @@ async function requestFaucetFunds() {
       if (state.step !== 'detecting_deposit') return;
 
       try {
-        const utxos = await insightClient.getUTXOs(addressToCheck);
+        const utxos = await coreClient.getUTXOs(addressToCheck);
         const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
         const sufficientUtxo = utxos.find(u => u.satoshis >= minAmount);
         if (sufficientUtxo && state.step === 'detecting_deposit') {

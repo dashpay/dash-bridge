@@ -1,7 +1,6 @@
 export interface NetworkConfig {
   type: 'testnet' | 'mainnet' | 'devnet';
   name: string;
-  insightApiUrl: string;
   addressPrefix: number;
   /** Base58 version byte for P2SH addresses (dashcore SCRIPT_ADDRESS: 16 mainnet, 19 testnet/devnet). */
   p2shPrefix: number;
@@ -11,8 +10,6 @@ export interface NetworkConfig {
   platformHrp: string;
   faucetBaseUrl?: string;
   dapiAddresses?: string[];
-  /** Optional InstantSend fast path; chain-proof recovery uses Platform directly. */
-  rpcUrl?: string;
   /**
    * Devnet-only: opt in to the SDK's trusted-context mode. When true, the
    * SDK prefetches a quorum context (from `trustedQuorumUrl` if set,
@@ -37,7 +34,6 @@ export function devnetNameForSdk(name: string): string {
 export const TESTNET: NetworkConfig = {
   type: 'testnet',
   name: 'testnet',
-  insightApiUrl: 'https://insight.testnet.networks.dash.org/insight-api',
   addressPrefix: 140,
   p2shPrefix: 19,
   wifPrefix: 239,
@@ -50,7 +46,6 @@ export const TESTNET: NetworkConfig = {
 export const MAINNET: NetworkConfig = {
   type: 'mainnet',
   name: 'mainnet',
-  insightApiUrl: 'https://insight.dash.org/insight-api',
   addressPrefix: 76,
   p2shPrefix: 16,
   wifPrefix: 204,
@@ -62,7 +57,6 @@ export const MAINNET: NetworkConfig = {
 export const DEVNET_MOUTAI: NetworkConfig = {
   type: 'devnet',
   name: 'devnet-moutai',
-  insightApiUrl: 'https://insight.moutai.networks.dash.org/insight-api',
   addressPrefix: 140,
   p2shPrefix: 19,
   wifPrefix: 239,
@@ -126,7 +120,6 @@ function loadCustomDevnets(): NetworkConfig[] {
         typeof c.name === 'string' &&
         !RESERVED_NETWORK_NAMES.has(c.name) &&
         c.type === 'devnet' &&
-        typeof c.insightApiUrl === 'string' &&
         typeof c.addressPrefix === 'number' &&
         typeof c.wifPrefix === 'number' &&
         typeof c.minFee === 'number' &&
@@ -166,9 +159,7 @@ export function removeCustomDevnet(name: string): void {
 
 export function createCustomDevnetConfig(params: {
   name: string;
-  insightApiUrl: string;
   dapiAddresses: string[];
-  rpcUrl?: string;
   faucetBaseUrl?: string;
   useTrustedContext?: boolean;
   trustedQuorumUrl?: string;
@@ -176,7 +167,6 @@ export function createCustomDevnetConfig(params: {
   return {
     type: 'devnet',
     name: params.name,
-    insightApiUrl: params.insightApiUrl,
     addressPrefix: 140,
     p2shPrefix: 19,
     wifPrefix: 239,
@@ -184,7 +174,6 @@ export function createCustomDevnetConfig(params: {
     dustThreshold: 546,
     platformHrp: 'tdash',
     dapiAddresses: params.dapiAddresses,
-    rpcUrl: params.rpcUrl,
     faucetBaseUrl: params.faucetBaseUrl,
     useTrustedContext: params.useTrustedContext,
     trustedQuorumUrl: params.trustedQuorumUrl,

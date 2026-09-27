@@ -1,25 +1,17 @@
-import { DAPIClient, type DAPIConfig } from './dapi.js';
 import { DAPISubscriptionClient, type DAPISubscriptionConfig } from './dapi-subscription.js';
 import type { RetryOptions } from '../utils/retry.js';
 import { abortableSleep } from '../utils/sleep.js';
-import { fetchPlatformStatus, type PlatformStatus } from '../platform/status.js';
+import type { PlatformStatus } from '../platform/status.js';
 
 export interface IslockServiceConfig {
   network: string;
-  rpcUrl?: string;
   dapiAddresses?: string[];
 }
 
 export class IslockService {
-  private readonly jsonRpcClient: DAPIClient;
   private readonly subscriptionClient: DAPISubscriptionClient;
-  private readonly hasJsonRpc: boolean;
 
-  constructor(private readonly config: IslockServiceConfig) {
-    const jsonRpcConfig: DAPIConfig = { network: config.network, rpcUrl: config.rpcUrl };
-    this.jsonRpcClient = new DAPIClient(jsonRpcConfig);
-    this.hasJsonRpc = this.jsonRpcClient.hasRpcUrl;
-
+  constructor(config: IslockServiceConfig) {
     const subConfig: DAPISubscriptionConfig = {
       network: config.network,
       dapiAddresses: config.dapiAddresses,
@@ -81,68 +73,24 @@ export class IslockService {
     onRetry?: RetryOptions['onRetry'],
     onProgress?: (message: string) => void
   ): Promise<{ wait: () => Promise<Uint8Array>; cancel: () => void }> {
-    if (!this.hasJsonRpc && (this.config.network === 'mainnet' || this.config.network === 'testnet')) {
-      // Public networks can operate entirely through chain proofs when the
-      // optional RPC URL is omitted/disabled. Never start legacy seed discovery.
-      return {
-        wait: async () => { throw new Error('InstantSend RPC is disabled; use a chain proof'); },
-        cancel: () => {},
-      };
-    }
-    if (!this.hasJsonRpc) {
-      // DAPI subscription only — establish the stream, then return.
-      const tripwireController = new AbortController();
-      const sub = await this.subscriptionClient.subscribeForInstantSendLock(
-        txid,
-        publicKey,
-        utxo,
-        timeoutMs,
-        onProgress,
-        tripwireController.signal
-      );
-      this.startLockStatusTripwire(txid, tripwireController.signal);
-      return {
-        cancel: () => tripwireController.abort(),
-        wait: async () => {
-          try {
-            return await sub.wait();
-          } finally {
-            tripwireController.abort();
-          }
-        },
-      };
-    }
-
-    // Networks with an explicit RPC URL should not touch dapi-client
-    // stream setup here. Browser seed/SML discovery can fail on TLS-hostname
-    // validation and report "No available addresses", which would block the
-    // broadcast even though the RPC islock endpoint is sufficient.
-    const jsonRpcController = new AbortController();
-    onProgress?.('Polling InstantSend lock...');
-
-    const jsonRpcPromise = this.jsonRpcClient.waitForInstantSendLock(
-      txid,
-      timeoutMs,
-      onRetry,
-      jsonRpcController.signal
+    void onRetry;
+    // DAPI is the only InstantSend source. Opening the stream before broadcast
+    // prevents a fast lock from racing past the browser listener.
+    const controller = new AbortController();
+    const sub = await this.subscriptionClient.subscribeForInstantSendLock(
+      txid, publicKey, utxo, timeoutMs, onProgress, controller.signal
     );
-
-    const raceStart = Date.now();
-    const waitPromise = (async (): Promise<Uint8Array> => {
+    this.startLockStatusTripwire(txid, controller.signal);
+    return {
+      cancel: () => controller.abort(),
+      wait: async () => {
       try {
-        const bytes = await jsonRpcPromise;
-        const elapsedMs = Date.now() - raceStart;
-        console.log(
-          `[islock-debug] IS lock received via json-rpc for txid=${txid} in ${elapsedMs}ms`
-        );
-        return bytes;
+          return await sub.wait();
       } finally {
-        jsonRpcController.abort();
+          controller.abort();
       }
-    })();
-    waitPromise.catch(() => {});
-
-    return { wait: () => waitPromise, cancel: () => jsonRpcController.abort() };
+      },
+    };
   }
 
   async waitForInstantSendLock(
@@ -162,25 +110,8 @@ export class IslockService {
     return (await this.getPlatformStatus()).coreChainLockedHeight;
   }
 
-  /** Whether an optional Core JSON-RPC fast path is configured. */
-  get supportsJsonRpc(): boolean {
-    return this.hasJsonRpc;
-  }
-
-  /**
-   * Core's best chain-lock (height + blockhash) via JSON-RPC. Returns null when
-   * no chain lock has been observed yet, or when no JSON-RPC endpoint exists.
-   */
-  async getBestChainLock(): Promise<{ height: number; blockhash?: string } | null> {
-    if (!this.hasJsonRpc) return null;
-    return this.jsonRpcClient.getBestChainLock();
-  }
-
-  /** Public networks use EvoSDK discovery; devnets keep explicit DAPI nodes. */
+  /** Read Platform status directly from the selected DAPI node set. */
   async getPlatformStatus(): Promise<PlatformStatus> {
-    if (this.config.network === 'mainnet' || this.config.network === 'testnet') {
-      return fetchPlatformStatus(this.config.network);
-    }
     return this.subscriptionClient.getPlatformStatus();
   }
 

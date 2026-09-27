@@ -280,14 +280,14 @@ export type AssetLockProofData =
 export type NetworkHealth = 'healthy' | 'degraded' | 'stalled' | 'unknown';
 
 /**
- * Snapshot of network health derived from Insight (Core) and DAPI/Platform
+ * Snapshot of network health derived from DAPI Core and Platform
  * status. Lets the UI warn when Platform consensus stalls while Core keeps
  * producing blocks — the failure mode where the app sees deposits confirm but
  * identity registration hangs.
  */
 export interface NetworkStatus {
   health: NetworkHealth;
-  /** Core block height from Insight (`/status?q=getInfo` → `info.blocks`). */
+  /** Current Core block height observed through DAPI. */
   coreHeight?: number;
   /** Platform's view of the chain-locked Core height (getStatus chain.coreChainLockedHeight). */
   coreChainLockedHeight?: number;
@@ -328,7 +328,7 @@ export interface BridgeState {
   txid?: string;
   instantLockBytes?: Uint8Array;
   assetLockProof?: AssetLockProofData;
-  /** Block height of the asset lock tx, observed via Insight. Populated while in waiting_chainlock. */
+  /** Block height of the asset lock tx, observed via DAPI Core. Populated while in waiting_chainlock. */
   assetLockTxBlockHeight?: number;
   /** Last-seen chain-locked tip height from Platform (sdk.system.status()). Populated while in waiting_chainlock. */
   coreChainLockedHeight?: number;

@@ -1,11 +1,11 @@
-import type { InsightClient } from './insight.js';
+import type { CoreClient } from './core.js';
 import type { IslockService } from './islock.js';
 import { abortableSleep } from '../utils/sleep.js';
 
 /** Wait for a mined transaction AND a real Platform-observed chain lock. */
 export async function waitForChainLock(
   txid: string,
-  insight: InsightClient,
+  core: CoreClient,
   islock: IslockService,
   signal: AbortSignal,
   onProgress: (progress: { blockHeight?: number; chainLockedHeight?: number }) => void
@@ -22,7 +22,7 @@ export async function waitForChainLock(
     try {
       results = await Promise.race([
         Promise.allSettled([
-          insight.getTransaction(txid, { maxAttempts: 1 }, signal),
+          core.getTransaction(txid, { maxAttempts: 1 }, signal),
           islock.getCoreChainLockedHeight(),
         ]),
         cancelled,
