@@ -15,7 +15,16 @@ import type {
   OwnedUsername,
   UsernameTransferCredentialSource,
   UsernameTransferOutcome,
+  NearIntentsState,
+  NearIntentsSwap,
 } from '../types.js';
+import {
+  formatUnits,
+  selectableSourceTokens,
+  type NearIntentsQuote,
+  type NearIntentsToken,
+  type NearSwapStatus,
+} from '../api/near-intents.js';
 import {
   generateDefaultIdentityKeysHD,
   generateIdentityKeyFromMnemonic,
@@ -28,6 +37,7 @@ import {
   isIdentityRegistrationUnconfirmedError,
   type IdentityRegistrationUnconfirmedError,
 } from '../platform/identity-confirm.js';
+import { shouldRecommendMobileApp } from './mobile-app.js';
 
 /**
  * Error codes for user-facing display.
@@ -134,7 +144,31 @@ export function setKeyPairs(
     step: 'awaiting_deposit',
     assetLockKeyPair,
     depositAddress,
+    // A swap belongs to the address it delivers to.
+    nearIntents: undefined,
   };
+}
+
+/**
+ * First step of identity creation. On mainnet that is the DashPay app
+ * recommendation, which the user must explicitly acknowledge to continue here.
+ */
+function identityCreationEntryStep(network: string): BridgeStep {
+  return shouldRecommendMobileApp(network) ? 'mobile_app_recommended' : 'configure_keys';
+}
+
+/** Record the "browser is less secure" acknowledgement on the mainnet app recommendation. */
+export function setMobileAppRiskAcknowledged(state: BridgeState, acknowledged: boolean): BridgeState {
+  return { ...state, mobileAppRiskAcknowledged: acknowledged };
+}
+
+/**
+ * Leave the DashPay app recommendation for the in-browser flow. Refused until
+ * the user has acknowledged the risk.
+ */
+export function continueInBrowserFromMobileAppRecommendation(state: BridgeState): BridgeState {
+  if (state.step !== 'mobile_app_recommended' || !state.mobileAppRiskAcknowledged) return state;
+  return { ...state, step: 'configure_keys' };
 }
 
 /**
@@ -153,13 +187,18 @@ export function setMode(state: BridgeState, mode: BridgeMode): BridgeState {
     const mnemonic = generateNewMnemonic(128);
     return {
       ...clearedState,
-      step: 'configure_keys',
+      step: identityCreationEntryStep(clearedState.network),
+      mobileAppRiskAcknowledged: false,
       mode,
       mnemonic,
       identityKeys: generateDefaultIdentityKeysHD(clearedState.network, mnemonic),
       // Clear any top-up state
       targetIdentityId: undefined,
       isOneTimeKey: undefined,
+      // A standalone creation is not a detour from an earlier username or
+      // contract flow, so Back and completion must not route into one.
+      dpnsFromIdentityCreation: false,
+      contractFromIdentityCreation: false,
     };
   } else if (mode === 'topup') {
     // Top-up mode: no mnemonic, no identity keys
@@ -308,6 +347,8 @@ export function setOneTimeKeyPair(
     step: 'awaiting_deposit',
     assetLockKeyPair,
     depositAddress,
+    // A swap belongs to the address it delivers to.
+    nearIntents: undefined,
     isOneTimeKey: true,
   };
 }
@@ -720,6 +761,7 @@ export function setDepositVerificationFailed(
 export function getStepDescription(step: BridgeStep): string {
   const descriptions: Record<BridgeStep, string> = {
     init: 'Ready to start',
+    mobile_app_recommended: 'Use the DashPay app',
     configure_keys: 'Configure your keys',
     enter_identity: 'Top up identity',
     generating_keys: 'Preparing Dash Platform...',
@@ -779,6 +821,7 @@ export function getStepDescription(step: BridgeStep): string {
 export function getStepProgress(step: BridgeStep): number {
   const progress: Record<BridgeStep, number> = {
     init: 0,
+    mobile_app_recommended: 5,
     configure_keys: 10,
     enter_identity: 10,
     generating_keys: 20,
@@ -897,7 +940,8 @@ export function setDpnsIdentitySource(
     const mnemonic = generateNewMnemonic(128);
     return {
       ...state,
-      step: 'configure_keys',
+      step: identityCreationEntryStep(state.network),
+      mobileAppRiskAcknowledged: false,
       mode: 'create', // Switch to create mode temporarily
       fromManageMenu: undefined,
       mnemonic,
@@ -2190,4 +2234,113 @@ export function setWithdrawRetry(state: BridgeState): BridgeState {
     withdrawStatus: undefined,
     withdrawStatusError: undefined,
   };
+}
+
+// ============================================================================
+// NEAR Intents ("Pay with other crypto") state functions
+// ============================================================================
+
+/** Default DASH delivered by a NEAR Intents swap, in duffs (0.05 DASH). */
+export const NEAR_DEFAULT_AMOUNT_DUFFS = 5_000_000;
+/** Asset preselected when the token list loads (USDC on Ethereum), if listed. */
+const NEAR_DEFAULT_ORIGIN_ASSET = 'nep141:eth-0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.omft.near';
+
+/** The least DASH a deposit must bring for the bridge to continue, in duffs. */
+export function depositMinimumDuffs(state: BridgeState): number {
+  return state.minimumDeposit || 300000;
+}
+
+function nearIntentsOf(state: BridgeState): NearIntentsState {
+  return state.nearIntents ?? {
+    open: false,
+    assetFilter: '',
+    amountInput: formatUnits(String(Math.max(depositMinimumDuffs(state), NEAR_DEFAULT_AMOUNT_DUFFS)), 8),
+    refundAddress: '',
+  };
+}
+
+function patchNearIntents(state: BridgeState, patch: Partial<NearIntentsState>): BridgeState {
+  return { ...state, nearIntents: { ...nearIntentsOf(state), ...patch } };
+}
+
+export function toggleNearIntentsPanel(state: BridgeState): BridgeState {
+  return patchNearIntents(state, { open: !nearIntentsOf(state).open });
+}
+
+export function setNearIntentsTokensLoading(state: BridgeState): BridgeState {
+  return patchNearIntents(state, { busy: 'tokens', error: undefined });
+}
+
+export function setNearIntentsTokens(state: BridgeState, tokens: NearIntentsToken[]): BridgeState {
+  const current = nearIntentsOf(state).originAssetId;
+  const sources = selectableSourceTokens(tokens);
+  const keep = current !== undefined && sources.some((t) => t.assetId === current);
+  const fallback = sources.find((t) => t.assetId === NEAR_DEFAULT_ORIGIN_ASSET) ?? sources[0];
+  return patchNearIntents(state, {
+    tokens,
+    busy: undefined,
+    originAssetId: keep ? current : fallback?.assetId,
+  });
+}
+
+export function setNearIntentsError(state: BridgeState, error: string): BridgeState {
+  return patchNearIntents(state, { busy: undefined, error });
+}
+
+export function setNearIntentsAssetFilter(state: BridgeState, assetFilter: string): BridgeState {
+  return patchNearIntents(state, { assetFilter });
+}
+
+/** Changing any quote input invalidates a quote priced for the old one. */
+export function setNearIntentsOriginAsset(state: BridgeState, originAssetId: string): BridgeState {
+  return patchNearIntents(state, { originAssetId, quote: undefined, error: undefined });
+}
+
+export function setNearIntentsAmountInput(state: BridgeState, amountInput: string): BridgeState {
+  return patchNearIntents(state, { amountInput, quote: undefined, error: undefined });
+}
+
+export function setNearIntentsRefundAddress(state: BridgeState, refundAddress: string): BridgeState {
+  return patchNearIntents(state, { refundAddress, quote: undefined, error: undefined });
+}
+
+export function setNearIntentsQuoting(state: BridgeState): BridgeState {
+  return patchNearIntents(state, { busy: 'quote', quote: undefined, error: undefined });
+}
+
+export function setNearIntentsQuote(state: BridgeState, quote: NearIntentsQuote): BridgeState {
+  return patchNearIntents(state, { busy: undefined, quote, error: undefined });
+}
+
+export function setNearIntentsConfirming(state: BridgeState): BridgeState {
+  return patchNearIntents(state, { busy: 'confirm', error: undefined });
+}
+
+export function setNearIntentsSwap(state: BridgeState, swap: NearIntentsSwap): BridgeState {
+  return patchNearIntents(state, { busy: undefined, quote: undefined, error: undefined, swap });
+}
+
+/** Record a status poll result; ignored if that swap was discarded meanwhile. */
+export function setNearSwapStatus(
+  state: BridgeState,
+  depositAddress: string,
+  update: { status: NearSwapStatus; statusError?: undefined } | { statusError: string }
+): BridgeState {
+  const swap = state.nearIntents?.swap;
+  if (!swap || swap.depositAddress !== depositAddress) return state;
+  return patchNearIntents(state, { swap: { ...swap, statusError: undefined, ...update } });
+}
+
+/** Back to the asset form, dropping any quote and swap. */
+export function clearNearIntentsSwap(state: BridgeState): BridgeState {
+  return patchNearIntents(state, { swap: undefined, quote: undefined, error: undefined, busy: undefined });
+}
+
+/**
+ * Once NEAR Intents delivers the DASH, the deposit poll sees it on its own
+ * unless it already timed out to the "Check Again" prompt; then a recheck
+ * has to be started for it.
+ */
+export function shouldRecheckAfterNearSwap(state: BridgeState): boolean {
+  return state.step === 'detecting_deposit' && state.depositTimedOut === true;
 }
