@@ -43,8 +43,10 @@ function errorText(error: unknown): string {
 
 /**
  * Matches the "already submitted" family of Platform errors: the transition
- * was committed earlier ("Object already exists" / AlreadyExists) or is still
- * sitting in the mempool cache ("tx already exists in cache"). None of these
+ * was committed earlier ("Object already exists" / AlreadyExists), is still
+ * sitting in the mempool cache ("tx already exists in cache"), or — once the
+ * cache entry is evicted — consensus rejects the resubmission because the
+ * identity exists or its asset lock outpoint was consumed. None of these
  * prove the identity exists — callers must confirm by fetching it.
  */
 export function isAlreadyExistsError(error: unknown): boolean {
@@ -52,7 +54,9 @@ export function isAlreadyExistsError(error: unknown): boolean {
   return (
     msg.includes('Object already exists') ||
     msg.includes('tx already exists in cache') ||
-    msg.includes('AlreadyExists')
+    msg.includes('AlreadyExists') ||
+    msg.includes('already completely used') ||
+    /\bIdentity \S+ already exists\b/.test(msg)
   );
 }
 

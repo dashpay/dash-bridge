@@ -27,6 +27,9 @@ describe('isAlreadyExistsError', () => {
   it('matches the already-submitted family, including non-Error objects', () => {
     expect(isAlreadyExistsError(new Error('Object already exists: tx already exists in cache'))).toBe(true);
     expect(isAlreadyExistsError({ message: 'AlreadyExists' })).toBe(true);
+    expect(isAlreadyExistsError(new Error('Asset lock transaction abcd output 0 already completely used'))).toBe(true);
+    expect(isAlreadyExistsError(new Error('Identity 4ufjwRfdhMM87uBaGmTvesgLm6k2Q2r7SVyZdTUzFebA already exists'))).toBe(true);
+    expect(isAlreadyExistsError(new Error('identity key already exists for user'))).toBe(false);
     expect(isAlreadyExistsError(new Error('Instant lock proof signature is invalid'))).toBe(false);
   });
 });

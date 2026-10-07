@@ -22,6 +22,7 @@ import {
   setWithdrawTrackingTimeout,
 } from './state.js';
 import type { BridgeState } from '../types.js';
+import { IdentityRegistrationUnconfirmedError } from '../platform/identity-confirm.js';
 
 function baseState(): BridgeState {
   return createInitialState('testnet');
@@ -51,6 +52,18 @@ describe('setError chainlockFallbackAvailable gating', () => {
     };
     const result = setError(state, new Error('platform reject'), ErrorCodes.REGISTER);
     expect(result.chainlockFallbackAvailable).toBe(true);
+  });
+
+  it('does NOT enable the fallback for an unconfirmed (already submitted) registration', () => {
+    const state: BridgeState = {
+      ...baseState(),
+      step: 'registering_identity',
+      txid: 'abc',
+      signedTxBytes: new Uint8Array([0]),
+    };
+    const result = setError(state, new IdentityRegistrationUnconfirmedError('someId'));
+    expect(result.errorCode).toBe(ErrorCodes.REGISTER);
+    expect(result.chainlockFallbackAvailable).toBe(false);
   });
 
   it('does NOT enable the fallback on REGISTER if signedTxBytes is missing', () => {

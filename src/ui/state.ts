@@ -23,6 +23,7 @@ import {
 import { generateNewMnemonic } from '../crypto/hd.js';
 import { createEmptyUsernameEntry, createUsernameEntry } from '../platform/dpns-utils.js';
 import { WithdrawalStatus } from '../platform/withdrawal-status.js';
+import { isIdentityRegistrationUnconfirmedError } from '../platform/identity-confirm.js';
 
 /**
  * Error codes for user-facing display.
@@ -542,7 +543,12 @@ export function setError(state: BridgeState, error: Error, errorCode?: string): 
     error,
     errorCode: resolvedCode,
     errorStep: state.step,
-    chainlockFallbackAvailable: computeChainlockFallbackAvailable(state, resolvedCode),
+    // An unconfirmed registration already reached Platform: the fix is to
+    // resubmit the same proof (Retry Registration), not to switch to a chain
+    // proof whose resubmission would bypass the already-exists confirmation.
+    chainlockFallbackAvailable:
+      !isIdentityRegistrationUnconfirmedError(error) &&
+      computeChainlockFallbackAvailable(state, resolvedCode),
   };
 }
 

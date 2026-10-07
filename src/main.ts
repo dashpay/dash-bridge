@@ -2636,7 +2636,7 @@ async function startSendToAddress() {
  * Platform cannot be reached at all.
  */
 async function registerIdentityResilient(
-  proof: Extract<AssetLockProofData, { type: 'instant' }>,
+  proof: AssetLockProofData,
   assetLockPrivateKeyWif: string,
   identityKeys: typeof state.identityKeys,
   network: string
@@ -2647,12 +2647,19 @@ async function registerIdentityResilient(
   } catch (err) {
     if (!isAlreadyExistsError(err)) throw err;
 
-    const { AssetLockProof } = await loadSdkModule();
-    const sdkProof = AssetLockProof.createInstantAssetLockProof(
-      proof.instantLockBytes,
-      proof.transactionBytes,
-      proof.outputIndex
-    );
+    // The identity ID is derived from the asset lock outpoint, so instant
+    // and chain proofs for the same asset lock yield the same ID.
+    const { AssetLockProof, OutPoint } = await loadSdkModule();
+    const sdkProof = proof.type === 'instant'
+      ? AssetLockProof.createInstantAssetLockProof(
+        proof.instantLockBytes,
+        proof.transactionBytes,
+        proof.outputIndex
+      )
+      : AssetLockProof.createChainAssetLockProof(
+        proof.coreChainLockedHeight,
+        new OutPoint(proof.txid, proof.vout)
+      );
     const identityId = sdkProof.createIdentityId().toString();
     console.log(
       '[identity-create] Platform reports the state transition was already submitted; confirming identity',
@@ -3044,26 +3051,12 @@ async function runPlatformSubmission(
 
   if (state.mode === 'create') {
     updateState(setStep(state, 'registering_identity'));
-    // registerIdentityResilient derives the identity ID from the asset lock
-    // outpoint on AlreadyExists, which only applies to instant proofs here.
-    // Chain proofs go straight to registerIdentity.
-    let result;
-    if (assetLockProof.type === 'instant') {
-      result = await registerIdentityResilient(
-        assetLockProof,
-        assetLockPrivateKeyWif,
-        state.identityKeys,
-        state.network
-      );
-    } else {
-      const { registerIdentity } = await loadPlatformModule();
-      result = await registerIdentity(
-        assetLockProof,
-        assetLockPrivateKeyWif,
-        state.identityKeys,
-        state.network
-      );
-    }
+    const result = await registerIdentityResilient(
+      assetLockProof,
+      assetLockPrivateKeyWif,
+      state.identityKeys,
+      state.network
+    );
     updateState(setIdentityRegistered(state, result.identityId));
     downloadKeyBackup(state);
 
