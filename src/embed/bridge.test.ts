@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { resolveEmbed, toProgressStep, EmbedSession, EXPIRED_NOTICE } from './bridge.js';
 import { createInitialState, setMode, setIdentityRegistered, setError, setStep } from '../ui/state.js';
 import type { BridgeState } from '../types.js';
+import { parseLoginFragment, type LoginResult } from './login.js';
 
 const APP_ORIGIN = 'https://app.example';
 const IDENTITY_ID = '4ufjwRfdhMM87uBaGmTvesgLm6k2Q2r7SVyZdTUzFebA';
@@ -22,6 +23,7 @@ function fakeWindow(opts: FakeWindowOptions) {
       search: opts.search,
       href: `https://bridge.example/${opts.search}`,
       ancestorOrigins: opts.ancestorOrigins,
+      replace: vi.fn(),
     },
     document: { referrer: opts.referrer ?? '' },
     opener: opts.hasOpener === false ? null : target,
@@ -86,6 +88,8 @@ describe('resolveEmbed', () => {
       kind: 'iframe',
       origin: APP_ORIGIN,
       appName: undefined,
+      request: 'create-identity',
+      statement: undefined,
     });
   });
 
@@ -148,14 +152,14 @@ describe('resolveEmbed', () => {
   });
 
   it('tells the app about unsupported requests with a fatal error', () => {
-    const { win, target } = fakeWindow({ search: `?embed=popup&origin=${APP_ORIGIN}&request=login&requestId=r1` });
+    const { win, target } = fakeWindow({ search: `?embed=popup&origin=${APP_ORIGIN}&request=sign-tx&requestId=r1` });
     expect(resolveEmbed(win).action).toBe('block');
     expect(target.postMessage).toHaveBeenCalledWith(
       {
         source: 'dash-bridge',
         version: 1,
         type: 'error',
-        request: 'login',
+        request: 'sign-tx',
         requestId: 'r1',
         code: 'unsupported_request',
         message: expect.any(String),
@@ -315,5 +319,102 @@ describe('EmbedSession', () => {
     new EmbedSession({ kind: 'iframe', origin: APP_ORIGIN, request: 'create-identity', network: 'testnet' }, fake.win).returnToApp();
     expect(posted(fake.target).map((m) => m.type)).toEqual(['close']);
     expect(fake.win.close).not.toHaveBeenCalled();
+  });
+});
+
+describe('login requests', () => {
+  const NONCE = 'abcdefghijklmnop1234';
+  const RETURN_URL = `${APP_ORIGIN}/auth/callback`;
+  const RESULT: LoginResult = {
+    identityId: IDENTITY_ID,
+    keyId: 1,
+    network: 'testnet',
+    message: 'app.example wants you to sign in ...',
+    signature: 'H'.repeat(88),
+    nonce: NONCE,
+    issuedAt: '2026-10-07T12:00:00Z',
+    expiresAt: '2026-10-07T12:10:00Z',
+  };
+  const loginSearch = (kind: string, extra = '') =>
+    `?embed=${kind}&origin=${APP_ORIGIN}&request=login&nonce=${NONCE}&requestId=r1&statement=Hello${extra}`;
+  const replaced = (win: Window) => (win.location.replace as ReturnType<typeof vi.fn>).mock.calls.map(([url]) => url as string);
+
+  function session(search: string, opts: Partial<FakeWindowOptions> = {}) {
+    const fake = fakeWindow({ search, ...opts });
+    const result = resolveEmbed(fake.win);
+    if (result.action !== 'run' || !result.session) throw new Error('expected a session');
+    return { ...fake, session: result.session };
+  }
+
+  it('exposes the login request and statement for display', () => {
+    const { session: s } = session(loginSearch('popup'));
+    expect(s.display).toMatchObject({ request: 'login', statement: 'Hello', origin: APP_ORIGIN });
+    expect(s.login).toEqual({ nonce: NONCE, statement: 'Hello', returnUrl: undefined });
+  });
+
+  it('popup: posts the login result once to the declared origin, then closes', () => {
+    const { session: s, target, win } = session(loginSearch('popup'));
+    s.completeLogin({ ...RESULT, privateKeyWif: 'cSecretWif' } as LoginResult);
+    s.completeLogin(RESULT);
+    expect(target.postMessage).toHaveBeenCalledTimes(1);
+    expect(target.postMessage).toHaveBeenCalledWith(
+      { source: 'dash-bridge', version: 1, type: 'login', request: 'login', requestId: 'r1', ...RESULT },
+      APP_ORIGIN,
+    );
+    expect(win.close).toHaveBeenCalled();
+  });
+
+  it('iframe: posts the login result and leaves removal to the SDK', () => {
+    const { session: s, target, win } = session(loginSearch('iframe'), { framed: true, ancestorOrigins: [APP_ORIGIN] });
+    s.completeLogin(RESULT);
+    expect(posted(target).map((m) => m.type)).toEqual(['login']);
+    expect(win.close).not.toHaveBeenCalled();
+    s.handlePageHide();
+    expect(posted(target).map((m) => m.type)).toEqual(['login']);
+  });
+
+  it('cannot be cancelled after the login was delivered', () => {
+    const { session: s, target } = session(loginSearch('popup'));
+    expect(s.cancel({ ...createInitialState('testnet'), mode: 'login', step: 'login_complete' })).toBe(false);
+    expect(target.postMessage).not.toHaveBeenCalled();
+  });
+
+  describe('redirect mode', () => {
+    const search = loginSearch('redirect', `&returnUrl=${encodeURIComponent(RETURN_URL)}`);
+
+    it('runs top-level without an opener', () => {
+      expect(resolveEmbed(fakeWindow({ search, hasOpener: false }).win).action).toBe('run');
+    });
+
+    it('refuses to run framed', () => {
+      const result = resolveEmbed(fakeWindow({ search, framed: true, ancestorOrigins: [APP_ORIGIN] }).win);
+      expect(result.action === 'block' && result.notice.title).toBe("This page can't run inside another site");
+    });
+
+    it('expires on reload', () => {
+      expect(resolveEmbed(fakeWindow({ search, navigationType: 'reload' }).win)).toEqual({ action: 'block', notice: EXPIRED_NOTICE });
+    });
+
+    it('navigates back with the result in the fragment, once, posting nothing', () => {
+      const { session: s, target, win } = session(search, { hasOpener: false });
+      s.start(createInitialState('testnet'));
+      s.completeLogin({ ...RESULT, privateKeyWif: 'cSecretWif' } as LoginResult);
+      s.completeLogin(RESULT);
+      const urls = replaced(win);
+      expect(urls).toHaveLength(1);
+      const url = new URL(urls[0]);
+      expect(url.origin + url.pathname).toBe(RETURN_URL);
+      expect(parseLoginFragment(url.hash)).toEqual(RESULT);
+      expect(urls[0]).not.toContain('cSecretWif');
+      expect(target.postMessage).not.toHaveBeenCalled();
+    });
+
+    it('navigates back with dash_login_error=cancelled on cancel', () => {
+      const { session: s, win } = session(search, { hasOpener: false });
+      expect(s.cancel({ ...createInitialState('testnet'), mode: 'login', step: 'login_input' })).toBe(true);
+      expect(replaced(win)).toEqual([`${RETURN_URL}#dash_login_error=cancelled`]);
+      s.completeLogin(RESULT);
+      expect(replaced(win)).toHaveLength(1);
+    });
   });
 });

@@ -5,6 +5,7 @@ import {
   type EmbedKind,
   type EmbedNetwork,
   type EmbedRequestType,
+  type LoginParams,
 } from '../embed/protocol.js';
 
 /** Random request ID matching the protocol's `[A-Za-z0-9_-]{1,64}`. */
@@ -14,6 +15,15 @@ export function generateRequestId(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+/** 32 random bytes, base64url (43 characters): a valid login nonce. */
+export function generateNonce(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 /** Build the bridge URL for a request. */
 export function buildBridgeUrl(params: {
   bridgeUrl: string;
@@ -21,16 +31,23 @@ export function buildBridgeUrl(params: {
   origin: string;
   request: EmbedRequestType;
   network: EmbedNetwork;
-  requestId: string;
+  requestId?: string;
   appName?: string;
+  /** `login` requests. */
+  login?: LoginParams;
 }): URL {
   const url = new URL(params.bridgeUrl);
   url.searchParams.set('embed', params.kind);
   url.searchParams.set('origin', params.origin);
   url.searchParams.set('request', params.request);
   url.searchParams.set('network', params.network);
-  url.searchParams.set('requestId', params.requestId);
+  if (params.requestId) url.searchParams.set('requestId', params.requestId);
   if (params.appName) url.searchParams.set('app', params.appName);
+  if (params.login) {
+    url.searchParams.set('nonce', params.login.nonce);
+    if (params.login.statement) url.searchParams.set('statement', params.login.statement);
+    if (params.login.returnUrl) url.searchParams.set('returnUrl', params.login.returnUrl);
+  }
   return url;
 }
 

@@ -1,15 +1,18 @@
 /**
  * Bridge side of embed mode: a third-party app opens the bridge in a popup or
- * iframe (see docs/widget.md) and receives the new identity ID back via
- * postMessage. Keys and the mnemonic never leave this window.
+ * iframe (see docs/widget.md) and receives the new identity ID, or a signed
+ * login proof, back via postMessage (or, for redirect-mode logins, in the
+ * return URL fragment). Keys and the mnemonic never leave this window.
  */
 import type { BridgeState, BridgeStep, EmbedDisplay, EmbedNotice } from '../types.js';
 import { ErrorCodeLabels } from '../ui/state.js';
+import { buildLoginRedirectUrl, type LoginResult } from './login.js';
 import {
   buildMessage,
   parseEmbedParams,
   type EmbedNetwork,
   type EmbedParams,
+  type LoginParams,
   type MessagePayloads,
   type MessageType,
   type ProgressStep,
@@ -34,8 +37,11 @@ const CANCELLED_NOTICE: EmbedNotice = {
   message: 'Nothing was shared with the app.',
 };
 
-/** Steps where the identity may already be on its way to Platform: no cancelling. */
-const NON_CANCELLABLE_STEPS: readonly BridgeStep[] = ['registering_identity', 'complete'];
+/**
+ * Steps where the identity may already be on its way to Platform, or the
+ * login result was already delivered: no cancelling.
+ */
+const NON_CANCELLABLE_STEPS: readonly BridgeStep[] = ['registering_identity', 'complete', 'login_complete'];
 
 export function canCancel(step: BridgeStep): boolean {
   return !NON_CANCELLABLE_STEPS.includes(step);
@@ -151,7 +157,7 @@ export function resolveEmbed(win: Window = window): EmbedResolution {
         standaloneHref(win),
       );
     }
-  } else if (!win.opener) {
+  } else if (params.kind === 'popup' && !win.opener) {
     return { action: 'block', notice: EXPIRED_NOTICE };
   }
 
@@ -180,11 +186,27 @@ export class EmbedSession {
     private readonly params: EmbedParams | UnsupportedEmbedParams,
     private readonly win: Window,
   ) {
-    this.display = { kind: params.kind, origin: params.origin, appName: params.appName };
+    this.display = {
+      kind: params.kind,
+      origin: params.origin,
+      appName: params.appName,
+      request: params.request === 'login' ? 'login' : 'create-identity',
+      statement: 'login' in params ? params.login?.statement : undefined,
+    };
     this.network = 'network' in params ? params.network : 'testnet';
   }
 
+  /** The sign-in request, when the app asked for `login`. */
+  get login(): LoginParams | undefined {
+    return 'login' in this.params ? this.params.login : undefined;
+  }
+
+  get origin(): string {
+    return this.params.origin;
+  }
+
   private target(): Window | null {
+    if (this.params.kind === 'redirect') return null;
     const target = this.params.kind === 'popup' ? this.win.opener : this.win.parent;
     return target && target !== this.win ? (target as Window) : null;
   }
@@ -241,6 +263,21 @@ export class EmbedSession {
     }
   }
 
+  /**
+   * Deliver a signed login: post it (popup closes itself afterwards; the SDK
+   * removes an iframe), or navigate back to the app in redirect mode.
+   */
+  completeLogin(result: LoginResult): void {
+    const returnUrl = this.login?.returnUrl;
+    if (this.params.kind === 'redirect') {
+      if (this.finished || !returnUrl) return;
+      this.finished = true;
+      this.win.location.replace(buildLoginRedirectUrl(returnUrl, result));
+      return;
+    }
+    if (this.finish('login', result) && this.params.kind === 'popup') this.win.close();
+  }
+
   /** Report a request the bridge cannot serve. */
   failFatal(code: string, message: string): void {
     this.finish('error', { code, message, fatal: true });
@@ -253,6 +290,13 @@ export class EmbedSession {
   cancel(state: BridgeState, confirm: (message: string) => boolean = (m) => this.win.confirm(m)): boolean {
     if (this.finished || !canCancel(state.step)) return false;
     if (state.assetLockKeyPair && !confirm(CANCEL_AFTER_DEPOSIT_PROMPT)) return false;
+    const returnUrl = this.login?.returnUrl;
+    if (this.params.kind === 'redirect' && returnUrl) {
+      this.finished = true;
+      this.notice = CANCELLED_NOTICE;
+      this.win.location.replace(buildLoginRedirectUrl(returnUrl, { error: 'cancelled' }));
+      return true;
+    }
     this.finish('cancelled', {});
     // The popup closes; an iframe host may not remove us, so stop the flow UI.
     if (this.params.kind === 'popup') this.win.close();

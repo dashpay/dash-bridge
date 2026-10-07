@@ -1,5 +1,13 @@
 import { expect, test, type Frame, type Page } from '@playwright/test';
-import { E2E_MOCK_IDENTITY_ID } from '../src/e2e-mock-constants';
+import {
+  E2E_MOCK_IDENTITY_ID,
+  E2E_MOCK_LOGIN_HIGH_WIF,
+  E2E_MOCK_LOGIN_MASTER_WIF,
+  E2E_MOCK_LOGIN_PUBLIC_KEYS,
+  E2E_MOCK_XFER_RECIPIENT_ID,
+} from '../src/e2e-mock-constants';
+import { verifyLogin } from '../src/widget/verify';
+import { parseLoginFragment, type LoginResult } from '../src/embed/login';
 
 /** A third-party app on another origin, served by request interception. */
 const HOST_ORIGIN = 'https://host.test';
@@ -188,5 +196,131 @@ test.describe('Embeddable identity widget', () => {
 
     await frame.click('#embed-return-btn');
     await expect(page.locator('#iframe-container iframe')).toHaveCount(0);
+  });
+});
+
+test.describe('Sign in with Dash', () => {
+  const NONCE = 'e2e_login_nonce_0123456789';
+  const loginQuery = (kind: string, extra = '') =>
+    `?embed=${kind}&origin=${encodeURIComponent(HOST_ORIGIN)}&request=login&nonce=${NONCE}` +
+    `&network=testnet&e2e=mock&app=Host%20App&statement=Welcome%20back${extra}`;
+  const verifyForHost = (result: unknown) =>
+    verifyLogin(result, {
+      expectedOrigin: HOST_ORIGIN,
+      expectedNonce: NONCE,
+      network: 'testnet',
+      identityPublicKeys: E2E_MOCK_LOGIN_PUBLIC_KEYS,
+      expectedStatement: 'Welcome back',
+    });
+
+  async function enterCredentials(target: Page | Frame, privateKeyWif: string, identityId = E2E_MOCK_IDENTITY_ID) {
+    await target.fill('#login-identity-input', identityId);
+    await target.fill('#login-wif-input', privateKeyWif);
+    await target.click('#login-continue-btn');
+  }
+
+  test('iframe login posts a login message that verifies for the host origin', async ({ page, baseURL }) => {
+    await openHostPage(page, `${baseURL}/${loginQuery('iframe', '&requestId=lg1')}`);
+    const frame = await bridgeFrame(page);
+    await expect(frame.locator('.embed-banner')).toContainText('Sign in to Host App');
+    await expect(frame.locator('#login-wif-input')).toHaveAttribute('type', 'password');
+    await enterCredentials(frame, E2E_MOCK_LOGIN_HIGH_WIF);
+
+    await expect(frame.locator('#login-review-key')).toHaveText('Key #1 · AUTHENTICATION · HIGH · ECDSA_SECP256K1');
+    await expect(frame.locator('#login-review-identity')).toHaveText(E2E_MOCK_IDENTITY_ID);
+    await expect(frame.getByText('Welcome back')).toBeVisible();
+    await frame.click('#login-sign-btn');
+
+    await expect.poll(async () => (await hostMessages(page)).some((m) => m.type === 'login')).toBe(true);
+    const msgs = await hostMessages(page);
+    expect(msgs.map((m) => m.type)).toEqual(['ready', 'login']);
+    const login = msgs[1];
+    expect(Object.keys(login).sort()).toEqual(
+      ['source', 'version', 'type', 'request', 'requestId', 'identityId', 'keyId', 'network', 'message', 'signature', 'nonce', 'issuedAt', 'expiresAt'].sort(),
+    );
+    expect(login).toMatchObject({ source: 'dash-bridge', version: 1, request: 'login', requestId: 'lg1', identityId: E2E_MOCK_IDENTITY_ID, keyId: 1 });
+    expect(JSON.stringify(msgs)).not.toContain(E2E_MOCK_LOGIN_HIGH_WIF);
+    expect(verifyForHost(login)).toEqual({ ok: true, identityId: E2E_MOCK_IDENTITY_ID, keyId: 1 });
+    // Bound to the host origin: useless to any other site.
+    const forOtherSite = { expectedOrigin: 'https://evil.test', expectedNonce: NONCE, network: 'testnet', identityPublicKeys: E2E_MOCK_LOGIN_PUBLIC_KEYS };
+    expect(verifyLogin(login, forOtherSite)).toEqual({ ok: false, reason: 'origin_mismatch' });
+  });
+
+  test('refuses the MASTER key and unknown identities', async ({ page, baseURL }) => {
+    await openHostPage(page, `${baseURL}/${loginQuery('iframe')}`);
+    const frame = await bridgeFrame(page);
+
+    await enterCredentials(frame, E2E_MOCK_LOGIN_MASTER_WIF);
+    await expect(frame.locator('#login-error')).toContainText('never paste your MASTER key');
+    await expect(frame.locator('#login-sign-btn')).toHaveCount(0);
+
+    await enterCredentials(frame, E2E_MOCK_LOGIN_HIGH_WIF, E2E_MOCK_XFER_RECIPIENT_ID);
+    await expect(frame.locator('#login-error')).toContainText('Identity not found on testnet');
+    expect((await hostMessages(page)).map((m) => m.type)).toEqual(['ready']);
+  });
+
+  test('SDK popup login resolves and verifies on the demo page', async ({ page, context }) => {
+    await page.goto('/widget-demo.html?e2e=mock');
+    await expect(page.locator('#login-popup-btn')).toBeEnabled();
+    const popupPromise = context.waitForEvent('page');
+    await page.click('#login-popup-btn');
+    const popup = await popupPromise;
+    await popup.waitForLoadState();
+
+    await expect(popup.locator('.embed-banner')).toContainText('Sign in to Widget Demo');
+    await enterCredentials(popup, E2E_MOCK_LOGIN_HIGH_WIF);
+    const closed = popup.waitForEvent('close');
+    await popup.click('#login-sign-btn');
+    await closed;
+
+    await expect(page.locator('#login-result')).toHaveText(`${E2E_MOCK_IDENTITY_ID} (key #1, testnet)`);
+    await expect(page.locator('#login-verify')).toHaveText(`verified: ${E2E_MOCK_IDENTITY_ID} key #1`);
+  });
+
+  test('SDK iframe login resolves and removes the iframe', async ({ page }) => {
+    await page.goto('/widget-demo.html?e2e=mock');
+    await expect(page.locator('#login-iframe-btn')).toBeEnabled();
+    await page.click('#login-iframe-btn');
+    const frame = await (await page.waitForSelector('#login-iframe-container iframe')).contentFrame();
+    if (!frame) throw new Error('no iframe');
+    await enterCredentials(frame, E2E_MOCK_LOGIN_HIGH_WIF);
+    await frame.click('#login-sign-btn');
+    await expect(page.locator('#login-verify')).toHaveText(`verified: ${E2E_MOCK_IDENTITY_ID} key #1`);
+    await expect(page.locator('#login-iframe-container iframe')).toHaveCount(0);
+  });
+
+  test.describe('redirect mode', () => {
+    const RETURN_URL = `${HOST_ORIGIN}/auth/callback?next=home`;
+
+    test.beforeEach(async ({ page }) => {
+      await page.route(`${HOST_ORIGIN}/**`, (route) =>
+        route.fulfill({ contentType: 'text/html', body: '<!DOCTYPE html><h1>Host callback</h1>' }),
+      );
+    });
+
+    test('lands on returnUrl with #dash_login= holding a verifiable result', async ({ page, baseURL }) => {
+      await page.goto(`${baseURL}/${loginQuery('redirect', `&returnUrl=${encodeURIComponent(RETURN_URL)}`)}`);
+      await expect(page.locator('.embed-banner')).toContainText('Sign in to Host App');
+      await enterCredentials(page, E2E_MOCK_LOGIN_HIGH_WIF);
+      await page.click('#login-sign-btn');
+
+      await page.waitForURL(/^https:\/\/host\.test\/auth\/callback\?next=home#dash_login=/);
+      const url = new URL(page.url());
+      expect(url.hash).not.toContain(E2E_MOCK_LOGIN_HIGH_WIF);
+      const result = parseLoginFragment(url.hash) as LoginResult;
+      expect(verifyForHost(result)).toEqual({ ok: true, identityId: E2E_MOCK_IDENTITY_ID, keyId: 1 });
+    });
+
+    test('cancel lands on returnUrl with #dash_login_error=cancelled', async ({ page, baseURL }) => {
+      await page.goto(`${baseURL}/${loginQuery('redirect', `&returnUrl=${encodeURIComponent(RETURN_URL)}`)}`);
+      await page.click('#login-cancel-btn');
+      await page.waitForURL(`${RETURN_URL}#dash_login_error=cancelled`);
+    });
+
+    test('refuses a returnUrl on another origin', async ({ page, baseURL }) => {
+      await page.goto(`${baseURL}/${loginQuery('redirect', `&returnUrl=${encodeURIComponent('https://evil.test/cb')}`)}`);
+      await expect(page.getByText('Invalid request')).toBeVisible();
+      await expect(page.locator('#login-identity-input')).toHaveCount(0);
+    });
   });
 });

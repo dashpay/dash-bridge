@@ -56,7 +56,13 @@
       white-space: pre-wrap;
       margin: 0;
     }
-    #iframe-container:not(:empty) { margin-top: 16px; border: 1px solid #cbd5e0; border-radius: 10px; overflow: hidden; }
+    #iframe-container:not(:empty),
+    #login-iframe-container:not(:empty) { margin-top: 16px; border: 1px solid #cbd5e0; border-radius: 10px; overflow: hidden; }
+    h2 { margin: 0 0 8px; font-size: 1.2rem; }
+    .note { background: #fff8e1; border: 1px solid #f6c343; border-radius: 8px; padding: 10px 12px; font-size: 0.9rem; }
+    #login-result, #login-verify { font-family: monospace; word-break: break-all; }
+    #login-verify.ok { color: #1f8a4c; }
+    #login-verify.err { color: #c53030; }
   </style>
 </head>
 <body>
@@ -65,7 +71,8 @@
     <p>
       This page plays the part of a third-party app. It loads the widget SDK
       (<code>widget.js</code>) and asks the bridge to create a Dash Platform
-      identity. Only the identity ID comes back; keys stay in the bridge window.
+      identity, or to sign the user in with one. Only the identity ID (and, for
+      sign-in, a signature) comes back; keys stay in the bridge window.
       See <a href="https://github.com/dashpay/dash-bridge/blob/main/docs/widget.md">docs/widget.md</a>.
     </p>
 
@@ -89,6 +96,34 @@
     <div class="card">
       <p><strong>Result:</strong> <span id="result">none yet</span></p>
       <pre id="log"></pre>
+    </div>
+
+    <div class="card">
+      <h2>Sign in with Dash</h2>
+      <p>
+        The user proves they control a Dash Platform identity by signing a
+        short message with one of its HIGH or CRITICAL authentication keys,
+        inside the bridge. This page gets back the identity ID and the
+        signature, never the key.
+      </p>
+      <p class="note">
+        <strong>Verify on your server.</strong> This demo makes the nonce and
+        checks the signature in the browser only to show what happens. A real
+        app issues the nonce from its server, and its server runs
+        <code>verifyLogin</code> (<code>widget-verify.mjs</code>) against keys it
+        fetched from Platform before it starts a session.
+      </p>
+      <label>Statement
+        <input id="login-statement" value="Sign in to Widget Demo" maxlength="140">
+      </label>
+      <div class="actions">
+        <button id="login-popup-btn" disabled>Sign in with Dash (popup)</button>
+        <button id="login-iframe-btn" class="secondary" disabled>Sign in (iframe)</button>
+        <button id="login-redirect-btn" class="secondary" disabled>Sign in (redirect)</button>
+      </div>
+      <div id="login-iframe-container"></div>
+      <p><strong>Login:</strong> <span id="login-result">none yet</span></p>
+      <p><strong>Demo verification:</strong> <span id="login-verify">none yet</span></p>
     </div>
   </main>
 
@@ -143,13 +178,130 @@
       );
     }
 
+    // ---- Sign in with Dash -------------------------------------------------
+    const isMock = pageParams.get('e2e') === 'mock';
+    // Redirect mode leaves the page, so the pending login lives in sessionStorage.
+    const PENDING_KEY = 'dash-bridge-demo-login';
+
+    async function loadVerifier() {
+      try {
+        return await import('/widget-verify.mjs');
+      } catch {
+        return await import('/src/widget/verify.ts');
+      }
+    }
+
+    // What your server does: fetch the identity's public keys from Platform.
+    async function fetchIdentityPublicKeys(identityId, network) {
+      if (isMock) {
+        // Mock mode (dev server only): the bridge's mock identity.
+        return (await import('/src/e2e-mock-constants.ts')).E2E_MOCK_LOGIN_PUBLIC_KEYS;
+      }
+      const { EvoSDK } = await import('https://cdn.jsdelivr.net/npm/@dashevo/evo-sdk@4.0.0-rc.2/dist/evo-sdk.module.js');
+      const sdk = network === 'mainnet' ? EvoSDK.mainnetTrusted() : EvoSDK.testnetTrusted();
+      await sdk.connect();
+      const identity = await sdk.identities.fetch(identityId);
+      if (!identity) throw new Error('identity not found on Platform');
+      return identity.toJSON().publicKeys;
+    }
+
+    async function showLogin(result, pending) {
+      $('login-result').textContent = `${result.identityId} (key #${result.keyId}, ${result.network})`;
+      log(`login: ${result.identityId} key #${result.keyId}`);
+      $('login-verify').textContent = 'verifying…';
+      $('login-verify').className = '';
+      try {
+        const [{ verifyLogin }, identityPublicKeys] = await Promise.all([
+          loadVerifier(),
+          fetchIdentityPublicKeys(result.identityId, pending.network),
+        ]);
+        const verdict = verifyLogin(result, {
+          expectedOrigin: location.origin,
+          expectedNonce: pending.nonce,
+          network: pending.network,
+          identityPublicKeys,
+        });
+        $('login-verify').textContent = verdict.ok
+          ? `verified: ${verdict.identityId} key #${verdict.keyId}`
+          : `rejected: ${verdict.reason}`;
+        $('login-verify').className = verdict.ok ? 'ok' : 'err';
+      } catch (err) {
+        $('login-verify').textContent = `could not verify: ${err.message}`;
+        $('login-verify').className = 'err';
+      }
+    }
+
+    function newPendingLogin() {
+      // A real app gets this from its server, which remembers it.
+      const pending = { nonce: DashBridge.generateNonce(), network: $('network').value };
+      sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending));
+      $('login-result').textContent = 'waiting…';
+      $('login-verify').textContent = '';
+      return pending;
+    }
+
+    function runLogin(mode) {
+      const pending = newPendingLogin();
+      log(`login({ mode: '${mode}' })`);
+      // Called synchronously from the click handler so the popup isn't blocked.
+      DashBridge.login({
+        mode,
+        nonce: pending.nonce,
+        network: pending.network,
+        appName: $('app-name').value,
+        statement: $('login-statement').value,
+        bridgeUrl: bridgeUrl.href,
+        container: mode === 'iframe' ? $('login-iframe-container') : undefined,
+      }).then(
+        (result) => showLogin(result, pending),
+        (err) => {
+          log(`login rejected: ${err.code ?? ''} ${err.message}`);
+          $('login-result').textContent = `${err.code ?? 'error'}: ${err.message}`;
+        },
+      );
+    }
+
+    function runLoginRedirect() {
+      const pending = newPendingLogin();
+      location.assign(DashBridge.loginRedirectUrl({
+        nonce: pending.nonce,
+        network: pending.network,
+        appName: $('app-name').value,
+        statement: $('login-statement').value,
+        bridgeUrl: bridgeUrl.href,
+        returnUrl: location.pathname + location.search,
+      }));
+    }
+
+    /** Back from a redirect sign-in: read the fragment once, then remove it. */
+    function handleLoginRedirect() {
+      const outcome = DashBridge.parseLoginRedirect();
+      if (!outcome) return;
+      history.replaceState(null, '', location.pathname + location.search);
+      const pending = JSON.parse(sessionStorage.getItem(PENDING_KEY) ?? 'null');
+      sessionStorage.removeItem(PENDING_KEY);
+      if ('error' in outcome) {
+        log(`redirect login: ${outcome.error}`);
+        $('login-result').textContent = outcome.error;
+      } else if (!pending) {
+        $('login-result').textContent = 'no pending login (nonce already used?)';
+      } else {
+        showLogin(outcome, pending);
+      }
+    }
+
     let DashBridge;
     loadSdk().then((sdk) => {
       DashBridge = sdk;
       $('popup-btn').addEventListener('click', () => run('popup'));
       $('iframe-btn').addEventListener('click', () => run('iframe'));
-      $('popup-btn').disabled = false;
-      $('iframe-btn').disabled = false;
+      $('login-popup-btn').addEventListener('click', () => runLogin('popup'));
+      $('login-iframe-btn').addEventListener('click', () => runLogin('iframe'));
+      $('login-redirect-btn').addEventListener('click', runLoginRedirect);
+      for (const id of ['popup-btn', 'iframe-btn', 'login-popup-btn', 'login-iframe-btn', 'login-redirect-btn']) {
+        $(id).disabled = false;
+      }
+      handleLoginRedirect();
     }, (err) => log(`could not load the SDK: ${err.message}`));
   </script>
 </body>

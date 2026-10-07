@@ -1,8 +1,17 @@
 // @vitest-environment happy-dom
 // @vitest-environment-options {"settings":{"navigation":{"disableChildFrameNavigation":true}}}
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { createIdentity, DashBridgeError, IFRAME_READY_TIMEOUT_MS, IFRAME_SANDBOX } from './index.js';
-import { acceptBridgeEvent, buildBridgeUrl, generateRequestId } from './helpers.js';
+import {
+  createIdentity,
+  login,
+  loginRedirectUrl,
+  parseLoginRedirect,
+  DashBridgeError,
+  IFRAME_READY_TIMEOUT_MS,
+  IFRAME_SANDBOX,
+} from './index.js';
+import { acceptBridgeEvent, buildBridgeUrl, generateNonce, generateRequestId } from './helpers.js';
+import { buildLoginRedirectUrl, isValidNonce, type LoginResult } from '../embed/login.js';
 import { buildMessage, isValidRequestId, type MessagePayloads, type MessageType } from '../embed/protocol.js';
 
 const BRIDGE = 'https://bridge.example';
@@ -249,5 +258,103 @@ describe('createIdentity (popup)', () => {
     popup.closed = true;
     vi.advanceTimersByTime(600);
     await expect(promise).rejects.toMatchObject({ code: 'cancelled' });
+  });
+});
+
+describe('Sign in with Dash', () => {
+  type HappyWindow = { happyDOM: { setURL(url: string): void } };
+  const setPageUrl = (url: string) => (window as unknown as HappyWindow).happyDOM.setURL(url);
+  afterEach(() => setPageUrl('http://localhost:3000/'));
+
+  const NONCE = 'abcdefghijklmnop1234';
+  const RESULT: LoginResult = {
+    identityId: IDENTITY_ID,
+    keyId: 1,
+    network: 'testnet',
+    message: 'localhost:3000 wants you to sign in ...',
+    signature: 'H'.repeat(88),
+    nonce: NONCE,
+    issuedAt: '2026-10-07T12:00:00Z',
+    expiresAt: '2026-10-07T12:10:00Z',
+  };
+
+  function sendLogin(source: Window | null, url: string, payload: MessagePayloads['login'] = RESULT, type: MessageType = 'login') {
+    const requestId = new URL(url).searchParams.get('requestId')!;
+    const data = buildMessage(type, { request: 'login', requestId }, payload as never);
+    window.dispatchEvent(new MessageEvent('message', { data, origin: BRIDGE, source }));
+  }
+
+  it('generateNonce makes unique, protocol-valid nonces', () => {
+    const nonce = generateNonce();
+    expect(nonce).toHaveLength(43);
+    expect(isValidNonce(nonce)).toBe(true);
+    expect(generateNonce()).not.toBe(nonce);
+  });
+
+  it('login (iframe) passes nonce and statement, resolves with the result and removes the iframe', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const promise = login({ nonce: NONCE, statement: ' Hello\nworld ', mode: 'iframe', container, bridgeUrl: `${BRIDGE}/` });
+    const iframe = container.querySelector('iframe')!;
+    const params = new URL(iframe.src).searchParams;
+    expect(params.get('request')).toBe('login');
+    expect(params.get('nonce')).toBe(NONCE);
+    expect(params.get('statement')).toBe('Hello world');
+    // Results for another request type are ignored.
+    sendLogin(iframe.contentWindow, iframe.src, { identityId: 'x', network: 'testnet' } as never, 'identity-created');
+    sendLogin(iframe.contentWindow, iframe.src, { ...RESULT, privateKeyWif: 'cSecret' } as LoginResult);
+    const result = await promise;
+    expect(result).toEqual(RESULT);
+    expect(container.querySelector('iframe')).toBeNull();
+  });
+
+  it('login (popup) resolves and closes the popup', async () => {
+    const popup = { closed: false, close: vi.fn() };
+    const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    const promise = login({ nonce: NONCE, bridgeUrl: BRIDGE });
+    const url = open.mock.calls[0][0] as string;
+    expect(new URL(url).searchParams.get('embed')).toBe('popup');
+    sendLogin(popup as unknown as Window, url);
+    await expect(promise).resolves.toEqual(RESULT);
+    expect(popup.close).toHaveBeenCalled();
+  });
+
+  it('login rejects a missing or malformed nonce without opening anything', async () => {
+    const open = vi.spyOn(window, 'open');
+    await expect(login({ nonce: 'short', bridgeUrl: BRIDGE })).rejects.toMatchObject({ code: 'invalid_options' });
+    await expect(login(undefined as never)).rejects.toMatchObject({ code: 'invalid_options' });
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it('loginRedirectUrl builds a redirect request with a same-origin return URL', () => {
+    setPageUrl('https://app.example/login');
+    const url = new URL(loginRedirectUrl({ nonce: NONCE, returnUrl: '/auth/callback', network: 'mainnet', appName: 'App', bridgeUrl: BRIDGE }));
+    expect(url.origin).toBe(BRIDGE);
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      embed: 'redirect',
+      origin: 'https://app.example',
+      request: 'login',
+      network: 'mainnet',
+      app: 'App',
+      nonce: NONCE,
+      returnUrl: 'https://app.example/auth/callback',
+    });
+  });
+
+  it('loginRedirectUrl refuses cross-origin return URLs and bad options', () => {
+    setPageUrl('https://app.example/login');
+    expect(() => loginRedirectUrl({ nonce: NONCE, returnUrl: 'https://evil.example/cb' })).toThrow(DashBridgeError);
+    expect(() => loginRedirectUrl({ nonce: 'x', returnUrl: '/cb' })).toThrow(/nonce/);
+    expect(() => loginRedirectUrl({ nonce: NONCE, returnUrl: '/cb', network: 'devnet' as never })).toThrow(/network/);
+    expect(() => loginRedirectUrl({ nonce: NONCE, returnUrl: '/cb', bridgeUrl: 'http://bridge.example/' })).toThrow(/bridgeUrl/);
+  });
+
+  it('parseLoginRedirect reads results and errors from the fragment', () => {
+    const resultUrl = new URL(buildLoginRedirectUrl('https://app.example/cb', RESULT));
+    expect(parseLoginRedirect(resultUrl.hash)).toEqual(RESULT);
+    expect(parseLoginRedirect('#dash_login_error=cancelled')).toEqual({ error: 'cancelled' });
+    expect(parseLoginRedirect('#other')).toBeNull();
+    setPageUrl(resultUrl.href);
+    expect(parseLoginRedirect()).toEqual(RESULT);
   });
 });

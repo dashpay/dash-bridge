@@ -192,6 +192,7 @@ import {
 } from './platform/withdrawal-status.js';
 import type {
   BridgeState,
+  BridgeStep,
   KeyType,
   KeyPurpose,
   SecurityLevel,
@@ -214,12 +215,25 @@ import {
   E2E_MOCK_WITHDRAW_BALANCE,
   E2E_MOCK_XFER_MNEMONIC,
   E2E_MOCK_XFER_RECIPIENT_ID,
+  E2E_MOCK_LOGIN_PUBLIC_KEYS,
 } from './e2e-mock-constants.js';
 import { resolveEmbed, type EmbedSession } from './embed/bridge.js';
+import {
+  setLoginInput,
+  toggleLoginShowWif,
+  setLoginVerifying,
+  setLoginError,
+  setLoginReview,
+  setLoginBackToInput,
+  setLoginComplete,
+  clearLoginSecret,
+} from './ui/state.js';
+import { checkLoginKey, describeLoginFetchError, signLogin, validateLoginWif } from './platform/login.js';
+import { hexToBytes } from './utils/hex.js';
 
 // Global state
 let state: BridgeState;
-/** Set when a third-party app opened the bridge to create an identity. */
+/** Set when a third-party app opened the bridge (create an identity, or sign in). */
 let embedSession: EmbedSession | undefined;
 let insightClient: InsightClient;
 let islockService: IslockService | undefined;
@@ -446,6 +460,12 @@ function createE2EMockIdentityKeys(): IdentityPublicKeyInfo[] {
   ];
 }
 
+/** Mock identity for Sign in with Dash: real keys, so mock logins verify. */
+function createE2EMockLoginKeys(identityId: string): IdentityPublicKeyInfo[] {
+  if (identityId !== E2E_MOCK_IDENTITY_ID) throw new Error('Identity not found');
+  return E2E_MOCK_LOGIN_PUBLIC_KEYS.map((key) => ({ ...key, data: hexToBytes(key.data), isDisabled: false }));
+}
+
 function createE2EMockOwnedUsernames(): OwnedUsername[] {
   // Both labels contain "l", which homograph-folds to "1" in normalizedLabel.
   // Real names like these cannot be resolved from their display form, so the
@@ -607,7 +627,8 @@ function stateFromUrl(): BridgeState {
 function applyEmbed(next: BridgeState): BridgeState {
   if (!embedSession) return next;
   const withEmbed = next.embed ? next : { ...next, embed: embedSession.display };
-  return withEmbed.step === 'init' ? setMode(withEmbed, 'create') : withEmbed;
+  if (withEmbed.step !== 'init') return withEmbed;
+  return setMode(withEmbed, embedSession.display.request === 'login' ? 'login' : 'create');
 }
 
 async function hydrateContractDeepLink(contractParam: string): Promise<void> {
@@ -744,12 +765,41 @@ function setupEventListeners(container: HTMLElement) {
     });
   });
 
-  // Embed mode: Cancel (banner) and Return to app (complete screen)
-  container.querySelector('#embed-cancel-btn')?.addEventListener('click', () => {
-    if (embedSession?.cancel(state)) updateState(state);
-  });
+  // Embed mode: Cancel (banner, and the login screens) and Return to app (complete screen)
+  const cancelEmbed = () => {
+    if (embedSession?.cancel(state)) updateState(clearLoginSecret(state));
+  };
+  container.querySelector('#embed-cancel-btn')?.addEventListener('click', cancelEmbed);
+  container.querySelector('#login-cancel-btn')?.addEventListener('click', cancelEmbed);
   container.querySelector('#embed-return-btn')?.addEventListener('click', () => {
     embedSession?.returnToApp();
+  });
+
+  // Sign in with Dash
+  const loginIdentityInput = container.querySelector<HTMLInputElement>('#login-identity-input');
+  const loginWifInput = container.querySelector<HTMLInputElement>('#login-wif-input');
+  loginIdentityInput?.addEventListener('input', () => {
+    updateState(setLoginInput(state, { identityId: loginIdentityInput.value }));
+  });
+  loginWifInput?.addEventListener('input', () => {
+    updateState(setLoginInput(state, { privateKeyWif: loginWifInput.value }));
+  });
+  for (const input of [loginIdentityInput, loginWifInput]) {
+    input?.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') void startLoginVerification();
+    });
+  }
+  container.querySelector('#login-wif-toggle')?.addEventListener('click', () => {
+    updateState(toggleLoginShowWif(state));
+  });
+  container.querySelector('#login-continue-btn')?.addEventListener('click', () => {
+    void startLoginVerification();
+  });
+  container.querySelector('#login-back-btn')?.addEventListener('click', () => {
+    updateState(setLoginBackToInput(state));
+  });
+  container.querySelector('#login-sign-btn')?.addEventListener('click', () => {
+    void approveLogin();
   });
 
   // Mode selection buttons (init page)
@@ -2326,6 +2376,78 @@ function setupEventListeners(container: HTMLElement) {
           break;
       }
     });
+  }
+}
+
+// ============================================================================
+// Sign in with Dash
+// ============================================================================
+
+/** Re-read after an await (TypeScript keeps the pre-await narrowing of `state`). */
+function isCurrentStep(step: BridgeStep): boolean {
+  return state.step === step;
+}
+
+async function fetchLoginIdentityKeys(identityId: string): Promise<IdentityPublicKeyInfo[]> {
+  if (isE2EMockMode()) {
+    await delay(30);
+    return createE2EMockLoginKeys(identityId);
+  }
+  return getIdentityPublicKeys(identityId, state.network);
+}
+
+/** Continue: fetch the identity's keys and check the WIF matches one that may sign in. */
+async function startLoginVerification(): Promise<void> {
+  if (state.step !== 'login_input') return;
+  const identityId = (state.loginIdentityId ?? '').trim();
+  const privateKeyWif = (state.loginPrivateKeyWif ?? '').trim();
+  if (!isWellFormedIdentityId(identityId)) {
+    updateState(setLoginError(state, 'Enter a valid identity ID (44-character Base58).'));
+    return;
+  }
+  const wifError = validateLoginWif(privateKeyWif, state.network);
+  if (wifError) {
+    updateState(setLoginError(state, wifError));
+    return;
+  }
+
+  updateState(setLoginVerifying(setLoginInput(state, { identityId, privateKeyWif })));
+  try {
+    const keys = await fetchLoginIdentityKeys(identityId);
+    if (!isCurrentStep('login_verifying')) return; // cancelled meanwhile
+    const check = checkLoginKey(privateKeyWif, keys, state.network);
+    updateState(check.ok ? setLoginReview(state, check.key) : setLoginError(state, check.error));
+  } catch (error) {
+    if (!isCurrentStep('login_verifying')) return;
+    updateState(setLoginError(state, describeLoginFetchError(error, state.network)));
+  }
+}
+
+/** Sign in: sign the login message, drop the WIF, and hand the result to the app. */
+async function approveLogin(): Promise<void> {
+  const session = embedSession;
+  const login = session?.login;
+  const { loginKey, loginIdentityId, loginPrivateKeyWif } = state;
+  if (state.step !== 'login_review' || !session || !login || !loginKey || !loginIdentityId || !loginPrivateKeyWif) {
+    return;
+  }
+  try {
+    const result = await signLogin({
+      origin: session.origin,
+      identityId: loginIdentityId,
+      statement: login.statement,
+      network: session.network,
+      nonce: login.nonce,
+      keyId: loginKey.keyId,
+      privateKeyWif: loginPrivateKeyWif,
+    });
+    // Double click, or cancelled while signing.
+    if (!isCurrentStep('login_review')) return;
+    updateState(setLoginComplete(state, result));
+    session.completeLogin(result);
+  } catch (error) {
+    if (!isCurrentStep('login_review')) return;
+    updateState(setLoginError(state, `Could not sign in: ${extractErrorMessage(error)}`));
   }
 }
 

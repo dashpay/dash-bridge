@@ -27,6 +27,16 @@ const SAMPLE_PAYLOADS: { [T in MessageType]: MessagePayloads[T] } = {
   ready: {},
   progress: { step: 'awaiting_deposit' },
   'identity-created': { identityId: '4ufjwRfdhMM87uBaGmTvesgLm6k2Q2r7SVyZdTUzFebA', network: 'testnet' },
+  login: {
+    identityId: '4ufjwRfdhMM87uBaGmTvesgLm6k2Q2r7SVyZdTUzFebA',
+    keyId: 1,
+    network: 'testnet',
+    message: 'app.example wants you to sign in with your Dash Platform identity: ...',
+    signature: 'H'.repeat(88),
+    nonce: 'n'.repeat(32),
+    issuedAt: '2026-10-07T12:00:00Z',
+    expiresAt: '2026-10-07T12:10:00Z',
+  },
   error: { code: 'ERR-1005', message: 'InstantSend lock failed', fatal: false },
   cancelled: {},
   close: {},
@@ -36,6 +46,7 @@ const WHITELIST: Record<MessageType, string[]> = {
   ready: [],
   progress: ['step'],
   'identity-created': ['identityId', 'network'],
+  login: ['identityId', 'keyId', 'network', 'message', 'signature', 'nonce', 'issuedAt', 'expiresAt'],
   error: ['code', 'message', 'fatal'],
   cancelled: [],
   close: [],
@@ -191,14 +202,70 @@ describe('parseEmbedParams', () => {
   });
 
   it('flags unsupported requests and networks so the app can be told', () => {
-    expect(parseEmbedParams('?embed=popup&origin=https://app.example&request=login&requestId=r')).toMatchObject({
+    expect(parseEmbedParams('?embed=popup&origin=https://app.example&request=sign-tx&requestId=r')).toMatchObject({
       status: 'unsupported',
       code: 'unsupported_request',
-      params: { request: 'login', requestId: 'r', origin: 'https://app.example' },
+      params: { request: 'sign-tx', requestId: 'r', origin: 'https://app.example' },
     });
     expect(parseEmbedParams('?embed=popup&origin=https://app.example&network=devnet')).toMatchObject({
       status: 'unsupported',
       code: 'unsupported_network',
     });
+  });
+});
+
+describe('parseEmbedParams: login', () => {
+  const NONCE = 'abcdefghijklmnop1234';
+  const base = `?origin=https://app.example&request=login&nonce=${NONCE}`;
+
+  it('parses a popup login with a sanitized statement', () => {
+    expect(parseEmbedParams(`${base}&embed=popup&network=mainnet&statement=${encodeURIComponent('Hi\nthere‮')}`)).toEqual({
+      status: 'ok',
+      params: {
+        kind: 'popup',
+        origin: 'https://app.example',
+        request: 'login',
+        network: 'mainnet',
+        appName: undefined,
+        requestId: undefined,
+        login: { nonce: NONCE, statement: 'Hi there', returnUrl: undefined },
+      },
+    });
+  });
+
+  it('parses a redirect login with a return URL on the declared origin', () => {
+    const returnUrl = 'https://app.example/auth/callback?next=%2Fhome';
+    const result = parseEmbedParams(`${base}&embed=redirect&returnUrl=${encodeURIComponent(returnUrl)}`);
+    expect(result).toMatchObject({ status: 'ok', params: { kind: 'redirect', login: { nonce: NONCE, returnUrl } } });
+  });
+
+  it.each([
+    [`${base}&embed=redirect&returnUrl=${encodeURIComponent('https://evil.example/cb')}`, 'return URL'],
+    [`${base}&embed=redirect&returnUrl=${encodeURIComponent('https://app.example.evil.example/cb')}`, 'return URL'],
+    [`${base}&embed=redirect&returnUrl=${encodeURIComponent('http://app.example/cb')}`, 'return URL'],
+    [`${base}&embed=redirect`, 'return URL'],
+    [`?origin=https://app.example&embed=redirect&returnUrl=${encodeURIComponent('https://app.example/cb')}`, 'only available for sign-in'],
+    ['?origin=https://app.example&request=login&embed=popup', 'nonce'],
+    ['?origin=https://app.example&request=login&embed=popup&nonce=short', 'nonce'],
+    [`?origin=https://app.example&request=login&embed=popup&nonce=${'a'.repeat(16)}%20x`, 'nonce'],
+  ])('rejects %s', (query, reason) => {
+    const result = parseEmbedParams(query);
+    expect(result.status).toBe('invalid');
+    expect(result.status === 'invalid' && result.reason).toContain(reason);
+  });
+});
+
+describe('parseBridgeMessage: login', () => {
+  const ctx = { request: 'login' as const, requestId: 'req_1' };
+  const valid = () => buildMessage('login', ctx, SAMPLE_PAYLOADS.login);
+
+  it('accepts a well-formed login result for the login request only', () => {
+    expect(parseBridgeMessage(valid(), ctx)).toEqual(valid());
+    expect(parseBridgeMessage(valid(), { request: 'create-identity', requestId: 'req_1' })).toBeNull();
+  });
+
+  it('rejects malformed login payloads', () => {
+    expect(parseBridgeMessage({ ...valid(), keyId: '1' }, ctx)).toBeNull();
+    expect(parseBridgeMessage({ ...valid(), signature: 5 }, ctx)).toBeNull();
   });
 });
