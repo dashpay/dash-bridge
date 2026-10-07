@@ -1,13 +1,65 @@
-import type { UTXO, TxInfo } from '../types.js';
+import type { AuthenticatedUtxo, UTXO, TxInfo } from '../types.js';
 import type { NetworkConfig } from '../config.js';
-import { withRetry, type RetryOptions } from '../utils/retry.js';
+import { withRetry, isRetryableError, type RetryOptions } from '../utils/retry.js';
 import { abortableSleep } from '../utils/sleep.js';
+import { hexToBytes } from '../utils/hex.js';
+import {
+  assertTxid,
+  authenticateUtxo,
+  UtxoAuthenticationError,
+} from '../transaction/utxo-auth.js';
+import { fetchJson } from '../utils/fetch-json.js';
+import { fetchWithDeadline, RequestTimeoutError } from '../utils/fetch-with-deadline.js';
+
+/**
+ * Broadcast POSTs get a longer deadline than reads. A timed-out broadcast may
+ * be retried by withRetry; re-sending the same signed tx is harmless while it
+ * is unconfirmed, but a retry after it was mined is rejected with
+ * "already in block chain" (see isAmbiguousBroadcastError).
+ */
+const BROADCAST_TIMEOUT_MS = 20000;
+
+/** Same read deadline as fetchJson's default; bounds headers and body. */
+const RAWTX_TIMEOUT_MS = 8000;
+
+/**
+ * Whether a broadcast error leaves the outcome unknown rather than failed:
+ * a timeout may have reached the node, and "already in block chain" means an
+ * earlier timed-out attempt of the same signed tx was mined.
+ */
+export function isAmbiguousBroadcastError(error: unknown): boolean {
+  if (error instanceof RequestTimeoutError) return true;
+  return error instanceof Error && error.message.includes('already in block chain');
+}
 
 export interface InsightApiResponse<T> {
   success: boolean;
   data?: T;
   error?: string;
 }
+
+/**
+ * `/rawtx` returned 404. The address index can list a fresh deposit before
+ * `/rawtx` serves it (e.g. another backend node), so this is retried longer
+ * than other errors, and its message is what the user sees if it persists.
+ */
+class RawTxNotIndexedError extends Error {
+  constructor() {
+    super('The explorer has not indexed your deposit transaction yet. Wait a moment and use Check Again.');
+    this.name = 'RawTxNotIndexedError';
+  }
+}
+
+/**
+ * Retry schedule for `/rawtx`: 6 attempts with 1s, 2s, then 4s backoff
+ * (plus up to 50% jitter) gives roughly 15-22s for the explorer to catch up.
+ */
+const RAWTX_RETRY: RetryOptions = {
+  maxAttempts: 6,
+  baseDelayMs: 1000,
+  maxDelayMs: 4000,
+  shouldRetry: (error) => error instanceof RawTxNotIndexedError || isRetryableError(error),
+};
 
 /**
  * Insight API client for UTXO lookup and transaction broadcast
@@ -24,13 +76,7 @@ export class InsightClient {
    */
   async getUTXOs(address: string, retryOptions?: RetryOptions): Promise<UTXO[]> {
     return withRetry(async () => {
-      const response = await fetch(`${this.baseUrl}/addr/${address}/utxo`);
-
-      if (!response.ok) {
-        throw new Error(`Insight API error: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
+      const data = await fetchJson(`${this.baseUrl}/addr/${address}/utxo`);
 
       // Map Insight API response to our UTXO type
       return data.map((utxo: Record<string, unknown>) => ({
@@ -44,19 +90,58 @@ export class InsightClient {
   }
 
   /**
+   * Fetch the raw serialized bytes of a transaction via `/rawtx/{txid}`.
+   * The bytes are NOT trusted here; see {@link getAuthenticatedUtxo}.
+   */
+  async getRawTransaction(txid: string, retryOptions?: RetryOptions): Promise<Uint8Array> {
+    assertTxid(txid);
+    const rawtx = await withRetry(
+      () =>
+        fetchWithDeadline(`${this.baseUrl}/rawtx/${txid}`, {}, RAWTX_TIMEOUT_MS, async (response) => {
+          if (response.status === 404) {
+            throw new RawTxNotIndexedError();
+          }
+          if (!response.ok) {
+            throw new Error(`Insight API error: ${response.status} ${response.statusText}`);
+          }
+
+          const data = await response.json().catch(() => {
+            throw new Error('Insight returned a non-JSON raw transaction response');
+          });
+          return data?.rawtx;
+        }),
+      { ...RAWTX_RETRY, ...retryOptions }
+    );
+
+    if (typeof rawtx !== 'string' || !/^(?:[0-9a-f]{2})+$/i.test(rawtx)) {
+      throw new UtxoAuthenticationError('Explorer returned a malformed raw transaction');
+    }
+    return hexToBytes(rawtx);
+  }
+
+  /**
+   * The single trust boundary for funding UTXOs: fetch the raw previous
+   * transaction and return the UTXO with the value and script it actually
+   * commits to. Every flow that builds and signs from an Insight UTXO must
+   * pass it through here first. Throws if Insight's report disagrees.
+   */
+  async getAuthenticatedUtxo(
+    utxo: UTXO,
+    depositPublicKey: Uint8Array,
+    retryOptions?: RetryOptions
+  ): Promise<AuthenticatedUtxo> {
+    const rawTx = await this.getRawTransaction(utxo.txid, retryOptions);
+    return authenticateUtxo(utxo, rawTx, depositPublicKey);
+  }
+
+  /**
    * Current Core block height, via Insight `/status?q=getInfo` (`info.blocks`).
    * Used by the network-status indicator to compare Core's tip against
    * Platform's chain-locked height.
    */
   async getBlockHeight(retryOptions?: RetryOptions): Promise<number> {
     return withRetry(async () => {
-      const response = await fetch(`${this.baseUrl}/status?q=getInfo`);
-
-      if (!response.ok) {
-        throw new Error(`Insight API error: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
+      const data = await fetchJson(`${this.baseUrl}/status?q=getInfo`);
       const blocks = data?.info?.blocks;
       if (typeof blocks !== 'number') {
         throw new Error('Insight getInfo response missing info.blocks');
@@ -70,20 +155,24 @@ export class InsightClient {
    */
   async broadcastTransaction(txHex: string, retryOptions?: RetryOptions): Promise<string> {
     return withRetry(async () => {
-      const response = await fetch(`${this.baseUrl}/tx/send`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
+      const result = await fetchWithDeadline(
+        `${this.baseUrl}/tx/send`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ rawtx: txHex }),
         },
-        body: JSON.stringify({ rawtx: txHex }),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Broadcast failed: ${response.status} - ${errorText}`);
-      }
-
-      const result = await response.json();
+        BROADCAST_TIMEOUT_MS,
+        async (response) => {
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Broadcast failed: ${response.status} - ${errorText}`);
+          }
+          return response.json();
+        }
+      );
       return result.txid;
     }, retryOptions);
   }
@@ -91,15 +180,9 @@ export class InsightClient {
   /**
    * Get transaction details
    */
-  async getTransaction(txid: string, retryOptions?: RetryOptions): Promise<TxInfo> {
+  async getTransaction(txid: string, retryOptions?: RetryOptions, signal?: AbortSignal): Promise<TxInfo> {
     return withRetry(async () => {
-      const response = await fetch(`${this.baseUrl}/tx/${txid}`);
-
-      if (!response.ok) {
-        throw new Error(`Failed to get transaction: ${response.status}`);
-      }
-
-      const data = await response.json();
+      const data = await fetchJson(`${this.baseUrl}/tx/${txid}`, { signal });
 
       // Insight returns blockheight: -1 while the tx is unconfirmed.
       const rawHeight =
@@ -131,7 +214,12 @@ export class InsightClient {
   ): Promise<number> {
     while (!signal?.aborted) {
       try {
-        const info = await this.getTransaction(txid);
+        // Don't burn backoff retries on a request the caller cancelled.
+        const info = await this.getTransaction(
+          txid,
+          { shouldRetry: (error) => !signal?.aborted && isRetryableError(error) },
+          signal
+        );
         onPoll?.(info);
         if (info.blockheight !== undefined) {
           return info.blockheight;

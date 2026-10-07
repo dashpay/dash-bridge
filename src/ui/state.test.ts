@@ -5,6 +5,10 @@ import {
   createInitialState,
   getStepDescription,
   setError,
+  setIdentityRegistered,
+  isChainlockFallbackCancelled,
+  setDepositTimedOut,
+  setDepositVerificationFailed,
   setMode,
   setWithdrawIdentityFetching,
   setWithdrawIdentityFetched,
@@ -15,10 +19,17 @@ import {
   setWithdrawSubmitting,
   setWithdrawSubmitted,
   setWithdrawSubmitError,
+  setWithdrawOutcomeUnknown,
+  setWithdrawOutcomeChecking,
+  setWithdrawRetry,
   setWithdrawStatusUpdate,
   setWithdrawTrackingTimeout,
 } from './state.js';
 import type { BridgeState } from '../types.js';
+import {
+  AssetLockConsumedElsewhereError,
+  IdentityRegistrationUnconfirmedError,
+} from '../platform/identity-confirm.js';
 
 function baseState(): BridgeState {
   return createInitialState('testnet');
@@ -50,6 +61,30 @@ describe('setError chainlockFallbackAvailable gating', () => {
     expect(result.chainlockFallbackAvailable).toBe(true);
   });
 
+  it('does NOT enable the fallback for an unconfirmed (already submitted) registration', () => {
+    const state: BridgeState = {
+      ...baseState(),
+      step: 'registering_identity',
+      txid: 'abc',
+      signedTxBytes: new Uint8Array([0]),
+    };
+    const result = setError(state, new IdentityRegistrationUnconfirmedError('someId'));
+    expect(result.errorCode).toBe(ErrorCodes.REGISTER);
+    expect(result.chainlockFallbackAvailable).toBe(false);
+  });
+
+  it('does NOT enable the fallback when the asset lock was consumed elsewhere', () => {
+    const state: BridgeState = {
+      ...baseState(),
+      step: 'registering_identity',
+      txid: 'abc',
+      signedTxBytes: new Uint8Array([0]),
+    };
+    const result = setError(state, new AssetLockConsumedElsewhereError('someId'));
+    expect(result.chainlockFallbackAvailable).toBe(false);
+    expect(result.unconfirmedIdentityId).toBeUndefined();
+  });
+
   it('does NOT enable the fallback on REGISTER if signedTxBytes is missing', () => {
     const state: BridgeState = {
       ...baseState(),
@@ -69,6 +104,33 @@ describe('setError chainlockFallbackAvailable gating', () => {
     };
     const result = setError(state, new Error('broadcast fail'), ErrorCodes.BROADCAST);
     expect(result.chainlockFallbackAvailable).toBe(false);
+  });
+});
+
+describe('unconfirmed identity registration', () => {
+  it('keeps the derived identity ID across later errors without marking it complete', () => {
+    const registering: BridgeState = { ...baseState(), step: 'registering_identity' };
+    const unconfirmed = setError(registering, new IdentityRegistrationUnconfirmedError('someId'));
+    expect(unconfirmed.unconfirmedIdentityId).toBe('someId');
+    expect(unconfirmed.identityId).toBeUndefined();
+
+    const laterError = setError({ ...unconfirmed, step: 'registering_identity' }, new Error('network down'));
+    expect(laterError.unconfirmedIdentityId).toBe('someId');
+
+    const registered = setIdentityRegistered(laterError, 'someId');
+    expect(registered.identityId).toBe('someId');
+    expect(registered.unconfirmedIdentityId).toBeUndefined();
+  });
+});
+
+describe('isChainlockFallbackCancelled', () => {
+  it('treats an aborted signal as cancellation only before submission starts', () => {
+    expect(isChainlockFallbackCancelled(true, false)).toBe(true);
+    // The fallback aborts its own signal before submitting; errors after
+    // that point must reach the error screen.
+    expect(isChainlockFallbackCancelled(true, true)).toBe(false);
+    expect(isChainlockFallbackCancelled(false, false)).toBe(false);
+    expect(isChainlockFallbackCancelled(false, true)).toBe(false);
   });
 });
 
@@ -142,6 +204,42 @@ describe('withdraw mode state transitions', () => {
     expect(result.withdrawResult).toEqual({ success: false, error: 'boom' });
   });
 
+  it('unknown outcome is a non-retryable failure that keeps the lookup window', () => {
+    const unknown = setWithdrawOutcomeUnknown(setWithdrawSubmitting(baseState()), 'boom', 1234);
+    expect(unknown.step).toBe('withdraw_complete');
+    expect(unknown.withdrawResult).toEqual({ success: false, error: 'boom' });
+    expect(unknown.withdrawOutcomeUnknown).toEqual({ sinceMs: 1234, checking: false });
+    // Retry is refused while the outcome is unknown
+    expect(setWithdrawRetry(unknown)).toBe(unknown);
+  });
+
+  it('Check Again marks the unknown outcome as checking', () => {
+    const unknown = setWithdrawOutcomeUnknown(baseState(), 'boom', 1234);
+    expect(setWithdrawOutcomeChecking(unknown).withdrawOutcomeUnknown).toEqual({ sinceMs: 1234, checking: true });
+    // No-op without an unknown outcome
+    const plain = baseState();
+    expect(setWithdrawOutcomeChecking(plain)).toBe(plain);
+  });
+
+  it('resolving an unknown outcome clears it: found tracks, not found becomes retryable', () => {
+    const checking = setWithdrawOutcomeChecking(setWithdrawOutcomeUnknown(baseState(), 'boom', 1234));
+
+    const found = setWithdrawSubmitted(checking);
+    expect(found.step).toBe('withdraw_tracking');
+    expect(found.withdrawOutcomeUnknown).toBeUndefined();
+
+    const notFound = setWithdrawSubmitError(checking, 'boom');
+    expect(notFound.withdrawOutcomeUnknown).toBeUndefined();
+    expect(notFound.withdrawResult).toEqual({ success: false, error: 'boom' });
+    expect(setWithdrawRetry(notFound).step).toBe('withdraw_configure');
+  });
+
+  it('re-entering withdraw mode or resubmitting clears an unknown outcome', () => {
+    const unknown = setWithdrawOutcomeUnknown(baseState(), 'boom', 1234);
+    expect(setMode(unknown, 'withdraw').withdrawOutcomeUnknown).toBeUndefined();
+    expect(setWithdrawSubmitting(unknown).withdrawOutcomeUnknown).toBeUndefined();
+  });
+
   it('status updates stay in tracking until terminal', () => {
     let state = setWithdrawSubmitted(setWithdrawSubmitting(baseState()), 42n);
     state = setWithdrawStatusUpdate(state, 1);
@@ -188,5 +286,35 @@ describe('withdraw mode state transitions', () => {
     const goodAddress = setWithdrawAddress(badAddress, 'yGoodAddr');
     expect(goodAddress.withdrawToAddress).toBe('yGoodAddr');
     expect(goodAddress.withdrawAddressError).toBeUndefined();
+  });
+});
+
+describe('deposit verification failure', () => {
+  it('returns to the deposit step with a recheck prompt and keeps keys', () => {
+    const keyPair = { privateKey: new Uint8Array(32).fill(1), publicKey: new Uint8Array(33).fill(2) };
+    const state: BridgeState = {
+      ...baseState(),
+      step: 'building_transaction',
+      assetLockKeyPair: keyPair,
+      depositAddress: 'yAddr',
+      detectedUtxo: { txid: 'a'.repeat(64), vout: 0, satoshis: 1, scriptPubKey: '', confirmations: 0 },
+      depositAmount: 1n,
+    };
+    const failed = setDepositVerificationFailed(state, 'explorer disagrees');
+    expect(failed.step).toBe('detecting_deposit');
+    expect(failed.depositTimedOut).toBe(true);
+    expect(failed.depositVerificationError).toBe('explorer disagrees');
+    expect(failed.detectedUtxo).toBeUndefined();
+    expect(failed.depositAmount).toBeUndefined();
+    expect(failed.assetLockKeyPair).toBe(keyPair);
+    expect(failed.depositAddress).toBe('yAddr');
+
+    // Starting a recheck clears the message
+    expect(setDepositTimedOut(failed, false, 0).depositVerificationError).toBeUndefined();
+  });
+
+  it('a deposit timeout always lands on the deposit step', () => {
+    const state: BridgeState = { ...baseState(), step: 'building_transaction' };
+    expect(setDepositTimedOut(state, true, 5).step).toBe('detecting_deposit');
   });
 });

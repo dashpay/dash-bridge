@@ -13,6 +13,15 @@ export interface UTXO {
   confirmations: number;
 }
 
+declare const authenticatedUtxoBrand: unique symbol;
+
+/**
+ * A UTXO whose value and script were verified against the raw transaction
+ * that created it (see `authenticateUtxo`). Only these can fund an asset lock,
+ * so skipping authentication is a compile error.
+ */
+export type AuthenticatedUtxo = UTXO & { readonly [authenticatedUtxoBrand]: true };
+
 export interface TxInfo {
   txid: string;
   confirmations: number;
@@ -335,6 +344,12 @@ export interface BridgeState {
   /** When true, the error screen offers a "Use chainlock proof instead" recovery button. */
   chainlockFallbackAvailable?: boolean;
   identityId?: string;
+  /**
+   * Identity ID derived from the asset lock when registration was submitted
+   * but not confirmed. Only for the error-screen key backup and diagnostics;
+   * NOT a completed identity (that is `identityId`).
+   */
+  unconfirmedIdentityId?: string;
   error?: Error;
   /** Error code for user-facing display (e.g., "ERR-1006") */
   errorCode?: string;
@@ -344,6 +359,8 @@ export interface BridgeState {
   depositTimedOut?: boolean;
   /** Current detected deposit amount (may be below minimum) */
   detectedDepositAmount?: number;
+  /** Why a detected deposit could not be verified (shown with the recheck button) */
+  depositVerificationError?: string;
   /** Target identity ID for top-up (user-provided) */
   targetIdentityId?: string;
   /** Whether asset lock key is a one-time random key (for top-up/send_to_address) vs HD-derived */
@@ -510,6 +527,13 @@ export interface BridgeState {
   withdrawStatus?: number;
   /** Withdraw: status polling problem / timeout explanation (informational, not a failure) */
   withdrawStatusError?: string;
+  /**
+   * Withdraw: set when the submission errored AND the follow-up lookups could
+   * not tell whether the withdrawal landed. Retrying is unsafe in this state
+   * (it could withdraw twice); the UI offers "Check Again" instead.
+   * `sinceMs` is the lower bound used to match the withdrawal document.
+   */
+  withdrawOutcomeUnknown?: { sinceMs: number; checking: boolean };
 
   // Faucet request state
   /** Current status of faucet request */

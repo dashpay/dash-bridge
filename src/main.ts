@@ -10,7 +10,7 @@ import { extractErrorMessage } from './utils/errors.js';
 import { parseKeyBackup } from './utils/key-backup.js';
 import { deriveAssetLockKeyPair } from './crypto/hd.js';
 import { createAssetLockTransaction, serializeTransaction, calculateTxId } from './transaction/index.js';
-import { InsightClient } from './api/insight.js';
+import { InsightClient, isAmbiguousBroadcastError } from './api/insight.js';
 import type { IslockService } from './api/islock.js';
 import { fetchNetworkStatus } from './api/network-status.js';
 import { DAPIClient } from './api/dapi.js';
@@ -34,11 +34,13 @@ import {
   setIdentityRegistered,
   setError,
   setChainlockFallbackStarted,
+  isChainlockFallbackCancelled,
   setChainlockProgress,
   setChainlockProofReady,
   toError,
   ErrorCodes,
   setDepositTimedOut,
+  setDepositVerificationFailed,
   setNetwork,
   setNetworkStatus,
   updateIdentityKey,
@@ -132,6 +134,8 @@ import {
   setWithdrawSubmitting,
   setWithdrawSubmitted,
   setWithdrawSubmitError,
+  setWithdrawOutcomeUnknown,
+  setWithdrawOutcomeChecking,
   setWithdrawStatusUpdate,
   setWithdrawStatusNote,
   setWithdrawTrackingTimeout,
@@ -179,13 +183,19 @@ import {
   MIN_TRANSFER_PROTOCOL_VERSION,
   type SigningKeySelection,
 } from './platform/username-transfer-utils.js';
-import { loadSdkModule } from './platform/sdkModule.js';
+import {
+  WithdrawalStatus,
+  classifyWithdrawalLookups,
+  type WithdrawalLandedOutcome,
+  type WithdrawalLookupResult,
+} from './platform/withdrawal-status.js';
 import type {
   BridgeState,
   KeyType,
   KeyPurpose,
   SecurityLevel,
   UTXO,
+  AuthenticatedUtxo,
   ManageNewKeyConfig,
   DpnsUsernameEntry,
   DpnsRegistrationResult,
@@ -822,6 +832,15 @@ function setupEventListeners(container: HTMLElement) {
   if (retryBtn) {
     retryBtn.addEventListener('click', () => {
       updateState(createInitialState(state.network));
+    });
+  }
+
+  // Retry registration (offered on the error screen when an identity
+  // registration was submitted but could not be confirmed)
+  const retryRegistrationBtn = container.querySelector('#retry-registration-btn');
+  if (retryRegistrationBtn) {
+    retryRegistrationBtn.addEventListener('click', () => {
+      void retryIdentityRegistration();
     });
   }
 
@@ -2031,6 +2050,14 @@ function setupEventListeners(container: HTMLElement) {
     });
   }
 
+  // Withdraw outcome unknown: re-run the landed check (no retry offered)
+  const withdrawCheckAgainBtn = container.querySelector('#withdraw-check-again-btn');
+  if (withdrawCheckAgainBtn) {
+    withdrawCheckAgainBtn.addEventListener('click', () => {
+      void recheckWithdrawalOutcome();
+    });
+  }
+
   const withdrawStartOverBtn = container.querySelector('#withdraw-start-over-btn');
   if (withdrawStartOverBtn) {
     withdrawStartOverBtn.addEventListener('click', () => {
@@ -2278,8 +2305,48 @@ function showValidationError(message: string): void {
 }
 
 /**
+ * Authenticate a detected deposit before anything is built or signed: its
+ * value and script are re-derived from the raw previous transaction (see
+ * InsightClient.getAuthenticatedUtxo). On failure nothing has been signed, so
+ * return to the deposit step with a recheck prompt (keys stay in state) and
+ * resolve null; the caller must stop.
+ */
+async function authenticateDeposit(
+  utxo: UTXO,
+  depositPublicKey: Uint8Array
+): Promise<AuthenticatedUtxo | null> {
+  try {
+    return await insightClient.getAuthenticatedUtxo(utxo, depositPublicKey);
+  } catch (error) {
+    console.error('Deposit verification failed:', error);
+    updateState(setDepositVerificationFailed(state, toError(error).message));
+    return null;
+  }
+}
+
+/**
  * Start the top-up process
  */
+/**
+ * Broadcast a signed asset lock transaction.
+ *
+ * A broadcast that timed out may still have reached the node, so it is not a
+ * failure: continue with the locally computed txid and let the IS lock wait
+ * (and its chain-lock fallback, which needs `state.txid`) settle the outcome.
+ * Definite rejections still throw.
+ */
+async function broadcastAssetLock(signedTxHex: string, txid: string): Promise<void> {
+  try {
+    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
+    if (broadcastedTxid !== txid) {
+      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
+    }
+  } catch (error) {
+    if (!isAmbiguousBroadcastError(error)) throw error;
+    console.warn(`Broadcast outcome unknown for ${txid}; waiting for its lock instead:`, error);
+  }
+}
+
 async function startTopUp() {
   try {
     if (isE2EMockMode()) {
@@ -2345,7 +2412,8 @@ async function startTopUp() {
       return;
     }
 
-    const utxo = depositResult.utxo;
+    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
+    if (!utxo) return;
 
     updateState(setUtxoDetected(state, utxo));
 
@@ -2386,10 +2454,7 @@ async function startTopUp() {
     );
 
     // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
+    await broadcastAssetLock(signedTxHex, txid);
 
     updateState(setTransactionBroadcast(state, txid));
 
@@ -2469,7 +2534,8 @@ async function startSendToAddress() {
       return;
     }
 
-    const utxo = depositResult.utxo;
+    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
+    if (!utxo) return;
     updateState(setUtxoDetected(state, utxo));
 
     // Step 3: Build transaction
@@ -2506,10 +2572,7 @@ async function startSendToAddress() {
     );
 
     // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
+    await broadcastAssetLock(signedTxHex, txid);
     updateState(setTransactionBroadcast(state, txid));
 
     const islockBytes = await islockSub.wait();
@@ -2547,66 +2610,25 @@ async function startSendToAddress() {
 }
 
 /**
- * Wrapper around `registerIdentity` that gracefully handles
- * already-submitted state transitions.
- *
- * Tenderdash (Platform's consensus layer) deduplicates state transitions
- * by their bytes: a second submit of the same IdentityCreate is rejected
- * with `Object already exists: tx already exists in cache`. This is what
- * surfaces when the user retries an identity creation that actually
- * succeeded the first time (e.g. the first attempt got a
- * `GroveDBProof` decode error in the client AFTER Platform had committed
- * the identity, and the user clicked Retry).
- *
- * The rs-sdk has matching logic (`Identity::wait_for_response`) that
- * auto-fetches the identity on `AlreadyExists`, but the wasm-sdk doesn't,
- * and on a NON-TRUSTED devnet we can't fetch via the SDK anyway (no
- * quorum context = TransportNoAvailableAddresses).
- *
- * Strategy: catch the AlreadyExists family of errors and treat them as
- * success, deriving the identity ID from the asset lock proof (it's
- * deterministic). The platform-side identity is real either way.
+ * Resubmit identity registration with the asset lock proof already in
+ * state. Offered on the error screen after an unconfirmed submission: the
+ * asset lock can only be consumed once and the identity ID is
+ * deterministic, so resubmitting can't create a second identity.
  */
-async function registerIdentityResilient(
-  proof: Extract<AssetLockProofData, { type: 'instant' }>,
-  assetLockPrivateKeyWif: string,
-  identityKeys: typeof state.identityKeys,
-  network: string
-): Promise<{ identityId: string; balance: number; revision: number; alreadyExisted?: boolean }> {
-  const isAlreadyExistsError = (err: unknown): boolean => {
-    const msg =
-      err && typeof err === 'object' && 'message' in err
-        ? String((err as { message: unknown }).message)
-        : String(err);
-    return (
-      msg.includes('Object already exists') ||
-      msg.includes('tx already exists in cache') ||
-      msg.includes('AlreadyExists')
-    );
-  };
-
+async function retryIdentityRegistration(): Promise<void> {
+  if (!state.assetLockProof || !state.assetLockKeyPair) {
+    console.error('Retry registration unavailable: missing asset lock proof or key');
+    return;
+  }
   try {
-    const { registerIdentity } = await loadPlatformModule();
-    return await registerIdentity(proof, assetLockPrivateKeyWif, identityKeys, network);
-  } catch (err) {
-    if (!isAlreadyExistsError(err)) throw err;
-
-    // Platform tells us the state transition is already in its consensus
-    // pool — meaning a previous submit already created the identity. The
-    // identity ID is deterministic from the asset lock outpoint, so we
-    // can derive it from the proof and surface success.
-    console.log(
-      '[identity-create] Platform reports state transition already submitted; treating as success.'
+    const assetLockPrivateKeyWif = privateKeyToWif(
+      state.assetLockKeyPair.privateKey,
+      getNetwork(state.network)
     );
-    const { AssetLockProof } = await loadSdkModule();
-    const sdkProof = AssetLockProof.createInstantAssetLockProof(
-      proof.instantLockBytes,
-      proof.transactionBytes,
-      proof.outputIndex
-    );
-    const identityId = sdkProof.createIdentityId().toString();
-    console.log('[identity-create] Recovered identityId:', identityId);
-    return { identityId, balance: 0, revision: 0, alreadyExisted: true };
+    await runPlatformSubmission(state.assetLockProof, assetLockPrivateKeyWif);
+  } catch (error) {
+    console.error('Retry registration error:', error);
+    updateState(setError(state, toError(error)));
   }
 }
 
@@ -2684,7 +2706,8 @@ async function startBridge() {
       return;
     }
 
-    const utxo = depositResult.utxo;
+    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
+    if (!utxo) return;
 
     updateState(setUtxoDetected(state, utxo));
 
@@ -2723,10 +2746,7 @@ async function startBridge() {
     );
 
     // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
+    await broadcastAssetLock(signedTxHex, txid);
     updateState(setTransactionBroadcast(state, txid));
 
     console.log('Waiting for InstantSend lock...');
@@ -2749,6 +2769,7 @@ async function startBridge() {
       network
     );
 
+    const { registerIdentityResilient } = await loadPlatformModule();
     const result = await registerIdentityResilient(
       assetLockProof,
       assetLockPrivateKeyWif,
@@ -2803,12 +2824,13 @@ async function recheckDeposit() {
     return;
   }
 
-  const utxo = depositResult.utxo;
-
   // Continue with the rest of the bridge process
   try {
     const network = getNetwork(state.network);
     const assetLockKeyPair = state.assetLockKeyPair!;
+
+    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
+    if (!utxo) return;
 
     updateState(setUtxoDetected(state, utxo));
 
@@ -2847,10 +2869,7 @@ async function recheckDeposit() {
     );
 
     // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
+    await broadcastAssetLock(signedTxHex, txid);
     updateState(setTransactionBroadcast(state, txid));
 
     console.log('Waiting for InstantSend lock...');
@@ -2894,6 +2913,7 @@ async function recheckDeposit() {
     } else if (state.mode === 'create') {
       // Create mode — register identity
       updateState(setStep(state, 'registering_identity'));
+      const { registerIdentityResilient } = await loadPlatformModule();
       const result = await registerIdentityResilient(
         assetLockProof,
         assetLockPrivateKeyWif,
@@ -2932,7 +2952,7 @@ let chainlockController: AbortController | null = null;
  * happy-path bridge flows (see startBridge / startTopUp / startSendToAddress).
  */
 async function runPlatformSubmission(
-  assetLockProof: import('./types.js').AssetLockProofData,
+  assetLockProof: AssetLockProofData,
   assetLockPrivateKeyWif: string
 ): Promise<void> {
   if (state.mode === 'topup') {
@@ -2963,26 +2983,13 @@ async function runPlatformSubmission(
 
   if (state.mode === 'create') {
     updateState(setStep(state, 'registering_identity'));
-    // registerIdentityResilient derives the identity ID from the asset lock
-    // outpoint on AlreadyExists, which only applies to instant proofs here.
-    // Chain proofs go straight to registerIdentity.
-    let result;
-    if (assetLockProof.type === 'instant') {
-      result = await registerIdentityResilient(
-        assetLockProof,
-        assetLockPrivateKeyWif,
-        state.identityKeys,
-        state.network
-      );
-    } else {
-      const { registerIdentity } = await loadPlatformModule();
-      result = await registerIdentity(
-        assetLockProof,
-        assetLockPrivateKeyWif,
-        state.identityKeys,
-        state.network
-      );
-    }
+    const { registerIdentityResilient } = await loadPlatformModule();
+    const result = await registerIdentityResilient(
+      assetLockProof,
+      assetLockPrivateKeyWif,
+      state.identityKeys,
+      state.network
+    );
     updateState(setIdentityRegistered(state, result.identityId));
     downloadKeyBackup(state);
 
@@ -3128,7 +3135,9 @@ async function startChainlockFallback(): Promise<void> {
     await runPlatformSubmission(proof, assetLockPrivateKeyWif);
     console.log('[chainlock-fallback] Platform submission resolved');
   } catch (error) {
-    if (signal.aborted) {
+    // The signal is aborted on purpose just before submitting (to stop the
+    // height poller), so it only means "cancelled" while still waiting.
+    if (isChainlockFallbackCancelled(signal.aborted, submissionStarted)) {
       // Already transitioned to error via cancelChainlockFallback.
       return;
     }
@@ -3759,6 +3768,18 @@ async function startWithdrawal() {
   try {
     if (isE2EMockMode()) {
       await delay(80);
+      e2eMockWithdrawChecks = readE2EMockWithdrawChecks();
+      if (e2eMockWithdrawChecks) {
+        // Scripted submission error; the landed checks replay the script.
+        const sinceMs = Date.now();
+        applyWithdrawalLandedOutcome(
+          await checkWithdrawalLanded(identityId, sinceMs),
+          identityId,
+          sinceMs,
+          'Mock submission error'
+        );
+        return;
+      }
       const mockRemaining = BigInt(E2E_MOCK_WITHDRAW_BALANCE) - amountCredits;
       updateState(setWithdrawSubmitted(state, mockRemaining));
       // Deterministically walk the payout statuses to completion
@@ -3799,15 +3820,12 @@ async function startWithdrawal() {
       // while waiting for the state transition result). Before offering a
       // retryable failure screen, check whether the withdrawal actually
       // landed — a second submission would withdraw twice.
-      if (await didWithdrawalLand(identityId, sinceMs)) {
-        updateState(setWithdrawStatusNote(
-          setWithdrawSubmitted(state),
-          'The submission reported an error, but the withdrawal was found on the network — tracking its payout instead.'
-        ));
-        void pollWithdrawalStatus(identityId, sinceMs);
-        return;
-      }
-      updateState(setWithdrawSubmitError(state, result.error || 'Withdrawal failed'));
+      applyWithdrawalLandedOutcome(
+        await checkWithdrawalLanded(identityId, sinceMs),
+        identityId,
+        sinceMs,
+        result.error || 'Withdrawal failed'
+      );
       return;
     }
 
@@ -3820,24 +3838,107 @@ async function startWithdrawal() {
 }
 
 /**
+ * E2E mock: scripted landed-check verdicts consumed in order, e.g.
+ * `?e2e=mock&e2eWithdrawChecks=unknown,found`. When present, the mock
+ * submission fails and each landed check returns the next verdict.
+ */
+let e2eMockWithdrawChecks: WithdrawalLandedOutcome[] | undefined;
+
+function readE2EMockWithdrawChecks(): WithdrawalLandedOutcome[] | undefined {
+  const raw = new URLSearchParams(window.location.search).get('e2eWithdrawChecks');
+  if (!raw) return undefined;
+  const checks = raw.split(',').filter(
+    (v): v is WithdrawalLandedOutcome => v === 'found' || v === 'not_found' || v === 'unknown'
+  );
+  return checks.length > 0 ? checks : undefined;
+}
+
+/**
  * Check whether a withdrawal document for this identity appeared on the
  * network after `sinceMs`. Used to disambiguate submission errors: an error
  * thrown after broadcast leaves a document behind even though the SDK call
- * failed. A few short attempts cover processing lag; lookup failures count
- * as "not found" (the failure screen already warns about the ambiguity).
+ * failed. A few short attempts cover processing lag. Lookup failures are
+ * NOT treated as "not found": see classifyWithdrawalLookups. Never throws.
  */
-async function didWithdrawalLand(identityId: string, sinceMs: number): Promise<boolean> {
-  const { fetchLatestWithdrawalStatus } = await loadPlatformModule();
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) await delay(5_000);
-    try {
-      const record = await fetchLatestWithdrawalStatus(identityId, state.network, sinceMs);
-      if (record !== null) return true;
-    } catch (error) {
-      console.warn('Withdrawal landed-check failed:', error);
-    }
+async function checkWithdrawalLanded(identityId: string, sinceMs: number): Promise<WithdrawalLandedOutcome> {
+  if (isE2EMockMode() && e2eMockWithdrawChecks) {
+    await delay(30);
+    return e2eMockWithdrawChecks.shift() ?? 'unknown';
   }
-  return false;
+
+  const results: WithdrawalLookupResult[] = [];
+  try {
+    const { fetchLatestWithdrawalStatus } = await loadPlatformModule();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await delay(5_000);
+      try {
+        const record = await fetchLatestWithdrawalStatus(identityId, state.network, sinceMs);
+        if (record !== null) return 'found';
+        results.push('not_found');
+      } catch (error) {
+        console.warn('Withdrawal landed-check failed:', error);
+        results.push('error');
+      }
+    }
+  } catch (error) {
+    console.warn('Withdrawal landed-check could not run:', error);
+  }
+  return classifyWithdrawalLookups(results);
+}
+
+/**
+ * Route a landed-check verdict after a withdrawal submission error:
+ * found → track the payout; not_found → retryable failure; unknown →
+ * outcome-unknown screen (no retry, "Check Again" only).
+ */
+function applyWithdrawalLandedOutcome(
+  outcome: WithdrawalLandedOutcome,
+  identityId: string,
+  sinceMs: number,
+  error: string
+): void {
+  if (outcome === 'found') {
+    updateState(setWithdrawStatusNote(
+      setWithdrawSubmitted(state),
+      'The submission reported an error, but the withdrawal was found on the network — tracking its payout instead.'
+    ));
+    if (isE2EMockMode()) {
+      // Mock mode has no network to poll; finish deterministically.
+      void delay(30).then(() => {
+        if (state.step === 'withdraw_tracking') {
+          updateState(setWithdrawStatusUpdate(state, WithdrawalStatus.COMPLETE));
+        }
+      });
+      return;
+    }
+    void pollWithdrawalStatus(identityId, sinceMs);
+    return;
+  }
+  if (outcome === 'not_found') {
+    updateState(setWithdrawSubmitError(state, error));
+    return;
+  }
+  updateState(setWithdrawOutcomeUnknown(state, error, sinceMs));
+}
+
+/**
+ * "Check Again" on the outcome-unknown screen: re-run the landed check for
+ * the original submission window.
+ */
+async function recheckWithdrawalOutcome(): Promise<void> {
+  const pending = state.withdrawOutcomeUnknown;
+  const identityId = state.targetIdentityId;
+  if (!pending || pending.checking || !identityId) return;
+  const error = state.withdrawResult?.error || 'Withdrawal failed';
+
+  updateState(setWithdrawOutcomeChecking(state));
+  const outcome = await checkWithdrawalLanded(identityId, pending.sinceMs);
+
+  // The user may have started over while the lookups ran.
+  if (state.step !== 'withdraw_complete' || state.withdrawOutcomeUnknown?.sinceMs !== pending.sinceMs) {
+    return;
+  }
+  applyWithdrawalLandedOutcome(outcome, identityId, pending.sinceMs, error);
 }
 
 /**
@@ -3954,7 +4055,10 @@ async function requestFaucetFunds() {
         const utxos = await insightClient.getUTXOs(addressToCheck);
         const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
         const sufficientUtxo = utxos.find(u => u.satoshis >= minAmount);
-        if (sufficientUtxo && state.step === 'detecting_deposit') {
+        // Display-only progress hint: the polling flow authenticates the
+        // deposit before signing. Skip it while the recheck prompt is up,
+        // since no flow is running to move past 'building_transaction'.
+        if (sufficientUtxo && state.step === 'detecting_deposit' && !state.depositTimedOut) {
           updateState(setUtxoDetected(state, sufficientUtxo));
         }
       } catch {

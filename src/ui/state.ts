@@ -23,6 +23,11 @@ import {
 import { generateNewMnemonic } from '../crypto/hd.js';
 import { createEmptyUsernameEntry, createUsernameEntry } from '../platform/dpns-utils.js';
 import { WithdrawalStatus } from '../platform/withdrawal-status.js';
+import {
+  isAssetLockConsumedElsewhereError,
+  isIdentityRegistrationUnconfirmedError,
+  type IdentityRegistrationUnconfirmedError,
+} from '../platform/identity-confirm.js';
 
 /**
  * Error codes for user-facing display.
@@ -235,6 +240,7 @@ export function setMode(state: BridgeState, mode: BridgeMode): BridgeState {
       withdrawResult: undefined,
       withdrawStatus: undefined,
       withdrawStatusError: undefined,
+      withdrawOutcomeUnknown: undefined,
     };
   } else {
     // Manage mode: choose between key management and username transfer
@@ -273,6 +279,9 @@ function clearModeSensitiveFields(state: BridgeState, mode: BridgeMode): BridgeS
     withdrawSigningKeyInfo: undefined,
     withdrawToAddress: undefined,
     withdrawAmountCredits: undefined,
+    // An unconfirmed registration belongs to the flow that raised it; keep it
+    // out of any later flow's key backup.
+    unconfirmedIdentityId: undefined,
   };
 }
 
@@ -505,6 +514,7 @@ export function setIdentityRegistered(
     ...state,
     step: 'complete',
     identityId,
+    unconfirmedIdentityId: undefined,
   };
 }
 
@@ -535,14 +545,39 @@ function computeChainlockFallbackAvailable(
 
 export function setError(state: BridgeState, error: Error, errorCode?: string): BridgeState {
   const resolvedCode = errorCode ?? StepErrorCodes[state.step] ?? ErrorCodes.UNKNOWN;
+  const unconfirmed = isIdentityRegistrationUnconfirmedError(error);
   return {
     ...state,
     step: 'error',
     error,
     errorCode: resolvedCode,
     errorStep: state.step,
-    chainlockFallbackAvailable: computeChainlockFallbackAvailable(state, resolvedCode),
+    // Both errors mean the deposit's asset lock already reached Platform, so
+    // a chain-lock proof for the same asset lock can't change the outcome
+    // (and the fallback's "InstantSend didn't go through" hint would be
+    // wrong). Unconfirmed → Retry Registration; consumed elsewhere → nothing
+    // to retry.
+    chainlockFallbackAvailable:
+      !unconfirmed &&
+      !isAssetLockConsumedElsewhereError(error) &&
+      computeChainlockFallbackAvailable(state, resolvedCode),
+    // Keep the derived ID of an unconfirmed registration (for the key backup)
+    // across later errors in the same flow; it is not a completed identity.
+    unconfirmedIdentityId: unconfirmed
+      ? (error as IdentityRegistrationUnconfirmedError).identityId
+      : state.unconfirmedIdentityId,
   };
+}
+
+/**
+ * Whether an error thrown inside the chainlock fallback is the user's
+ * cancellation (already handled by cancelChainlockFallback). The fallback
+ * also aborts its own signal right before submitting to Platform to stop the
+ * height poller, so an aborted signal only means "cancelled" if submission
+ * had not started — later errors must reach the error screen.
+ */
+export function isChainlockFallbackCancelled(signalAborted: boolean, submissionStarted: boolean): boolean {
+  return signalAborted && !submissionStarted;
 }
 
 /**
@@ -650,8 +685,32 @@ export function setDepositTimedOut(
 ): BridgeState {
   return {
     ...state,
+    // The faucet quick-check may have advanced the display step; a timeout
+    // must land back on the deposit screen so Check Again is visible.
+    ...(timedOut ? { step: 'detecting_deposit' as const } : {}),
     depositTimedOut: timedOut,
     detectedDepositAmount: detectedAmount,
+    depositVerificationError: undefined,
+  };
+}
+
+/**
+ * A deposit was detected but could not be authenticated against its raw
+ * transaction. Nothing was signed, so return to the deposit step (keys kept)
+ * and offer the recheck button with the reason.
+ */
+export function setDepositVerificationFailed(
+  state: BridgeState,
+  message: string
+): BridgeState {
+  return {
+    ...state,
+    step: 'detecting_deposit',
+    detectedUtxo: undefined,
+    depositAmount: undefined,
+    depositTimedOut: true,
+    detectedDepositAmount: undefined,
+    depositVerificationError: message,
   };
 }
 
@@ -2006,6 +2065,7 @@ export function setWithdrawSubmitting(state: BridgeState): BridgeState {
     withdrawResult: undefined,
     withdrawStatus: undefined,
     withdrawStatusError: undefined,
+    withdrawOutcomeUnknown: undefined,
   };
 }
 
@@ -2020,17 +2080,46 @@ export function setWithdrawSubmitted(state: BridgeState, remainingBalance?: bigi
     step: 'withdraw_tracking',
     withdrawResult: { success: true, remainingBalance },
     withdrawStatus: WithdrawalStatus.QUEUED,
+    withdrawOutcomeUnknown: undefined,
   };
 }
 
 /**
- * Withdrawal transition failed
+ * Withdrawal transition failed and is known not to have landed (retryable)
  */
 export function setWithdrawSubmitError(state: BridgeState, error: string): BridgeState {
   return {
     ...state,
     step: 'withdraw_complete',
     withdrawResult: { success: false, error },
+    withdrawOutcomeUnknown: undefined,
+  };
+}
+
+/**
+ * The submission errored and the follow-up lookups could not tell whether
+ * the withdrawal landed. Not retryable: a new transition could withdraw
+ * twice. `sinceMs` is kept so "Check Again" can repeat the lookup.
+ */
+export function setWithdrawOutcomeUnknown(state: BridgeState, error: string, sinceMs: number): BridgeState {
+  return {
+    ...state,
+    step: 'withdraw_complete',
+    withdrawResult: { success: false, error },
+    withdrawStatus: undefined,
+    withdrawStatusError: undefined,
+    withdrawOutcomeUnknown: { sinceMs, checking: false },
+  };
+}
+
+/**
+ * "Check Again" is re-running the landed check for an unknown outcome
+ */
+export function setWithdrawOutcomeChecking(state: BridgeState): BridgeState {
+  if (!state.withdrawOutcomeUnknown) return state;
+  return {
+    ...state,
+    withdrawOutcomeUnknown: { ...state.withdrawOutcomeUnknown, checking: true },
   };
 }
 
@@ -2089,9 +2178,11 @@ export function setWithdrawBackToEntry(state: BridgeState): BridgeState {
 }
 
 /**
- * Return to configure step to retry a failed withdrawal
+ * Return to configure step to retry a failed withdrawal. Refused while the
+ * previous outcome is unknown — a retry could withdraw twice.
  */
 export function setWithdrawRetry(state: BridgeState): BridgeState {
+  if (state.withdrawOutcomeUnknown) return state;
   return {
     ...state,
     step: 'withdraw_configure',

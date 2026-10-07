@@ -198,6 +198,63 @@ test.describe('Deterministic UI E2E (mock mode)', () => {
     await expect(details).toContainText('Remaining balance: 0.15 DASH');
   });
 
+  /** Deep-link into withdraw with scripted landed-check verdicts and fill a valid form. */
+  async function fillWithdrawForm(page: import('@playwright/test').Page, checks: string) {
+    await page.goto(`${MOCK_QUERY}&mode=withdraw&e2eWithdrawChecks=${checks}`);
+    await page.fill('#withdraw-identity-id-input', E2E_MOCK_IDENTITY_ID);
+    await page.locator('#withdraw-identity-id-input').press('Tab');
+    await expect(page.getByText('Configure Withdrawal')).toBeVisible();
+    await page.fill('#withdraw-private-key-input', E2E_MOCK_WITHDRAW_WIF);
+    await page.locator('#withdraw-private-key-input').press('Tab');
+    await page.fill('#withdraw-address-input', E2E_MOCK_WITHDRAW_ADDRESS);
+    await page.locator('#withdraw-address-input').press('Tab');
+    await page.fill('#withdraw-amount-input', '0.1');
+    await page.locator('#withdraw-amount-input').press('Tab');
+    await expect(page.locator('#withdraw-submit-btn')).toBeEnabled();
+  }
+
+  test('withdraw with an unknown outcome blocks retry until a check confirms it did not land', async ({ page }) => {
+    await fillWithdrawForm(page, 'unknown,unknown,not_found');
+    await page.click('#withdraw-submit-btn');
+
+    await expect(page.getByText('Withdrawal Outcome Unknown')).toBeVisible();
+    await expect(page.locator('.withdraw-unknown-warning')).toContainText("Don't retry until you've confirmed");
+    await expect(page.locator('#withdraw-retry-btn')).toHaveCount(0);
+    await expect(page.locator('#withdraw-start-over-btn')).toBeVisible();
+
+    // Still unknown: no retry yet
+    await page.click('#withdraw-check-again-btn');
+    await expect(page.locator('#withdraw-check-again-btn')).toHaveText('Check Again');
+    await expect(page.getByText('Withdrawal Outcome Unknown')).toBeVisible();
+    await expect(page.locator('#withdraw-retry-btn')).toHaveCount(0);
+
+    // Confirmed not landed: the normal, retryable failure screen
+    await page.click('#withdraw-check-again-btn');
+    await expect(page.getByText('Withdrawal Failed')).toBeVisible();
+    await expect(page.locator('#withdraw-check-again-btn')).toHaveCount(0);
+    await page.click('#withdraw-retry-btn');
+    await expect(page.getByText('Configure Withdrawal')).toBeVisible();
+  });
+
+  test('withdraw with an unknown outcome switches to tracking once the withdrawal is found', async ({ page }) => {
+    await fillWithdrawForm(page, 'unknown,found');
+    await page.click('#withdraw-submit-btn');
+
+    await expect(page.getByText('Withdrawal Outcome Unknown')).toBeVisible();
+    await page.click('#withdraw-check-again-btn');
+    await expect(page.getByText('Withdrawal Complete!')).toBeVisible();
+    await expect(page.locator('#withdraw-retry-btn')).toHaveCount(0);
+  });
+
+  test('withdraw error confirmed not landed stays retryable', async ({ page }) => {
+    await fillWithdrawForm(page, 'not_found');
+    await page.click('#withdraw-submit-btn');
+
+    await expect(page.getByText('Withdrawal Failed')).toBeVisible();
+    await expect(page.locator('#withdraw-retry-btn')).toBeVisible();
+    await expect(page.locator('#withdraw-check-again-btn')).toHaveCount(0);
+  });
+
   test('standalone DPNS flow validates identity + key and completes registration', async ({ page }) => {
     await page.goto(MOCK_QUERY);
 
