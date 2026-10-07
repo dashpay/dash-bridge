@@ -442,3 +442,138 @@ test.describe('Untrusted strings are never rendered as markup (mock mode)', () =
     await expectNoInjection(page);
   });
 });
+
+test.describe('Pay with other crypto via NEAR Intents (mainnet, mock mode, stubbed 1Click API)', () => {
+  const ONE_CLICK = 'https://1click.chaindefuser.com';
+  const USDC_ETH = 'nep141:eth-0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.omft.near';
+  const NEAR_DEPOSIT_ADDRESS = '0x76b4c56085ED136a8744D52bE956396624a730E8';
+  const REFUND = '0x2527D02599Ba641c19FEa793cD0F167589a0f10D';
+  const TOKENS = [
+    { assetId: 'nep141:dash.omft.near', decimals: 8, blockchain: 'dash', symbol: 'DASH', price: 53.17 },
+    { assetId: USDC_ETH, decimals: 6, blockchain: 'eth', symbol: 'USDC', price: 1 },
+    { assetId: 'nep141:sol.omft.near', decimals: 9, blockchain: 'sol', symbol: 'SOL', price: 150 },
+  ];
+
+  /** Block everything external, then stub the 1Click API. Returns the quote requests seen. */
+  async function stubOneClick(page: import('@playwright/test').Page, quote: 'ok' | 'no-liquidity', statuses: string[] = []) {
+    const quoteBodies: Record<string, unknown>[] = [];
+    await page.route(/^https?:\/\/(?!127\.0\.0\.1|localhost)/, (route) => route.abort());
+    await page.route(`${ONE_CLICK}/v0/tokens`, (route) => route.fulfill({ json: TOKENS }));
+    await page.route(`${ONE_CLICK}/v0/quote`, (route) => {
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      quoteBodies.push(body);
+      if (quote === 'no-liquidity') {
+        return route.fulfill({ status: 400, json: { message: 'No liquidity available', correlationId: 'c1' } });
+      }
+      return route.fulfill({
+        status: 201,
+        json: {
+          quote: {
+            amountIn: '2680000',
+            amountInUsd: '2.68',
+            minAmountIn: '2650000',
+            amountOut: body.amount,
+            amountOutUsd: '2.65',
+            minAmountOut: body.amount,
+            timeEstimate: 134,
+            ...(body.dry ? {} : { depositAddress: NEAR_DEPOSIT_ADDRESS, deadline: body.deadline }),
+          },
+          quoteRequest: body,
+          signature: 'ed25519:stub',
+          correlationId: '05fe5cd8-6d68-47e7-9247-3098905014db',
+        },
+      });
+    });
+    await page.route(`${ONE_CLICK}/v0/status?**`, (route) =>
+      route.fulfill({ json: { status: statuses.length > 1 ? statuses.shift() : statuses[0] ?? 'PENDING_DEPOSIT' } }));
+    return quoteBodies;
+  }
+
+  async function openDepositScreen(page: import('@playwright/test').Page) {
+    await page.goto('/?network=mainnet&e2e=mock');
+    await page.click('#mode-create-btn');
+    await page.click('#continue-btn');
+    await expect(page.locator('.deposit-headline')).toBeVisible();
+    return (await page.locator('.address-section .address').textContent())!.trim();
+  }
+
+  test('quotes a swap into DASH, shows the payment address and follows it to delivery', async ({ page }) => {
+    const quoteBodies = await stubOneClick(page, 'ok', ['PENDING_DEPOSIT', 'PROCESSING', 'SUCCESS']);
+    const depositAddress = await openDepositScreen(page);
+    expect(depositAddress).toMatch(/^X/);
+
+    await page.click('#near-intents-toggle');
+    const select = page.locator('#near-asset-select');
+    await expect(select).toHaveValue(USDC_ETH);
+    // DASH itself is not offered as a source.
+    await expect(select.locator('option')).toHaveText(['USDC (Ethereum)', 'SOL (Solana)']);
+    await expect(page.locator('#near-amount-input')).toHaveValue('0.05');
+
+    // Inputs are validated before anything is sent.
+    await page.click('#near-quote-btn');
+    await expect(page.locator('.near-intents-error')).toContainText('Enter an address on the source chain');
+    await page.fill('#near-amount-input', '0.001');
+    await page.fill('#near-refund-input', REFUND);
+    await page.click('#near-quote-btn');
+    await expect(page.locator('.near-intents-error')).toContainText('Enter at least 0.003 DASH');
+    expect(quoteBodies).toHaveLength(0);
+
+    await page.fill('#near-amount-input', '0.05');
+    await page.click('#near-quote-btn');
+    const quote = page.locator('#near-intents-quote');
+    await expect(quote).toContainText('2.68 USDC');
+    await expect(quote).toContainText('0.05 DASH');
+    expect(quoteBodies[0]).toMatchObject({
+      dry: true,
+      swapType: 'EXACT_OUTPUT',
+      originAsset: USDC_ETH,
+      destinationAsset: 'nep141:dash.omft.near',
+      amount: '5000000',
+      recipient: depositAddress,
+      refundTo: REFUND,
+    });
+
+    await page.click('#near-confirm-btn');
+    await expect(page.locator('#near-deposit-address')).toHaveText(NEAR_DEPOSIT_ADDRESS);
+    await expect(page.locator('.near-swap-instruction')).toContainText('Send exactly 2.68 USDC on Ethereum');
+    await expect(page.locator('.near-intents-warning')).toContainText(REFUND);
+    expect(quoteBodies[1]).toMatchObject({ dry: false, recipient: depositAddress });
+
+    // Status polling follows the swap to delivery.
+    await expect(page.locator('#near-swap-status')).toContainText('DASH delivered', { timeout: 20_000 });
+
+    // The bridge's own deposit flow is untouched and carries on.
+    await page.evaluate(() => (window as { __e2eMockAdvance?: () => void }).__e2eMockAdvance?.());
+    await expect(page.getByText('Save your keys')).toBeVisible();
+  });
+
+  test('explains when NEAR Intents has no liquidity into DASH, and the DASH deposit stays usable', async ({ page }) => {
+    await stubOneClick(page, 'no-liquidity');
+    await openDepositScreen(page);
+
+    await page.click('#near-intents-toggle');
+    await page.selectOption('#near-asset-select', 'nep141:sol.omft.near');
+    await expect(page.locator('label[for="near-refund-input"]')).toHaveText('Refund address on Solana');
+    await page.fill('#near-refund-input', '7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV');
+    await page.click('#near-quote-btn');
+
+    await expect(page.locator('.near-intents-error')).toContainText("NEAR Intents can't route this asset to DASH right now");
+    await expect(page.locator('#near-quote-btn')).toBeEnabled();
+    const fallback = page.locator('.near-intents-fallback a');
+    await expect(fallback).toHaveAttribute('href', 'https://near-intents.org/?from=SOL:sol&to=DASH');
+
+    // The regular DASH deposit is unaffected.
+    await expect(page.locator('.address-section .address')).toBeVisible();
+    await page.evaluate(() => (window as { __e2eMockAdvance?: () => void }).__e2eMockAdvance?.());
+    await expect(page.getByText('Save your keys')).toBeVisible();
+  });
+
+  test('is not offered on testnet', async ({ page }) => {
+    await page.route(/^https?:\/\/(?!127\.0\.0\.1|localhost)/, (route) => route.abort());
+    await page.goto(MOCK_QUERY);
+    await page.click('#mode-create-btn');
+    await page.click('#continue-btn');
+    await expect(page.locator('.deposit-headline')).toBeVisible();
+    await expect(page.locator('#near-intents-toggle')).toHaveCount(0);
+  });
+});

@@ -146,12 +146,39 @@ import {
   setFaucetRequesting,
   setFaucetSuccess,
   setFaucetError,
+  // NEAR Intents state functions
+  depositMinimumDuffs,
+  toggleNearIntentsPanel,
+  setNearIntentsTokensLoading,
+  setNearIntentsTokens,
+  setNearIntentsError,
+  setNearIntentsAssetFilter,
+  setNearIntentsOriginAsset,
+  setNearIntentsAmountInput,
+  setNearIntentsRefundAddress,
+  setNearIntentsQuoting,
+  setNearIntentsQuote,
+  setNearIntentsConfirming,
+  setNearIntentsSwap,
+  setNearSwapStatus,
+  clearNearIntentsSwap,
+  shouldRecheckAfterNearSwap,
 } from './ui/index.js';
 import {
   getFaucetStatus,
   solveCap,
   requestTestnetFunds,
 } from './api/faucet.js';
+import {
+  fetchNearIntentsTokens,
+  formatUnits,
+  getNearSwapStatus,
+  isNearSwapExpired,
+  parseDashToDuffs,
+  requestNearIntentsQuote,
+  validateRefundAddress,
+  type NearQuoteRequest,
+} from './api/near-intents.js';
 import { isContestedUsername } from './platform/dpns.js';
 import {
   findMatchingKeyIndex,
@@ -795,8 +822,45 @@ function setupEventListeners(container: HTMLElement) {
     faucetBtn.addEventListener('click', requestFaucetFunds);
   }
 
+  // NEAR Intents panel (mainnet deposit screen)
+  container.querySelector('#near-intents-toggle')?.addEventListener('click', () => {
+    updateState(toggleNearIntentsPanel(state));
+    if (state.nearIntents?.open) void loadNearIntentsTokens();
+  });
+  container.querySelector('#near-tokens-retry-btn')?.addEventListener('click', () => {
+    void loadNearIntentsTokens();
+  });
+  container.querySelector('#near-asset-filter')?.addEventListener('input', (e) => {
+    updateState(setNearIntentsAssetFilter(state, (e.target as HTMLInputElement).value));
+  });
+  container.querySelector('#near-asset-select')?.addEventListener('change', (e) => {
+    updateState(setNearIntentsOriginAsset(state, (e.target as HTMLSelectElement).value));
+  });
+  // Typing only needs a re-render when it clears a quote or error on screen;
+  // otherwise just record the value (re-rendering rebuilds the QR codes).
+  const setNearFormValue = (next: BridgeState): void => {
+    if (state.nearIntents?.quote || state.nearIntents?.error) updateState(next);
+    else state = next;
+  };
+  container.querySelector('#near-amount-input')?.addEventListener('input', (e) => {
+    setNearFormValue(setNearIntentsAmountInput(state, (e.target as HTMLInputElement).value));
+  });
+  container.querySelector('#near-refund-input')?.addEventListener('input', (e) => {
+    setNearFormValue(setNearIntentsRefundAddress(state, (e.target as HTMLInputElement).value));
+  });
+  container.querySelector('#near-quote-btn')?.addEventListener('click', () => {
+    void requestNearQuote(true);
+  });
+  container.querySelector('#near-confirm-btn')?.addEventListener('click', () => {
+    void requestNearQuote(false);
+  });
+  container.querySelector('#near-swap-reset-btn')?.addEventListener('click', () => {
+    stopNearSwapPolling();
+    updateState(clearNearIntentsSwap(state));
+  });
+
   // Deposit method toggle (testnet collapsible section)
-  const depositToggle = container.querySelector('.deposit-method-toggle');
+  const depositToggle = container.querySelector('.deposit-method-toggle:not(#near-intents-toggle)');
   if (depositToggle) {
     depositToggle.addEventListener('click', () => {
       const content = container.querySelector('.deposit-method-content');
@@ -4071,6 +4135,175 @@ async function requestFaucetFunds() {
     const message = error instanceof Error ? error.message : 'Failed to connect to faucet';
     updateState(setFaucetError(state, message));
   }
+}
+
+// ============================================================================
+// NEAR Intents ("Pay with other crypto", mainnet)
+// ============================================================================
+
+const NEAR_STATUS_POLL_MS = 5000;
+/** Recheck rounds started on the user's behalf after a delivered swap. */
+const NEAR_MAX_AUTO_RECHECKS = 3;
+/** How long to keep polling an unfunded swap after its deadline. */
+const NEAR_EXPIRED_POLL_GRACE_MS = 30 * 60 * 1000;
+/** A confirmed quote may cost at most this much more than the one the user approved (basis points). */
+const NEAR_MAX_PRICE_INCREASE_BPS = 200n;
+let nearPollController: AbortController | undefined;
+
+function isOnDepositStep(): boolean {
+  return state.step === 'awaiting_deposit' || state.step === 'detecting_deposit';
+}
+
+async function loadNearIntentsTokens(): Promise<void> {
+  if (state.nearIntents?.tokens || state.nearIntents?.busy === 'tokens') return;
+  updateState(setNearIntentsTokensLoading(state));
+  try {
+    const tokens = await fetchNearIntentsTokens();
+    updateState(setNearIntentsTokens(state, tokens));
+  } catch (error) {
+    updateState(setNearIntentsError(state, extractErrorMessage(error)));
+  }
+}
+
+/** Validated quote inputs from the form, or a message saying what to fix. */
+function readNearQuoteInputs(): Omit<NearQuoteRequest, 'dry'> | string {
+  const near = state.nearIntents;
+  const originAsset = near?.tokens?.find((t) => t.assetId === near.originAssetId);
+  if (!near || !originAsset) return 'Choose an asset to pay with.';
+  if (!state.depositAddress) return 'No deposit address yet.';
+  const amountOutDuffs = parseDashToDuffs(near.amountInput);
+  if (amountOutDuffs === null) return 'Enter a valid DASH amount (up to 8 decimal places).';
+  const minimum = depositMinimumDuffs(state);
+  if (amountOutDuffs < minimum) return `Enter at least ${formatUnits(String(minimum), 8)} DASH.`;
+  const refundError = validateRefundAddress(near.refundAddress);
+  if (refundError) return refundError;
+  return { originAsset, amountOutDuffs, recipient: state.depositAddress, refundTo: near.refundAddress.trim() };
+}
+
+/**
+ * Price the swap (dry) or, once the user confirms, open it and show the
+ * payment address. Results for a deposit address the user has moved past are
+ * dropped.
+ */
+async function requestNearQuote(dry: boolean): Promise<void> {
+  if (state.nearIntents?.busy) return;
+  const inputs = readNearQuoteInputs();
+  if (typeof inputs === 'string') {
+    updateState(setNearIntentsError(state, inputs));
+    return;
+  }
+  const approved = state.nearIntents?.quote;
+  updateState(dry ? setNearIntentsQuoting(state) : setNearIntentsConfirming(state));
+  const stillCurrent = () => isOnDepositStep() && state.depositAddress === inputs.recipient && Boolean(state.nearIntents);
+  try {
+    const quote = await requestNearIntentsQuote({ ...inputs, dry });
+    if (!stillCurrent()) return;
+    if (dry) {
+      updateState(setNearIntentsQuote(state, quote));
+      return;
+    }
+    // The user approved a price; don't show a payment address that costs
+    // noticeably more. Show the new price for another confirmation instead.
+    if (
+      approved &&
+      BigInt(quote.amountIn) * 10_000n > BigInt(approved.amountIn) * (10_000n + NEAR_MAX_PRICE_INCREASE_BPS)
+    ) {
+      updateState(setNearIntentsError(
+        setNearIntentsQuote(state, { ...quote, depositAddress: undefined, depositMemo: undefined }),
+        'The price changed since your quote. Review the new amount and confirm again.'
+      ));
+      return;
+    }
+    const { originAsset } = inputs;
+    updateState(setNearIntentsSwap(state, {
+      depositAddress: quote.depositAddress!,
+      depositMemo: quote.depositMemo,
+      recipient: inputs.recipient,
+      refundTo: inputs.refundTo,
+      originAssetId: originAsset.assetId,
+      symbol: originAsset.symbol,
+      blockchain: originAsset.blockchain,
+      decimals: originAsset.decimals,
+      amountIn: quote.amountIn,
+      amountOut: quote.amountOut,
+      deadline: quote.deadline,
+      correlationId: quote.correlationId,
+      status: 'PENDING_DEPOSIT',
+    }));
+    startNearSwapPolling();
+  } catch (error) {
+    console.warn('NEAR Intents quote failed:', error);
+    if (stillCurrent()) updateState(setNearIntentsError(state, extractErrorMessage(error)));
+  }
+}
+
+function stopNearSwapPolling(): void {
+  nearPollController?.abort();
+  nearPollController = undefined;
+}
+
+function startNearSwapPolling(): void {
+  stopNearSwapPolling();
+  const swap = state.nearIntents?.swap;
+  if (!swap) return;
+  const controller = new AbortController();
+  nearPollController = controller;
+  void pollNearSwap(swap.depositAddress, swap.depositMemo, controller.signal);
+}
+
+/**
+ * Track the swap until it settles. Keeps running while the deposit screen
+ * shows "Check Again" after the deposit poll's own timeout, and once DASH is
+ * delivered restarts that poll so the bridge continues without a click.
+ */
+async function pollNearSwap(depositAddress: string, depositMemo: string | undefined, signal: AbortSignal): Promise<void> {
+  const tracking = () =>
+    !signal.aborted &&
+    isOnDepositStep() &&
+    state.nearIntents?.swap?.depositAddress === depositAddress &&
+    state.nearIntents.swap.recipient === state.depositAddress;
+  let autoRechecks = 0;
+  let expiryShown = false;
+
+  while (tracking()) {
+    const current = state.nearIntents!.swap!;
+    if (current.status === 'SUCCESS') {
+      // Delivered: nothing left to ask NEAR Intents. Just make sure a deposit
+      // poll is running until the bridge moves past the deposit step.
+      if (shouldRecheckAfterNearSwap(state) && autoRechecks < NEAR_MAX_AUTO_RECHECKS) {
+        autoRechecks += 1;
+        recheckDeposit().catch((error) => console.warn('Deposit recheck after NEAR swap failed:', error));
+      }
+    } else {
+      if (isNearSwapExpired(current)) {
+        // Re-render once so the stale payment address is hidden. Keep
+        // listening a while in case a last-second payment still shows up.
+        if (!expiryShown) {
+          expiryShown = true;
+          updateState(state);
+        }
+        if (Date.now() > Date.parse(current.deadline) + NEAR_EXPIRED_POLL_GRACE_MS) break;
+      }
+      try {
+        const status = await getNearSwapStatus(depositAddress, depositMemo, signal);
+        if (!tracking()) break;
+        const swap = state.nearIntents!.swap!;
+        if (swap.status !== status || swap.statusError) {
+          updateState(setNearSwapStatus(state, depositAddress, { status }));
+        }
+        if (status === 'REFUNDED' || status === 'FAILED') break;
+        if (status === 'SUCCESS') continue;
+      } catch (error) {
+        if (!tracking()) break;
+        const statusError = extractErrorMessage(error);
+        if (state.nearIntents!.swap!.statusError !== statusError) {
+          updateState(setNearSwapStatus(state, depositAddress, { statusError }));
+        }
+      }
+    }
+    await abortableSleep(NEAR_STATUS_POLL_MS, signal);
+  }
+  if (nearPollController?.signal === signal) nearPollController = undefined;
 }
 
 // Initialize when DOM is ready
