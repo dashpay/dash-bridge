@@ -6,6 +6,7 @@ import { generateQRCodeDataUrl } from './qrcode.js';
 import { privateKeyToWif } from '../utils/wif.js';
 import { formatCreditsAsDash, formatCredits, MIN_WITHDRAWAL_CREDITS } from '../utils/credits.js';
 import { WithdrawalStatus } from '../platform/withdrawal-status.js';
+import { isIdentityRegistrationUnconfirmedError } from '../platform/identity-confirm.js';
 import { bytesToHex } from '../utils/hex.js';
 import { getNetwork, getAvailableNetworks } from '../config.js';
 import { getAssetLockDerivationPath } from '../crypto/hd.js';
@@ -1139,6 +1140,7 @@ function buildErrorDiagnostics(state: BridgeState): Record<string, unknown> {
 
   // Identity context
   if (state.identityId) diag.identityId = state.identityId;
+  if (state.unconfirmedIdentityId) diag.unconfirmedIdentityId = state.unconfirmedIdentityId;
   if (state.targetIdentityId) diag.targetIdentityId = state.targetIdentityId;
   if (state.recipientPlatformAddress) diag.recipientPlatformAddress = state.recipientPlatformAddress;
 
@@ -1209,6 +1211,7 @@ function renderErrorStep(state: BridgeState): HTMLElement {
   if (diag.depositAddress) techLines.push(`Deposit: ${diag.depositAddress}`);
   if (diag.txid) techLines.push(`TxID: ${diag.txid}`);
   if (diag.identityId) techLines.push(`Identity: ${diag.identityId}`);
+  if (diag.unconfirmedIdentityId) techLines.push(`Identity (submitted, unconfirmed): ${diag.unconfirmedIdentityId}`);
   if (diag.targetIdentityId) techLines.push(`Target Identity: ${diag.targetIdentityId}`);
   if (diag.recipientPlatformAddress) techLines.push(`Recipient: ${diag.recipientPlatformAddress}`);
   if (diag.stack) techLines.push(`\nStack Trace:\n${diag.stack}`);
@@ -1229,6 +1232,32 @@ function renderErrorStep(state: BridgeState): HTMLElement {
     `
     : '';
 
+  // An identity registration that was submitted but not confirmed can be
+  // resubmitted safely with the same asset lock proof.
+  const retryRegistrationHtml =
+    state.mode === 'create' &&
+    isIdentityRegistrationUnconfirmedError(state.error) &&
+    state.assetLockProof &&
+    state.assetLockKeyPair
+      ? `
+      <div class="error-fallback">
+        <p class="error-fallback-hint">Platform may still be processing your registration. Wait a minute, then retry — it is safe and cannot spend your deposit twice.</p>
+        <button id="retry-registration-btn" class="primary-btn">Retry Registration</button>
+      </div>
+    `
+      : '';
+
+  // Once an asset lock key exists, funds may be in flight: keep the
+  // recovery backup one click away on every error screen.
+  const keyBackupHtml = state.assetLockKeyPair
+    ? `
+      <div class="backup-section">
+        <button id="download-keys-btn" class="secondary-btn">Download Key Backup</button>
+        <p class="backup-warning">Keep this backup — it is needed to recover your funds or identity.</p>
+      </div>
+    `
+    : '';
+
   div.innerHTML = `
     <div class="error-icon">❌</div>
     <h2>Error</h2>
@@ -1237,7 +1266,9 @@ function renderErrorStep(state: BridgeState): HTMLElement {
     ${failedStepHtml}
     <p class="error-message">${escapeHtml(errorMessage)}</p>
     ${techDetailsHtml}
+    ${retryRegistrationHtml}
     ${chainlockFallbackHtml}
+    ${keyBackupHtml}
     <div class="error-actions">
       <button id="retry-btn" class="secondary-btn">Try Again</button>
       <button id="copy-error-btn" class="secondary-btn">Copy Error Details</button>
@@ -1285,7 +1316,10 @@ export function createKeyBackup(state: BridgeState): string {
   // For create mode: include mnemonic and identity keys
   if (!isTopUp && !isSendToAddress) {
     backup.mnemonic = state.mnemonic;
-    backup.identityId = state.identityId;
+    backup.identityId = state.identityId ?? state.unconfirmedIdentityId;
+    if (!state.identityId && state.unconfirmedIdentityId) {
+      backup.identityStatus = 'submitted, not yet confirmed';
+    }
     backup.identityKeys = state.identityKeys.map((key) => ({
       id: key.id,
       name: key.name,
@@ -2597,11 +2631,14 @@ function renderWithdrawCompleteStep(state: BridgeState): HTMLElement {
 
   const result = state.withdrawResult;
   const isSuccess = result?.success === true;
+  const unknownOutcome = state.withdrawOutcomeUnknown;
   const status = state.withdrawStatus;
 
   const headline = document.createElement('h2');
   headline.className = 'manage-headline';
-  if (!isSuccess) {
+  if (unknownOutcome) {
+    headline.textContent = 'Withdrawal Outcome Unknown';
+  } else if (!isSuccess) {
     headline.textContent = 'Withdrawal Failed';
   } else if (status === WithdrawalStatus.EXPIRED) {
     headline.textContent = 'Withdrawal Expired';
@@ -2647,6 +2684,32 @@ function renderWithdrawCompleteStep(state: BridgeState): HTMLElement {
       msg.textContent = state.withdrawStatusError;
       div.appendChild(msg);
     }
+  } else if (unknownOutcome) {
+    const box = document.createElement('div');
+    box.className = 'withdraw-error-msg withdraw-unknown-msg';
+
+    const warning = document.createElement('p');
+    warning.className = 'withdraw-unknown-warning';
+    warning.textContent = "We couldn't confirm whether this withdrawal was submitted. Don't retry until you've confirmed — retrying could withdraw the amount twice.";
+    box.appendChild(warning);
+
+    const guidance = document.createElement('p');
+    guidance.textContent = 'Check your identity balance or the destination Core wallet, or use Check Again to look for the withdrawal on the network.';
+    box.appendChild(guidance);
+
+    const detail = document.createElement('p');
+    detail.className = 'error-detail';
+    detail.textContent = `${result?.error || 'Unknown error'} (${ErrorCodes.WITHDRAW})`;
+    box.appendChild(detail);
+
+    div.appendChild(box);
+
+    if (unknownOutcome.checking) {
+      const checking = document.createElement('p');
+      checking.className = 'withdraw-pending-msg';
+      checking.textContent = 'Checking the network for the withdrawal...';
+      div.appendChild(checking);
+    }
   } else {
     const errorMsg = document.createElement('div');
     errorMsg.className = 'withdraw-error-msg';
@@ -2667,7 +2730,14 @@ function renderWithdrawCompleteStep(state: BridgeState): HTMLElement {
   const actionButtons = document.createElement('div');
   actionButtons.className = 'withdraw-action-buttons nav-buttons';
 
-  if (!isSuccess) {
+  if (unknownOutcome) {
+    const checkAgainBtn = document.createElement('button');
+    checkAgainBtn.id = 'withdraw-check-again-btn';
+    checkAgainBtn.className = 'primary-btn';
+    checkAgainBtn.textContent = unknownOutcome.checking ? 'Checking...' : 'Check Again';
+    checkAgainBtn.disabled = unknownOutcome.checking;
+    actionButtons.appendChild(checkAgainBtn);
+  } else if (!isSuccess) {
     const retryBtn = document.createElement('button');
     retryBtn.id = 'withdraw-retry-btn';
     retryBtn.className = 'primary-btn';

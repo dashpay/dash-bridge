@@ -344,6 +344,12 @@ export interface BridgeState {
   /** When true, the error screen offers a "Use chainlock proof instead" recovery button. */
   chainlockFallbackAvailable?: boolean;
   identityId?: string;
+  /**
+   * Identity ID derived from the asset lock when registration was submitted
+   * but not confirmed. Only for the error-screen key backup and diagnostics;
+   * NOT a completed identity (that is `identityId`).
+   */
+  unconfirmedIdentityId?: string;
   error?: Error;
   /** Error code for user-facing display (e.g., "ERR-1006") */
   errorCode?: string;
@@ -521,6 +527,13 @@ export interface BridgeState {
   withdrawStatus?: number;
   /** Withdraw: status polling problem / timeout explanation (informational, not a failure) */
   withdrawStatusError?: string;
+  /**
+   * Withdraw: set when the submission errored AND the follow-up lookups could
+   * not tell whether the withdrawal landed. Retrying is unsafe in this state
+   * (it could withdraw twice); the UI offers "Check Again" instead.
+   * `sinceMs` is the lower bound used to match the withdrawal document.
+   */
+  withdrawOutcomeUnknown?: { sinceMs: number; checking: boolean };
 
   // Faucet request state
   /** Current status of faucet request */
