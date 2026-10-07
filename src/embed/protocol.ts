@@ -182,6 +182,9 @@ export function sanitizeAppName(value: string | null | undefined): string | unde
   if (!value) return undefined;
   const stripped = value.replace(/[\p{Cc}\p{Cf}]/gu, '').trim();
   const cleaned = Array.from(stripped).slice(0, MAX_APP_NAME_LENGTH).join('').trim();
+  // A name that looks like a URL could pass for a different origin next to
+  // the real one in the banner; show only the verified origin instead.
+  if (cleaned.includes('://')) return undefined;
   return cleaned || undefined;
 }
 

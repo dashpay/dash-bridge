@@ -148,6 +148,16 @@ Popup mode needs `window.opener`. If your app sends
 `Cross-Origin-Opener-Policy: same-origin`, the browser cuts that link and the
 bridge cannot report back. Use `same-origin-allow-popups` instead.
 
+## Mainnet: DashPay app recommendation
+
+On mainnet the bridge first recommends the DashPay mobile app, which keeps
+keys on the user's phone. In embed mode the screen also says that an identity
+created in DashPay is not sent back to your app. To finish the request, the
+user ticks an acknowledgement and continues in the browser. Until then the
+SDK reports `progress: configuring`, and the request stays pending. Cancel in
+the bridge banner, or closing the popup, rejects with `cancelled`. Testnet
+skips this screen.
+
 ## Bridge URL parameters
 
 The SDK builds these parameters for you. They are listed here for integrators

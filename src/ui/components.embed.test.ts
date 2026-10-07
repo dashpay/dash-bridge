@@ -92,7 +92,9 @@ describe('mainnet DashPay recommendation in embed mode', () => {
     render({ ...base, embed: { kind: 'popup', origin: 'https://app.example' } }, div);
     expect(div.querySelector('#back-btn')).toBeNull();
     expect(div.querySelector('#mobile-app-continue-browser-btn')).not.toBeNull();
+    expect(div.querySelector('.mobile-app-embed-note')?.textContent).toContain('not sent back to https://app.example');
     render(base, div);
     expect(div.querySelector('#back-btn')).not.toBeNull();
+    expect(div.querySelector('.mobile-app-embed-note')).toBeNull();
   });
 });

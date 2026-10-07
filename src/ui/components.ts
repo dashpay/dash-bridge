@@ -410,7 +410,7 @@ function renderEmbedBanner(state: BridgeState): HTMLElement {
   const who = embed.appName
     ? `<strong><bdi>${escapeHtml(embed.appName)}</bdi></strong> <span class="embed-origin">(${escapeHtml(embed.origin)})</span>`
     : `<strong>${escapeHtml(embed.origin)}</strong>`;
-  const cancel = !canCancel(state.step)
+  const cancel = !canCancel(state)
     ? ''
     : '<button id="embed-cancel-btn" class="embed-cancel-btn" type="button">Cancel</button>';
   banner.innerHTML = `
@@ -617,6 +617,7 @@ function renderMobileAppRecommendedStep(state: BridgeState): HTMLElement {
       <li>Browser extensions or a compromised computer can read a web page's memory, including keys created on this page.</li>
       <li>The app also registers your username and backs up your wallet with a recovery phrase.</li>
     </ul>
+    ${state.embed ? `<p class="mobile-app-embed-note">An identity created in DashPay is not sent back to <strong>${escapeHtml(state.embed.origin)}</strong>. To finish this request, continue in the browser below.</p>` : ''}
   `;
   div.appendChild(intro);
 

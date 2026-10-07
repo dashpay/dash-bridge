@@ -140,6 +140,7 @@ describe('sanitizeAppName / isValidRequestId', () => {
     expect(sanitizeAppName('x'.repeat(100))).toHaveLength(64);
     expect(sanitizeAppName('   ')).toBeUndefined();
     expect(sanitizeAppName(null)).toBeUndefined();
+    expect(sanitizeAppName('Dash Wallet (https://dashpay.org)')).toBeUndefined();
   });
 
   it('validates request IDs', () => {
