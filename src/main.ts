@@ -2550,6 +2550,7 @@ async function approveLogin(): Promise<void> {
   try {
     const result = await signLogin({
       origin: session.origin,
+      returnUrl: login.returnUrl,
       identityId: loginIdentityId,
       statement: login.statement,
       network: session.network,

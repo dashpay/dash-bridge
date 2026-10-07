@@ -204,9 +204,10 @@ test.describe('Sign in with Dash', () => {
   const loginQuery = (kind: string, extra = '') =>
     `?embed=${kind}&origin=${encodeURIComponent(HOST_ORIGIN)}&request=login&nonce=${NONCE}` +
     `&network=testnet&e2e=mock&app=Host%20App&statement=Welcome%20back${extra}`;
-  const verifyForHost = (result: unknown) =>
+  const verifyForHost = (result: unknown, expectedReturnUrl?: string) =>
     verifyLogin(result, {
       expectedOrigin: HOST_ORIGIN,
+      expectedReturnUrl,
       expectedNonce: NONCE,
       network: 'testnet',
       identityPublicKeys: E2E_MOCK_LOGIN_PUBLIC_KEYS,
@@ -273,6 +274,7 @@ test.describe('Sign in with Dash', () => {
     expect(login).toMatchObject({ source: 'dash-bridge', version: 1, request: 'login', requestId: 'lg1', identityId: E2E_MOCK_IDENTITY_ID, keyId: 1 });
     expect(JSON.stringify(msgs)).not.toContain(E2E_MOCK_LOGIN_HIGH_WIF);
     expect(verifyForHost(login)).toEqual({ ok: true, identityId: E2E_MOCK_IDENTITY_ID, keyId: 1 });
+    expect(String(login.message)).not.toContain('Redirect URI:');
     // Bound to the host origin: useless to any other site.
     const forOtherSite = { expectedOrigin: 'https://evil.test', expectedNonce: NONCE, network: 'testnet', identityPublicKeys: E2E_MOCK_LOGIN_PUBLIC_KEYS };
     expect(verifyLogin(login, forOtherSite)).toEqual({ ok: false, reason: 'origin_mismatch' });
@@ -352,7 +354,10 @@ test.describe('Sign in with Dash', () => {
       const url = new URL(page.url());
       expect(url.hash).not.toContain(E2E_MOCK_LOGIN_HIGH_WIF);
       const result = parseLoginFragment(url.hash) as LoginResult;
-      expect(verifyForHost(result)).toEqual({ ok: true, identityId: E2E_MOCK_IDENTITY_ID, keyId: 1 });
+      expect(result.message.split('\n')).toContain(`Redirect URI: ${RETURN_URL}`);
+      // A popup-only verifier (no expectedReturnUrl) must refuse a redirect proof.
+      expect(verifyForHost(result)).toEqual({ ok: false, reason: 'return_url_mismatch' });
+      expect(verifyForHost(result, RETURN_URL)).toEqual({ ok: true, identityId: E2E_MOCK_IDENTITY_ID, keyId: 1 });
     });
 
     test('cancel lands on returnUrl with #dash_login_error=cancelled', async ({ page, baseURL }) => {

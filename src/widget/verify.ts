@@ -12,10 +12,11 @@ import {
   LOGIN_CLOCK_SKEW_MS,
   LOGIN_TTL_MS,
   buildLoginMessage,
-  extractLoginOrigin,
-  extractLoginStatement,
   isLoginTime,
+  parseLoginMessage,
+  parseReturnUrl,
   pickLoginResult,
+  sanitizeStatement,
   type LoginResult,
 } from '../embed/login.js';
 
@@ -56,7 +57,15 @@ export interface VerifyLoginOptions {
   network: string;
   /** The identity's public keys, fetched from Platform by your server (never from the client). */
   identityPublicKeys: readonly VerifierPublicKey[];
-  /** If set, the message must carry exactly this statement. */
+  /**
+   * Redirect-mode apps: the callback URL you send users back to (the
+   * `returnUrl` you passed to `loginRedirectUrl`, absolute). A redirect proof
+   * is only accepted with a matching value, and a popup proof is refused when
+   * this is set. Popup-only apps must leave it out, so they never accept a
+   * redirect proof.
+   */
+  expectedReturnUrl?: string;
+  /** If set, the message must carry this statement (compared after the bridge's sanitizing). */
   expectedStatement?: string;
   /** Defaults to the current time. Must be a valid time. */
   now?: Date | number;
@@ -70,6 +79,7 @@ export type VerifyLoginFailure =
   | 'network_mismatch'
   | 'origin_mismatch'
   | 'statement_mismatch'
+  | 'return_url_mismatch'
   | 'message_mismatch'
   | 'not_yet_valid'
   | 'expired'
@@ -136,16 +146,26 @@ export function verifyLogin(result: unknown, options: VerifyLoginOptions): Verif
 
   if (login.nonce !== options.expectedNonce) return fail('nonce_mismatch');
   if (login.network !== options.network) return fail('network_mismatch');
-  if (extractLoginOrigin(login.message) !== options.expectedOrigin) return fail('origin_mismatch');
-  const statement = extractLoginStatement(login.message);
-  if (options.expectedStatement !== undefined && statement !== options.expectedStatement) {
+  const parsed = parseLoginMessage(login.message);
+  if (!parsed || parsed.origin !== options.expectedOrigin) return fail('origin_mismatch');
+  const { statement, returnUrl } = parsed;
+  if (options.expectedStatement !== undefined && statement !== sanitizeStatement(options.expectedStatement)) {
     return fail('statement_mismatch');
+  }
+  // Bind the proof to how it was delivered: a redirect proof only to the
+  // callback the app expects, and never a redirect proof to a popup-only app
+  // (or a popup proof to a redirect app).
+  if (returnUrl !== undefined || options.expectedReturnUrl !== undefined) {
+    const expected =
+      options.expectedReturnUrl === undefined ? undefined : parseReturnUrl(options.expectedReturnUrl, options.expectedOrigin);
+    if (!expected || returnUrl !== expected) return fail('return_url_mismatch');
   }
 
   let rebuilt: string;
   try {
     rebuilt = buildLoginMessage({
       origin: options.expectedOrigin,
+      returnUrl,
       identityId: login.identityId,
       statement,
       network: options.network,

@@ -81,9 +81,59 @@ describe('verifyLogin', () => {
     expect(verifyLogin(high, { ...OPTIONS, expectedStatement: 'Other' })).toEqual({ ok: false, reason: 'statement_mismatch' });
   });
 
-  it('enforces the validity window with 60s of clock skew', () => {
-    expect(verifyLogin(high, { ...OPTIONS, now: NOW - 60_000 }).ok).toBe(true);
-    expect(verifyLogin(high, { ...OPTIONS, now: NOW - 61_000 })).toEqual({ ok: false, reason: 'not_yet_valid' });
+  it('compares expectedStatement after the same sanitizing the bridge applies', () => {
+    expect(verifyLogin(high, { ...OPTIONS, expectedStatement: '  Welcome\n  back ' }).ok).toBe(true);
+    expect(verifyLogin(high, { ...OPTIONS, expectedStatement: 'Welcome\u202e back' }).ok).toBe(true);
+  });
+
+  describe('redirect proofs (Redirect URI)', () => {
+    const RETURN_URL = `${ORIGIN}/auth/callback`;
+    let redirect: LoginResult;
+    beforeAll(async () => {
+      redirect = await signLogin({
+        origin: ORIGIN,
+        returnUrl: RETURN_URL,
+        identityId: E2E_MOCK_IDENTITY_ID,
+        network: 'testnet',
+        nonce: NONCE,
+        keyId: 1,
+        privateKeyWif: E2E_MOCK_LOGIN_HIGH_WIF,
+        now: NOW,
+      });
+    });
+
+    it('signs the Redirect URI and verifies with the matching expectedReturnUrl', () => {
+      expect(redirect.message).toContain(`\nRedirect URI: ${RETURN_URL}\n`);
+      expect(verifyLogin(redirect, { ...OPTIONS, expectedReturnUrl: RETURN_URL })).toEqual({
+        ok: true,
+        identityId: E2E_MOCK_IDENTITY_ID,
+        keyId: 1,
+      });
+    });
+
+    it('is rejected by a popup-only app that passes no expectedReturnUrl', () => {
+      expect(verifyLogin(redirect, OPTIONS)).toEqual({ ok: false, reason: 'return_url_mismatch' });
+    });
+
+    it('is rejected for another callback URL', () => {
+      for (const expectedReturnUrl of [`${ORIGIN}/r/abc123`, `${ORIGIN}/auth/callback/`, 'https://evil.example/auth/callback', 'not a url']) {
+        expect(verifyLogin(redirect, { ...OPTIONS, expectedReturnUrl })).toEqual({ ok: false, reason: 'return_url_mismatch' });
+      }
+    });
+
+    it('cannot be turned into a popup proof by dropping the line (signature no longer matches)', () => {
+      const message = redirect.message.replace(`Redirect URI: ${RETURN_URL}\n`, '');
+      expect(verifyLogin({ ...redirect, message }, OPTIONS)).toEqual({ ok: false, reason: 'invalid_signature' });
+    });
+
+    it('a popup proof is rejected by a redirect app', () => {
+      expect(verifyLogin(high, { ...OPTIONS, expectedReturnUrl: RETURN_URL })).toEqual({ ok: false, reason: 'return_url_mismatch' });
+    });
+  });
+
+  it('enforces the validity window with 5 minutes of clock skew', () => {
+    expect(verifyLogin(high, { ...OPTIONS, now: NOW - 5 * 60_000 }).ok).toBe(true);
+    expect(verifyLogin(high, { ...OPTIONS, now: NOW - 5 * 60_000 - 1 })).toEqual({ ok: false, reason: 'not_yet_valid' });
     expect(verifyLogin(high, { ...OPTIONS, now: NOW + 10 * 60_000 - 1 }).ok).toBe(true);
     expect(verifyLogin(high, { ...OPTIONS, now: NOW + 10 * 60_000 })).toEqual({ ok: false, reason: 'expired' });
     expect(verifyLogin(high, { ...OPTIONS, now: new Date(NOW + 60_000) }).ok).toBe(true);

@@ -2,13 +2,12 @@ import { describe, it, expect } from 'vitest';
 import {
   buildLoginMessage,
   buildLoginRedirectUrl,
-  extractLoginOrigin,
-  extractLoginStatement,
   formatLoginTime,
   isLoginTime,
   isValidNonce,
   loginValidity,
   parseLoginFragment,
+  parseLoginMessage,
   parseReturnUrl,
   pickLoginResult,
   sanitizeStatement,
@@ -72,6 +71,32 @@ describe('buildLoginMessage', () => {
     );
   });
 
+  it('matches the golden redirect-mode message, with the Redirect URI after URI', () => {
+    expect(buildLoginMessage({ ...FIELDS, statement: 'Hi', returnUrl: 'https://app.example/auth/callback' })).toBe(
+      'app.example wants you to sign in with your Dash Platform identity:\n' +
+        '4ufjwRfdhMM87uBaGmTvesgLm6k2Q2r7SVyZdTUzFebA\n' +
+        '\n' +
+        'Hi\n' +
+        '\n' +
+        'URI: https://app.example\n' +
+        'Redirect URI: https://app.example/auth/callback\n' +
+        'Network: testnet\n' +
+        'Key ID: 1\n' +
+        'Nonce: abcdefghijklmnop1234\n' +
+        'Issued At: 2026-10-07T12:00:00Z\n' +
+        'Expiration Time: 2026-10-07T12:10:00Z',
+    );
+  });
+
+  it.each([
+    'https://evil.example/cb',
+    'https://app.example/cb?x=1',
+    'https://app.example/cb#frag',
+    'https://app.example/cb\nNetwork: mainnet',
+  ])('refuses the Redirect URI %j', (returnUrl) => {
+    expect(() => buildLoginMessage({ ...FIELDS, returnUrl })).toThrow('invalid return URL');
+  });
+
   it('treats an empty statement like no statement', () => {
     expect(buildLoginMessage({ ...FIELDS, statement: '' })).toBe(buildLoginMessage(FIELDS));
   });
@@ -93,17 +118,29 @@ describe('buildLoginMessage', () => {
     expect(() => buildLoginMessage({ ...FIELDS, ...override } as LoginMessageFields)).toThrow();
   });
 
-  it('round-trips the statement and origin', () => {
-    const message = buildLoginMessage({ ...FIELDS, statement: 'Hello' });
-    expect(extractLoginStatement(message)).toBe('Hello');
-    expect(extractLoginOrigin(message)).toBe('https://app.example');
-    expect(extractLoginStatement(buildLoginMessage(FIELDS))).toBeUndefined();
-    expect(extractLoginOrigin(buildLoginMessage(FIELDS))).toBe('https://app.example');
+  it('parses origin, statement and Redirect URI back by line prefix', () => {
+    const returnUrl = 'https://app.example/cb';
+    expect(parseLoginMessage(buildLoginMessage(FIELDS))).toEqual({ origin: 'https://app.example' });
+    expect(parseLoginMessage(buildLoginMessage({ ...FIELDS, statement: 'Hello' }))).toEqual({
+      origin: 'https://app.example',
+      statement: 'Hello',
+    });
+    expect(parseLoginMessage(buildLoginMessage({ ...FIELDS, returnUrl }))).toEqual({ origin: 'https://app.example', returnUrl });
+    expect(parseLoginMessage(buildLoginMessage({ ...FIELDS, statement: 'Hello', returnUrl }))).toEqual({
+      origin: 'https://app.example',
+      statement: 'Hello',
+      returnUrl,
+    });
+    expect(parseLoginMessage('no uri line here')).toBeNull();
   });
 
-  it('reads the URI line by position, so a statement cannot spoof it', () => {
-    const message = buildLoginMessage({ ...FIELDS, statement: 'URI: https://evil.example' });
-    expect(extractLoginOrigin(message)).toBe('https://app.example');
+  it('is not fooled by a statement that looks like a URI or Redirect URI line', () => {
+    for (const statement of ['URI: https://evil.example', 'Redirect URI: https://evil.example/x']) {
+      expect(parseLoginMessage(buildLoginMessage({ ...FIELDS, statement }))).toEqual({
+        origin: 'https://app.example',
+        statement,
+      });
+    }
   });
 });
 
@@ -155,7 +192,9 @@ describe('isValidNonce', () => {
 describe('parseReturnUrl', () => {
   it('accepts URLs on exactly the declared origin', () => {
     expect(parseReturnUrl('https://app.example/cb', 'https://app.example')).toBe('https://app.example/cb');
-    expect(parseReturnUrl('https://app.example/cb#x', 'https://app.example')).toBe('https://app.example/cb#x');
+    // The fragment is dropped: the bridge replaces it on delivery.
+    expect(parseReturnUrl('https://app.example/cb#x', 'https://app.example')).toBe('https://app.example/cb');
+    expect(parseReturnUrl('https://app.example', 'https://app.example')).toBe('https://app.example/');
     expect(parseReturnUrl('http://localhost:3000/cb', 'http://localhost:3000')).toBe('http://localhost:3000/cb');
   });
 

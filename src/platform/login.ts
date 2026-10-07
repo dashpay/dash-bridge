@@ -106,6 +106,8 @@ export function describeLoginFetchError(error: unknown, network: string): string
 
 export interface SignLoginParams {
   origin: string;
+  /** Redirect mode: the delivery URL, signed into the message. */
+  returnUrl?: string;
   identityId: string;
   statement?: string;
   network: string;
@@ -120,6 +122,7 @@ export async function signLogin(params: SignLoginParams): Promise<LoginResult> {
   const { issuedAt, expiresAt } = loginValidity(params.now);
   const message = buildLoginMessage({
     origin: params.origin,
+    returnUrl: params.returnUrl,
     identityId: params.identityId,
     statement: params.statement,
     network: params.network,

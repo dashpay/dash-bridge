@@ -375,19 +375,32 @@ uses `#dash_login_error=unsupported_network`. The result is in the fragment,
 so browsers never send it to any server, including yours: post it from the
 page as above. Redirect mode refuses to run inside a frame.
 
-Anyone can link to a redirect sign-in that names your origin. The link can
-carry the attacker's own nonce for your app. If the signed result then leaked
-from your callback page, the attacker could use it to sign in as the user. So:
+Anyone can build a redirect sign-in link that names your origin. The link
+carries the attacker's own nonce for your app and a `returnUrl` of their
+choice on your origin. Suppose that `returnUrl` is a path that redirects
+elsewhere, such as `/r/<shortlink>`. Browsers carry the fragment across
+redirects, so the signed result would land on the attacker's site, and they
+could use it to sign in as the user. These measures stop that:
 
-- **The bridge checks who sent the user.** It runs a redirect sign-in only
-  when `document.referrer` is a page on the declared origin. If the referrer
-  is missing or from another site, it shows **Request refused** and redirects
-  nowhere. Do not set `Referrer-Policy: no-referrer` on the page that starts
-  the login. The default `strict-origin-when-cross-origin` works, and so does
-  `origin`.
+- **The callback URL is signed.** In redirect mode the message carries a
+  `Redirect URI:` line with the exact `returnUrl` the result is delivered to,
+  and the verifier must be told which callback you use (`expectedReturnUrl`).
+  A proof delivered anywhere else fails with `return_url_mismatch`. Popup
+  proofs have no such line, and an app that never passes `expectedReturnUrl`
+  rejects every redirect proof. So a popup-only app can't be attacked through
+  redirect mode at all.
+- **The referrer must be your origin (defence in depth).** The bridge runs a
+  redirect sign-in only when `document.referrer` is on the declared origin.
+  This does **not** prove that your own login code sent the user: a link
+  posted on your site (a comment, a profile field, an open client-side
+  redirect) passes it too. It only stops links from other sites. If the
+  referrer is missing or foreign, the bridge shows **Request refused** and
+  redirects nowhere. Do not set `Referrer-Policy: no-referrer` on the page
+  that starts the login. The default `strict-origin-when-cross-origin` works,
+  and so does `origin`.
 - **`returnUrl` has no query string.** Your app's state is the nonce. A query
-  is how a generic `/out?to=...` endpoint could be aimed at another site, and
-  browsers carry the fragment across redirects.
+  is how a generic `/out?to=...` endpoint could be aimed at another site. Any
+  fragment on `returnUrl` is dropped.
 - **Your callback page must:**
   - never redirect
   - clear the fragment with `history.replaceState` immediately
@@ -418,6 +431,7 @@ app.example wants you to sign in with your Dash Platform identity:
 Sign in to My Dapp
 
 URI: https://app.example
+Redirect URI: https://app.example/auth/dash/callback
 Network: mainnet
 Key ID: 1
 Nonce: 9f2bX_kd81LmQ0aZ7tYw3s
@@ -428,6 +442,8 @@ Expiration Time: 2026-10-07T12:10:00Z
 - The first line uses the host (with the port, if any) of your origin.
 - The statement line and the empty line after it appear only if a statement was
   given.
+- The `Redirect URI:` line appears only in redirect mode. It holds the
+  `returnUrl`, normalized and without a fragment. Popup proofs never have it.
 - Times are ISO-8601 UTC with whole seconds. The proof expires 10 minutes after
   `Issued At`.
 
@@ -466,6 +482,9 @@ app.post('/auth/dash/verify', async (req, res) => {
     expectedNonce: nonce,
     network: 'mainnet',
     identityPublicKeys: identity.toJSON().publicKeys,
+    // Redirect-mode apps only: the exact callback you pass as returnUrl.
+    // Popup-only apps must leave this out, so they reject redirect proofs.
+    expectedReturnUrl: 'https://app.example/auth/dash/callback',
   });
   if (!verdict.ok) return res.status(401).send(verdict.reason);
 
@@ -483,7 +502,8 @@ app.post('/auth/dash/verify', async (req, res) => {
 | `expectedNonce` | The nonce you issued for this attempt. |
 | `network` | `'mainnet'` or `'testnet'`: where you fetched the identity. |
 | `identityPublicKeys` | The identity's keys. Accepts `identity.toJSON().publicKeys` (base64 data), `identity.publicKeys` or `sdk.identities.getKeys(...)` objects (`keyId`, `keyType`, string enums, hex data), `toObject()` output, or plain `{ id, type, purpose, securityLevel, data, disabledAt?, contractBounds? }` objects with `data` as `Uint8Array`, `number[]`, hex or base64. |
-| `expectedStatement` | Optional. Require exactly this statement. |
+| `expectedReturnUrl` | Redirect-mode apps only: your callback URL, absolute (the `returnUrl` you send users back to). A redirect proof is accepted only when its `Redirect URI:` matches. A popup proof is refused when this is set. Popup-only apps must not pass it. |
+| `expectedStatement` | Optional. Require this statement, compared after the same sanitizing the bridge applies. |
 | `now` | Optional `Date` or milliseconds, for tests. A value that isn't a valid time fails with `invalid_options`. |
 
 It checks, in order:
@@ -491,10 +511,11 @@ It checks, in order:
 1. The result has the expected shape (`malformed`).
 2. The nonce, network and origin match (`nonce_mismatch`, `network_mismatch`,
    `origin_mismatch`), and the statement if you pinned one
-   (`statement_mismatch`).
+   (`statement_mismatch`). The `Redirect URI:` line and `expectedReturnUrl`
+   are either both absent or equal (`return_url_mismatch`).
 3. Rebuilding the message from the fields gives exactly `result.message`
    (`message_mismatch`).
-4. `issuedAt` is at most 60 seconds in the future (`not_yet_valid`), it is
+4. `issuedAt` is at most 5 minutes in the future (`not_yet_valid`), it is
    before `expiresAt` (`expired`), and the window is at most 10 minutes
    (`malformed`).
 5. Key `keyId` exists (`key_not_found`), is not disabled (`key_disabled`), is
@@ -512,13 +533,13 @@ It checks, in order:
   bind it to the browser session, and delete it on first use, whether or not
   verification passes. That stops replay of a captured result.
 - **Origin binding.** The signed message names your origin. In popup mode the
-  bridge posts the result only to that origin. In redirect mode it returns
-  only to a query-free `returnUrl` on that origin, and only when your page sent
-  the user. Hard-code
-  `expectedOrigin` on the server; never take it from the request. A result
+  bridge posts the result only to that origin. In redirect mode the delivery
+  URL is signed into the message (`Redirect URI:`), and the verifier checks it
+  against `expectedReturnUrl`. Hard-code `expectedOrigin` and
+  `expectedReturnUrl` on the server; never take them from the request. A result
   signed for another site fails with `origin_mismatch`.
-- **Short expiry.** A proof is valid for 10 minutes, with 60 seconds of clock
-  skew allowed.
+- **Short expiry.** A proof is valid for 10 minutes. Because `issuedAt` comes
+  from the user's clock, it may be up to 5 minutes in the future.
 - **HTTPS.** The bridge accepts only https origins (http only on localhost).
   Serve your app, and the result upload, over https.
 - **Keys stay in the bridge.** The user pastes a WIF into the bridge, never

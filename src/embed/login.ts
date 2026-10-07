@@ -11,8 +11,11 @@ import { base64UrlToBytes, bytesToBase64Url } from '../utils/base64.js';
 
 /** Lifetime of a login proof: `expiresAt = issuedAt + LOGIN_TTL_MS`. */
 export const LOGIN_TTL_MS = 10 * 60 * 1000;
-/** Clock skew the verifier tolerates for an `issuedAt` in the future. */
-export const LOGIN_CLOCK_SKEW_MS = 60 * 1000;
+/**
+ * How far in the future the verifier accepts `issuedAt`: it comes from the
+ * user's clock, which may run ahead of the server's.
+ */
+export const LOGIN_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const MAX_STATEMENT_LENGTH = 140;
 
 /** URL fragment parameters used in redirect mode. */
@@ -57,6 +60,11 @@ export const LOGIN_RESULT_FIELDS = [
 export interface LoginMessageFields {
   /** Origin of the app the user signs in to, e.g. `https://app.example`. */
   origin: string;
+  /**
+   * Redirect mode only: the URL the result is delivered to (a `returnUrl`
+   * as normalized by parseReturnUrl). Popup proofs have none.
+   */
+  returnUrl?: string;
   identityId: string;
   statement?: string;
   network: string;
@@ -116,6 +124,7 @@ function hostOf(origin: string): string {
  * <statement>            (this line and the blank line after it only if set)
  *
  * URI: <origin>
+ * Redirect URI: <returnUrl>  (redirect mode only)
  * Network: <network>
  * Key ID: <keyId>
  * Nonce: <nonce>
@@ -135,11 +144,15 @@ export function buildLoginMessage(fields: LoginMessageFields): string {
   if (fields.statement && sanitizeStatement(fields.statement) !== fields.statement) {
     throw new Error('invalid statement');
   }
+  if (fields.returnUrl !== undefined && parseReturnUrl(fields.returnUrl, fields.origin) !== fields.returnUrl) {
+    throw new Error('invalid return URL');
+  }
 
   const lines = [`${host} wants you to sign in with your Dash Platform identity:`, fields.identityId, ''];
   if (fields.statement) lines.push(fields.statement, '');
+  lines.push(`URI: ${fields.origin}`);
+  if (fields.returnUrl !== undefined) lines.push(`Redirect URI: ${fields.returnUrl}`);
   lines.push(
-    `URI: ${fields.origin}`,
     `Network: ${fields.network}`,
     `Key ID: ${fields.keyId}`,
     `Nonce: ${fields.nonce}`,
@@ -149,22 +162,35 @@ export function buildLoginMessage(fields: LoginMessageFields): string {
   return lines.join('\n');
 }
 
-/** Lines of a message without / with a statement (layout of buildLoginMessage). */
-const LINES_WITHOUT_STATEMENT = 9;
-const LINES_WITH_STATEMENT = 11;
-
-/** The statement line of a login message, if it has one. */
-export function extractLoginStatement(message: string): string | undefined {
-  const lines = message.split('\n');
-  return lines.length === LINES_WITH_STATEMENT && lines[2] === '' && lines[4] === '' ? lines[3] : undefined;
+/** The variable parts of a login message, found by line prefix. */
+export interface ParsedLoginMessage {
+  origin: string;
+  statement?: string;
+  returnUrl?: string;
 }
 
-/** The origin on the `URI:` line of a login message. */
-export function extractLoginOrigin(message: string): string | undefined {
+/**
+ * Read origin, statement and Redirect URI back out of a login message.
+ * Lines are found by prefix; the URI line is the last `URI: ` line, since a
+ * statement (which precedes it) could itself start with `URI: `. Returns
+ * null if there is no URI line. This is only a reading aid: the verifier
+ * rebuilds the whole message from these values and compares bytes.
+ */
+export function parseLoginMessage(message: string): ParsedLoginMessage | null {
   const lines = message.split('\n');
-  if (lines.length !== LINES_WITHOUT_STATEMENT && lines.length !== LINES_WITH_STATEMENT) return undefined;
-  const line = lines[lines.length - 6];
-  return line.startsWith('URI: ') ? line.slice('URI: '.length) : undefined;
+  let uriIndex = -1;
+  lines.forEach((line, i) => {
+    if (line.startsWith('URI: ')) uriIndex = i;
+  });
+  if (uriIndex < 0) return null;
+  const next = lines[uriIndex + 1] ?? '';
+  // header, identity ID, '' [, statement, ''] then URI:
+  const statement = uriIndex >= 5 && lines[uriIndex - 1] === '' ? lines[uriIndex - 2] : undefined;
+  return {
+    origin: lines[uriIndex].slice('URI: '.length),
+    statement: statement || undefined,
+    returnUrl: next.startsWith('Redirect URI: ') ? next.slice('Redirect URI: '.length) : undefined,
+  };
 }
 
 /**
@@ -185,7 +211,9 @@ export function pickLoginResult(value: unknown): LoginResult | null {
 /**
  * Validate a redirect-mode `returnUrl`: an absolute http(s) URL on exactly
  * `origin` (already vetted: https, or http on loopback), without credentials
- * and without a query string.
+ * and without a query string. Returns it normalized, without any fragment
+ * (the bridge replaces the fragment when it delivers the result), which is
+ * the exact form signed into the message as `Redirect URI:`.
  *
  * The query is refused because the app's state is the nonce, and a query is
  * how a generic "redirect to ?to=..." endpoint on the app's origin would be
@@ -204,6 +232,7 @@ export function parseReturnUrl(value: string | null | undefined, origin: string)
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
   if (url.origin !== origin || url.username || url.password) return null;
   if (url.search || url.href.split('#')[0].includes('?')) return null;
+  url.hash = '';
   return url.href;
 }
 

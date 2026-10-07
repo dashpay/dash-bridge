@@ -216,6 +216,9 @@
           expectedOrigin: location.origin,
           expectedNonce: pending.nonce,
           network: pending.network,
+          // Redirect sign-ins only: the exact callback URL. Popup sign-ins
+          // must not pass it, so they never accept a redirect proof.
+          expectedReturnUrl: pending.returnUrl,
           identityPublicKeys,
         });
         $('login-verify').textContent = verdict.ok
@@ -228,9 +231,9 @@
       }
     }
 
-    function newPendingLogin() {
+    function newPendingLogin(returnUrl) {
       // A real app gets this from its server, which remembers it.
-      const pending = { nonce: DashBridge.generateNonce(), network: $('network').value, mock: isMock };
+      const pending = { nonce: DashBridge.generateNonce(), network: $('network').value, mock: isMock, returnUrl };
       sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending));
       $('login-result').textContent = 'waiting…';
       $('login-verify').textContent = '';
@@ -257,15 +260,15 @@
     }
 
     function runLoginRedirect() {
-      const pending = newPendingLogin();
+      // No query string allowed: the pending login (nonce) is the state.
+      const pending = newPendingLogin(new URL(location.pathname, location.origin).href);
       location.assign(DashBridge.loginRedirectUrl({
         nonce: pending.nonce,
         network: pending.network,
         appName: $('app-name').value,
         statement: $('login-statement').value,
         bridgeUrl: bridgeUrl.href,
-        // No query string allowed: the pending login (nonce) is the state.
-        returnUrl: location.pathname,
+        returnUrl: pending.returnUrl,
       }));
     }
 
