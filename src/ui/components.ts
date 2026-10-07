@@ -968,7 +968,11 @@ function groupNearTokens(
     nearChainName(t.blockchain).toLowerCase().includes(needle)
   );
   const groups = new Map<string, NearIntentsToken[]>();
-  for (const t of matches) groups.set(t.blockchain, [...(groups.get(t.blockchain) ?? []), t]);
+  for (const t of matches) {
+    const group = groups.get(t.blockchain);
+    if (group) group.push(t);
+    else groups.set(t.blockchain, [t]);
+  }
   return [...groups.entries()]
     .sort(([a], [b]) => rankOf(NEAR_CHAIN_ORDER, a) - rankOf(NEAR_CHAIN_ORDER, b) || nearChainName(a).localeCompare(nearChainName(b)))
     .map(([chain, list]) => [chain, list.sort((a, b) =>

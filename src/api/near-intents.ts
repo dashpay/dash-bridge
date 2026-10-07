@@ -125,18 +125,22 @@ function cleanApiMessage(value: unknown): string | undefined {
   return oneLine.length > MAX_API_MESSAGE_LENGTH ? `${oneLine.slice(0, MAX_API_MESSAGE_LENGTH)}…` : oneLine;
 }
 
+function isAbortError(error: unknown): boolean {
+  return (error as { name?: string })?.name === 'AbortError';
+}
+
 async function request(path: string, init: RequestInit = {}): Promise<{ status: number; body: unknown }> {
   try {
     return await fetchWithDeadline(`${NEAR_INTENTS_API_URL}${path}`, init, REQUEST_TIMEOUT_MS, async (response) => ({
       status: response.status,
       body: await response.json().catch((error: unknown) => {
         // A deadline or caller abort mid-body is not a malformed reply.
-        if ((error as { name?: string })?.name === 'AbortError') throw error;
+        if (isAbortError(error)) throw error;
         return undefined;
       }),
     }));
   } catch (error) {
-    if ((error as { name?: string })?.name === 'AbortError') throw error;
+    if (isAbortError(error)) throw error;
     const reason = error instanceof RequestTimeoutError ? 'timed out' : 'could not be reached';
     throw new NearIntentsError('unavailable', `NEAR Intents ${reason}. Check your connection and try again.`);
   }
