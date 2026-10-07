@@ -108,3 +108,38 @@ describe('solveCap', () => {
     expect(scripts[0].removed).toBe(true);
   });
 });
+
+describe('requestTestnetFunds', () => {
+  const VALID_TXID = 'a'.repeat(32) + 'B'.repeat(32);
+
+  function stubFaucetResponse(body: unknown): void {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })));
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('returns a response with a hex txid', async () => {
+    stubFaucetResponse({ txid: VALID_TXID, amount: 1, address: 'yAddr' });
+    const { requestTestnetFunds } = await import('./faucet.js');
+
+    await expect(requestTestnetFunds('https://faucet.example', 'yAddr')).resolves.toMatchObject({ txid: VALID_TXID });
+  });
+
+  it.each([
+    '<img src=x onerror=alert(1)>',
+    `${VALID_TXID}"><img src=x onerror=alert(1)>`,
+    'abc',
+    VALID_TXID.slice(1) + 'g',
+    42,
+    undefined,
+  ])('rejects a success response whose txid is not 64 hex characters: %s', async (txid) => {
+    stubFaucetResponse({ txid, amount: 1, address: 'yAddr' });
+    const { requestTestnetFunds } = await import('./faucet.js');
+
+    await expect(requestTestnetFunds('https://faucet.example', 'yAddr')).rejects.toThrow(
+      'The faucet accepted the request but returned an invalid transaction ID. Funds may already be on the way; wait for the deposit before requesting again.'
+    );
+  });
+});

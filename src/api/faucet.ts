@@ -16,6 +16,8 @@ let capWidgetPromise: Promise<void> | null = null;
 /** Default timeout for faucet API requests (30 seconds) */
 const REQUEST_TIMEOUT_MS = 30000;
 const CAP_WIDGET_SRC = 'https://cdn.jsdelivr.net/npm/@cap.js/widget@0.1.54';
+/** A Dash transaction ID: 32 bytes as hex. */
+const TXID_PATTERN = /^[0-9a-f]{64}$/i;
 
 export interface FaucetStatus {
   status: string;
@@ -212,8 +214,9 @@ export async function requestTestnetFunds(
   // Once the faucet answers 2xx it has most likely sent funds, so a failed
   // body read must not invite the user to request again.
   let accepted = false;
+  let data: Record<string, unknown> | null;
   try {
-    return await fetchWithTimeout(`${baseUrl}/api/core-faucet`, init, async (response) => {
+    data = await fetchWithTimeout(`${baseUrl}/api/core-faucet`, init, async (response) => {
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
 
@@ -231,7 +234,7 @@ export async function requestTestnetFunds(
       }
 
       accepted = true;
-      return response.json();
+      return (await response.json()) as Record<string, unknown> | null;
     });
   } catch (error) {
     if (accepted) {
@@ -241,4 +244,14 @@ export async function requestTestnetFunds(
     }
     throw error;
   }
+
+  // The txid is rendered into the page, so only accept a real 32-byte hex txid.
+  // The 2xx means funds were most likely sent, so don't invite a second request.
+  if (!data || typeof data.txid !== 'string' || !TXID_PATTERN.test(data.txid)) {
+    throw new Error(
+      'The faucet accepted the request but returned an invalid transaction ID. Funds may already be on the way; wait for the deposit before requesting again.'
+    );
+  }
+
+  return data as unknown as FaucetResponse;
 }

@@ -7,6 +7,7 @@ import {
   validateWithdrawalAmount,
 } from './utils/credits.js';
 import { extractErrorMessage } from './utils/errors.js';
+import { parseKeyBackup } from './utils/key-backup.js';
 import { deriveAssetLockKeyPair } from './crypto/hd.js';
 import { createAssetLockTransaction, serializeTransaction, calculateTxId } from './transaction/index.js';
 import { InsightClient, isAmbiguousBroadcastError } from './api/insight.js';
@@ -2275,49 +2276,6 @@ function setupEventListeners(container: HTMLElement) {
  */
 function validateIdentityId(id?: string): boolean {
   return !!id && isValidIdentityId(id);
-}
-
-/**
- * Parse a key backup JSON file and extract identityId + best private key WIF.
- * Prefers AUTHENTICATION keys with HIGH or CRITICAL security level, since those
- * are required for DPNS and contract operations. MASTER keys are ranked lower
- * because they are rejected by isPurposeAllowedForDpns/isSecurityLevelAllowedForDpns.
- */
-function parseKeyBackup(json: unknown, preferredPurpose?: string): { identityId: string; privateKeyWif: string; purpose: string; securityLevel: string } | null {
-  if (!json || typeof json !== 'object') return null;
-  const obj = json as Record<string, unknown>;
-  const identityId = (obj.identityId || obj.targetIdentityId) as string | undefined;
-  if (!identityId || typeof identityId !== 'string') return null;
-
-  const keys = obj.identityKeys as Array<Record<string, unknown>> | undefined;
-  if (!Array.isArray(keys) || keys.length === 0) return null;
-
-  const ranked = keys
-    .filter((k) => typeof k.privateKeyWif === 'string')
-    .sort((a, b) => {
-      // Caller-preferred purpose wins outright (e.g. TRANSFER for withdrawals)
-      if (preferredPurpose) {
-        const aPref = a.purpose === preferredPurpose ? 1 : 0;
-        const bPref = b.purpose === preferredPurpose ? 1 : 0;
-        if (aPref !== bPref) return bPref - aPref;
-      }
-      // Prefer AUTHENTICATION purpose
-      const aAuth = a.purpose === 'AUTHENTICATION' ? 1 : 0;
-      const bAuth = b.purpose === 'AUTHENTICATION' ? 1 : 0;
-      if (aAuth !== bAuth) return bAuth - aAuth;
-      // Prefer HIGH/CRITICAL over MASTER (MASTER is not accepted for DPNS/contracts)
-      const levelOrder: Record<string, number> = { HIGH: 4, CRITICAL: 3, MEDIUM: 2, MASTER: 1 };
-      return (levelOrder[b.securityLevel as string] || 0) - (levelOrder[a.securityLevel as string] || 0);
-    });
-
-  if (ranked.length === 0) return null;
-  const best = ranked[0];
-  return {
-    identityId,
-    privateKeyWif: best.privateKeyWif as string,
-    purpose: (best.purpose as string) || 'UNKNOWN',
-    securityLevel: (best.securityLevel as string) || 'UNKNOWN',
-  };
 }
 
 /**
