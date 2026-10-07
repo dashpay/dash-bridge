@@ -6,6 +6,7 @@ import { generateQRCodeDataUrl } from './qrcode.js';
 import { privateKeyToWif } from '../utils/wif.js';
 import { formatCreditsAsDash, formatCredits, MIN_WITHDRAWAL_CREDITS } from '../utils/credits.js';
 import { WithdrawalStatus } from '../platform/withdrawal-status.js';
+import { isIdentityRegistrationUnconfirmedError } from '../platform/identity-confirm.js';
 import { bytesToHex } from '../utils/hex.js';
 import { getNetwork, getAvailableNetworks } from '../config.js';
 import { getAssetLockDerivationPath } from '../crypto/hd.js';
@@ -1221,6 +1222,32 @@ function renderErrorStep(state: BridgeState): HTMLElement {
     `
     : '';
 
+  // An identity registration that was submitted but not confirmed can be
+  // resubmitted safely with the same asset lock proof.
+  const retryRegistrationHtml =
+    state.mode === 'create' &&
+    isIdentityRegistrationUnconfirmedError(state.error) &&
+    state.assetLockProof &&
+    state.assetLockKeyPair
+      ? `
+      <div class="error-fallback">
+        <p class="error-fallback-hint">Platform may still be processing your registration. Wait a minute, then retry — it is safe and cannot spend your deposit twice.</p>
+        <button id="retry-registration-btn" class="primary-btn">Retry Registration</button>
+      </div>
+    `
+      : '';
+
+  // Once an asset lock key exists, funds may be in flight: keep the
+  // recovery backup one click away on every error screen.
+  const keyBackupHtml = state.assetLockKeyPair
+    ? `
+      <div class="backup-section">
+        <button id="download-keys-btn" class="secondary-btn">Download Key Backup</button>
+        <p class="backup-warning">Keep this backup — it is needed to recover your funds or identity.</p>
+      </div>
+    `
+    : '';
+
   div.innerHTML = `
     <div class="error-icon">❌</div>
     <h2>Error</h2>
@@ -1229,7 +1256,9 @@ function renderErrorStep(state: BridgeState): HTMLElement {
     ${failedStepHtml}
     <p class="error-message">${escapeHtml(errorMessage)}</p>
     ${techDetailsHtml}
+    ${retryRegistrationHtml}
     ${chainlockFallbackHtml}
+    ${keyBackupHtml}
     <div class="error-actions">
       <button id="retry-btn" class="secondary-btn">Try Again</button>
       <button id="copy-error-btn" class="secondary-btn">Copy Error Details</button>

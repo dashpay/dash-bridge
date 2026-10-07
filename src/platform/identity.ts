@@ -26,6 +26,13 @@ import {
   withPlatformOperationTimeout,
 } from './client.js';
 import { getNetwork } from '../config.js';
+import { extractErrorMessage } from '../utils/errors.js';
+import {
+  IdentityRegistrationUnconfirmedError,
+  allowUnverifiedDevnetFallback,
+  findMissingIdentityKeys,
+  pollForIdentity,
+} from './identity-confirm.js';
 
 /**
  * Compute hash160 (RIPEMD160(SHA256(data))) of a buffer
@@ -390,6 +397,106 @@ export async function registerIdentity(
       revision: balanceAndRevision.revision,
     };
   }, retryOptions);
+}
+
+/** How long to wait for an "already submitted" identity to become fetchable. */
+const CONFIRM_IDENTITY_TIMEOUT_MS = 45_000;
+const CONFIRM_IDENTITY_INTERVAL_MS = 5_000;
+/** Per-lookup guard so one hung request can't eat the whole window. */
+const CONFIRM_IDENTITY_LOOKUP_TIMEOUT_MS = 15_000;
+
+/**
+ * Confirm that an identity whose create transition Platform reported as
+ * "already exists" really exists, and that it carries the keys we tried to
+ * register. "tx already exists in cache" only means the transition is in
+ * Tenderdash's mempool cache, so poll for a bounded window while it gets
+ * committed.
+ *
+ * - Found with matching keys → its real balance and revision.
+ * - Found with different keys → throws (the deposit was used by a different
+ *   registration attempt; this session's keys do not control that identity).
+ * - Not confirmed in time → throws IdentityRegistrationUnconfirmedError.
+ * - Devnet only: if every lookup failed with a transport/unavailability error
+ *   (no answer from Platform at all), falls back to the legacy unverified
+ *   success with `verified: false`. Never on mainnet/testnet.
+ */
+export async function confirmRegisteredIdentity(
+  identityId: string,
+  identityKeys: IdentityKeyConfig[],
+  network: string
+): Promise<{ identityId: string; balance: number; revision: number; verified: boolean }> {
+  const networkConfig = getNetwork(network);
+  // Non-trusted devnets have no quorum context, so proof-verifying reads
+  // fail; use the unproved variant there (as registerIdentity does).
+  const useUnproved = networkConfig.type === 'devnet' && !networkConfig.useTrustedContext;
+
+  const summary = await pollForIdentity(
+    () =>
+      withConnectedPlatformSdk(network, (sdk) =>
+        withPlatformOperationTimeout(
+          useUnproved ? sdk.identities.fetchUnproved(identityId) : sdk.identities.fetch(identityId),
+          'confirming identity registration',
+          CONFIRM_IDENTITY_LOOKUP_TIMEOUT_MS
+        )
+      ),
+    { timeoutMs: CONFIRM_IDENTITY_TIMEOUT_MS, intervalMs: CONFIRM_IDENTITY_INTERVAL_MS }
+  );
+
+  const identity = summary.identity;
+  if (identity) {
+    const expected = identityKeys.map((key) => ({
+      id: key.id,
+      data: key.keyType === 'ECDSA_HASH160' ? hash160(key.publicKey) : key.publicKey,
+    }));
+    const missing = findMissingIdentityKeys(
+      expected,
+      identity.publicKeys.map((key) => ({ keyId: key.keyId, data: key.data }))
+    );
+    if (missing.length > 0) {
+      throw new Error(
+        `An identity already exists for this deposit (ID ${identityId}), but it was registered with ` +
+          `different public keys than this session's (key ID${missing.length > 1 ? 's' : ''} ` +
+          `${missing.join(', ')} ${missing.length > 1 ? 'do' : 'does'} not match). An earlier registration ` +
+          'attempt used this deposit — use the key backup from that attempt to access the identity. ' +
+          "This session's keys do not control it."
+      );
+    }
+    console.log('[identity-create] Confirmed existing identity', identityId, 'after', summary.attempts, 'lookup(s)');
+    return {
+      identityId,
+      balance: Number(identity.balance ?? 0n),
+      revision: Number(identity.revision ?? 0n),
+      verified: true,
+    };
+  }
+
+  const lastError = summary.errors.length > 0
+    ? summary.errors[summary.errors.length - 1]
+    : undefined;
+
+  if (allowUnverifiedDevnetFallback(networkConfig.type, summary)) {
+    console.warn(
+      `[identity-create] DEVNET FALLBACK: could not reach Platform to confirm identity ${identityId} ` +
+        `(${summary.errors.length} transport/unavailability error(s), no "not found" answers). ` +
+        'Reporting success WITHOUT verification because this is a devnet. Last error:',
+      lastError
+    );
+    return { identityId, balance: 0, revision: 0, verified: false };
+  }
+
+  console.warn(
+    `[identity-create] Identity ${identityId} not confirmed after ${summary.attempts} lookup(s) ` +
+      `(${summary.notFound} not found, ${summary.errors.length} failed).`,
+    lastError
+  );
+  throw new IdentityRegistrationUnconfirmedError(
+    identityId,
+    summary.notFound > 0 && summary.errors.length === 0
+      ? 'identity not found yet'
+      : lastError !== undefined
+        ? extractErrorMessage(lastError)
+        : undefined
+  );
 }
 
 /**

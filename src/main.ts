@@ -179,6 +179,7 @@ import {
   type SigningKeySelection,
 } from './platform/username-transfer-utils.js';
 import { loadSdkModule } from './platform/sdkModule.js';
+import { isAlreadyExistsError } from './platform/identity-confirm.js';
 import type {
   BridgeState,
   KeyType,
@@ -821,6 +822,15 @@ function setupEventListeners(container: HTMLElement) {
   if (retryBtn) {
     retryBtn.addEventListener('click', () => {
       updateState(createInitialState(state.network));
+    });
+  }
+
+  // Retry registration (offered on the error screen when an identity
+  // registration was submitted but could not be confirmed)
+  const retryRegistrationBtn = container.querySelector('#retry-registration-btn');
+  if (retryRegistrationBtn) {
+    retryRegistrationBtn.addEventListener('click', () => {
+      void retryIdentityRegistration();
     });
   }
 
@@ -2589,25 +2599,25 @@ async function startSendToAddress() {
 }
 
 /**
- * Wrapper around `registerIdentity` that gracefully handles
- * already-submitted state transitions.
+ * Wrapper around `registerIdentity` that handles already-submitted state
+ * transitions without trusting them blindly.
  *
  * Tenderdash (Platform's consensus layer) deduplicates state transitions
  * by their bytes: a second submit of the same IdentityCreate is rejected
- * with `Object already exists: tx already exists in cache`. This is what
- * surfaces when the user retries an identity creation that actually
- * succeeded the first time (e.g. the first attempt got a
- * `GroveDBProof` decode error in the client AFTER Platform had committed
- * the identity, and the user clicked Retry).
+ * with `Object already exists: tx already exists in cache`. This surfaces
+ * when the user retries an identity creation whose first attempt reached
+ * Platform (e.g. the first attempt got a `GroveDBProof` decode error in the
+ * client AFTER Platform had committed the identity).
  *
- * The rs-sdk has matching logic (`Identity::wait_for_response`) that
- * auto-fetches the identity on `AlreadyExists`, but the wasm-sdk doesn't,
- * and on a NON-TRUSTED devnet we can't fetch via the SDK anyway (no
- * quorum context = TransportNoAvailableAddresses).
- *
- * Strategy: catch the AlreadyExists family of errors and treat them as
- * success, deriving the identity ID from the asset lock proof (it's
- * deterministic). The platform-side identity is real either way.
+ * "tx already exists in cache" only means the transition is in the mempool
+ * cache — NOT that it was committed. So on the AlreadyExists family we
+ * derive the (deterministic) identity ID from the asset lock proof, then
+ * confirm by fetching the identity and checking it carries the keys we
+ * tried to register. If it can't be confirmed within a bounded window,
+ * `confirmRegisteredIdentity` throws IdentityRegistrationUnconfirmedError,
+ * which the error screen turns into a safe "Retry Registration" action.
+ * See `confirmRegisteredIdentity` for the devnet-only fallback when
+ * Platform cannot be reached at all.
  */
 async function registerIdentityResilient(
   proof: Extract<AssetLockProofData, { type: 'instant' }>,
@@ -2615,31 +2625,12 @@ async function registerIdentityResilient(
   identityKeys: typeof state.identityKeys,
   network: string
 ): Promise<{ identityId: string; balance: number; revision: number; alreadyExisted?: boolean }> {
-  const isAlreadyExistsError = (err: unknown): boolean => {
-    const msg =
-      err && typeof err === 'object' && 'message' in err
-        ? String((err as { message: unknown }).message)
-        : String(err);
-    return (
-      msg.includes('Object already exists') ||
-      msg.includes('tx already exists in cache') ||
-      msg.includes('AlreadyExists')
-    );
-  };
-
+  const { registerIdentity, confirmRegisteredIdentity } = await loadPlatformModule();
   try {
-    const { registerIdentity } = await loadPlatformModule();
     return await registerIdentity(proof, assetLockPrivateKeyWif, identityKeys, network);
   } catch (err) {
     if (!isAlreadyExistsError(err)) throw err;
 
-    // Platform tells us the state transition is already in its consensus
-    // pool — meaning a previous submit already created the identity. The
-    // identity ID is deterministic from the asset lock outpoint, so we
-    // can derive it from the proof and surface success.
-    console.log(
-      '[identity-create] Platform reports state transition already submitted; treating as success.'
-    );
     const { AssetLockProof } = await loadSdkModule();
     const sdkProof = AssetLockProof.createInstantAssetLockProof(
       proof.instantLockBytes,
@@ -2647,8 +2638,40 @@ async function registerIdentityResilient(
       proof.outputIndex
     );
     const identityId = sdkProof.createIdentityId().toString();
-    console.log('[identity-create] Recovered identityId:', identityId);
-    return { identityId, balance: 0, revision: 0, alreadyExisted: true };
+    console.log(
+      '[identity-create] Platform reports the state transition was already submitted; confirming identity',
+      identityId
+    );
+    const confirmed = await confirmRegisteredIdentity(identityId, identityKeys, network);
+    return {
+      identityId,
+      balance: confirmed.balance,
+      revision: confirmed.revision,
+      alreadyExisted: true,
+    };
+  }
+}
+
+/**
+ * Resubmit identity registration with the asset lock proof already in
+ * state. Offered on the error screen after an unconfirmed submission: the
+ * asset lock can only be consumed once and the identity ID is
+ * deterministic, so resubmitting can't create a second identity.
+ */
+async function retryIdentityRegistration(): Promise<void> {
+  if (!state.assetLockProof || !state.assetLockKeyPair) {
+    console.error('Retry registration unavailable: missing asset lock proof or key');
+    return;
+  }
+  try {
+    const assetLockPrivateKeyWif = privateKeyToWif(
+      state.assetLockKeyPair.privateKey,
+      getNetwork(state.network)
+    );
+    await runPlatformSubmission(state.assetLockProof, assetLockPrivateKeyWif);
+  } catch (error) {
+    console.error('Retry registration error:', error);
+    updateState(setError(state, toError(error)));
   }
 }
 
