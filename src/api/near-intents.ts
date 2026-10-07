@@ -44,9 +44,46 @@ export const NEAR_SWAP_STATUSES = [
 ] as const;
 export type NearSwapStatus = (typeof NEAR_SWAP_STATUSES)[number];
 
-/** An unfunded swap past its deadline: its payment address must not be used. */
-export function isNearSwapExpired(swap: { status: NearSwapStatus; deadline: string }, now = Date.now()): boolean {
-  return swap.status === 'PENDING_DEPOSIT' && !(Date.parse(swap.deadline) > now);
+/**
+ * Source chains whose payments can take about an hour to confirm. The 1Click
+ * deadline must outlast confirmation, so they get a longer window.
+ */
+const SLOW_CHAINS = new Set(['btc', 'ltc', 'doge', 'zec', 'bch']);
+const SLOW_CHAIN_SWAP_WINDOW_MS = 3 * 60 * 60 * 1000;
+const MIN_PAYMENT_MARGIN_MS = 10 * 60 * 1000;
+
+/** How long the user has to pay before 1Click refunds an unfunded swap. */
+export function nearSwapWindowMs(blockchain: string): number {
+  return SLOW_CHAINS.has(blockchain) ? SLOW_CHAIN_SWAP_WINDOW_MS : NEAR_SWAP_DEADLINE_MS;
+}
+
+/**
+ * Last moment we tell the user to send: well before the 1Click deadline, so a
+ * payment still confirms in time. Margin is max(10 min, 1/4 of the window).
+ */
+export function nearSwapPaymentCutoff(swap: { deadline: string; blockchain: string }): number {
+  const window = nearSwapWindowMs(swap.blockchain);
+  return Date.parse(swap.deadline) - Math.max(MIN_PAYMENT_MARGIN_MS, window / 4);
+}
+
+/**
+ * A swap still awaiting (all of) its payment, past the payment cutoff: its
+ * payment address must no longer be shown. An unparseable deadline counts.
+ */
+export function isNearSwapExpired(
+  swap: { status: NearSwapStatus; deadline: string; blockchain: string },
+  now = Date.now()
+): boolean {
+  const awaitingPayment = swap.status === 'PENDING_DEPOSIT' || swap.status === 'INCOMPLETE_DEPOSIT';
+  return awaitingPayment && !(nearSwapPaymentCutoff(swap) > now);
+}
+
+/**
+ * Whether a confirmed quote costs more than `maxIncreaseBps` above the one
+ * the user approved (amounts in the origin asset's smallest units).
+ */
+export function isNearPriceIncreaseTooLarge(approvedAmountIn: string, amountIn: string, maxIncreaseBps: bigint): boolean {
+  return BigInt(amountIn) * 10_000n > BigInt(approvedAmountIn) * (10_000n + maxIncreaseBps);
 }
 
 export interface NearQuoteRequest {
@@ -227,7 +264,7 @@ export async function requestNearIntentsQuote(
   signal?: AbortSignal
 ): Promise<NearIntentsQuote> {
   const now = params.now ?? Date.now();
-  const deadline = new Date(now + NEAR_SWAP_DEADLINE_MS).toISOString();
+  const deadline = new Date(now + nearSwapWindowMs(params.originAsset.blockchain)).toISOString();
   const amount = String(Math.trunc(params.amountOutDuffs));
   const payload = {
     dry: params.dry,
@@ -284,6 +321,17 @@ export async function requestNearIntentsQuote(
     throw new NearIntentsError('invalid_response', 'NEAR Intents could deliver less DASH than requested; the quote was not used.');
   }
   const minAmountIn = q.minAmountIn !== undefined ? unsignedIntString(q.minAmountIn, 'minimum input') : undefined;
+  if (minAmountIn !== undefined && BigInt(minAmountIn) > BigInt(amountIn)) {
+    throw new NearIntentsError('invalid_response', 'NEAR Intents returned an inconsistent quote.');
+  }
+  // The API formats amounts with its own decimals. If they disagree with the
+  // token list's, our "send exactly" amount would be off by orders of magnitude.
+  if (
+    q.amountInFormatted !== undefined &&
+    normalizeDecimal(q.amountInFormatted) !== formatUnits(amountIn, params.originAsset.decimals)
+  ) {
+    throw new NearIntentsError('invalid_response', 'NEAR Intents returned amounts that do not match the asset\'s decimals; the quote was not used.');
+  }
 
   const quote: NearIntentsQuote = {
     originAssetId: params.originAsset.assetId,
@@ -345,6 +393,16 @@ export function formatUnits(amount: string, decimals: number): string {
   const padded = digits.padStart(decimals + 1, '0');
   const whole = padded.slice(0, -decimals);
   const fraction = padded.slice(-decimals).replace(/0+$/, '');
+  return fraction ? `${whole}.${fraction}` : whole;
+}
+
+/** Canonical form of a plain decimal string ("01.50" → "1.5"), or undefined if it isn't one. */
+function normalizeDecimal(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const match = /^(\d{1,78})(?:\.(\d{1,78}))?$/.exec(value);
+  if (!match) return undefined;
+  const whole = match[1].replace(/^0+(?=\d)/, '');
+  const fraction = (match[2] ?? '').replace(/0+$/, '');
   return fraction ? `${whole}.${fraction}` : whole;
 }
 

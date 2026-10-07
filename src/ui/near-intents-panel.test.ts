@@ -52,6 +52,28 @@ describe('NEAR Intents swap panel', () => {
     expect(c.querySelector('#near-swap-reset-btn')!.textContent).toBe('Get a new quote');
   });
 
+  it('hides the payment address within the safety margin before the deadline', () => {
+    const c = renderSwap({ deadline: new Date(Date.now() + 10 * 60 * 1000).toISOString() });
+    expect(c.querySelector('#near-deposit-address')).toBeNull();
+    expect(c.querySelector('#near-swap-status')!.textContent).toContain('Quote expired');
+  });
+
+  it('tells the user to send before the cutoff, not the deadline', () => {
+    const deadline = new Date(Date.now() + 60 * 60 * 1000);
+    const cutoff = new Date(deadline.getTime() - 15 * 60 * 1000);
+    const fmt = (d: Date) => d.toLocaleString(undefined, { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' });
+    const warning = renderSwap({ deadline: deadline.toISOString() }).querySelector('.near-intents-warning')!.textContent!;
+    expect(warning).toContain(`before ${fmt(cutoff)}`);
+  });
+
+  it('hides the payment address of a partly paid swap once the cutoff passes', () => {
+    const c = renderSwap({ status: 'INCOMPLETE_DEPOSIT', deadline: new Date(Date.now() - 1000).toISOString() });
+    expect(c.querySelector('#near-deposit-address')).toBeNull();
+    expect(c.querySelector('.near-swap-instruction')).toBeNull();
+    expect(c.querySelector('#near-swap-status')!.textContent).toContain('refunded to your refund address');
+    expect(c.querySelector('#near-swap-reset-btn')!.textContent).toBe('Get a new quote');
+  });
+
   it('omits the QR when a memo is required', () => {
     const c = renderSwap({ depositMemo: '12345' });
     expect(c.querySelector('.near-swap-qr')).toBeNull();

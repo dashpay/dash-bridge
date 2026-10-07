@@ -4,6 +4,7 @@ import {
   formatUnits,
   isNearSwapExpired,
   nearIntentsAppUrl,
+  nearSwapPaymentCutoff,
   selectableSourceTokens,
   type NearIntentsToken,
   type NearSwapStatus,
@@ -1099,7 +1100,12 @@ const NEAR_STATUS_TEXT: Record<NearSwapStatus, { label: string; detail: string; 
 
 const NEAR_EXPIRED_TEXT = {
   label: 'Quote expired',
-  detail: "Nothing arrived before the deadline. Don't send to the old address; get a new quote instead.",
+  detail: "The time to pay has run out. Don't send to the old address; get a new quote instead.",
+  tone: 'error' as const,
+};
+const NEAR_EXPIRED_INCOMPLETE_TEXT = {
+  label: 'Quote expired',
+  detail: "The time to complete the payment has run out. Don't send more to the old address: what you sent is refunded to your refund address after the deadline. Get a new quote to try again.",
   tone: 'error' as const,
 };
 
@@ -1142,11 +1148,8 @@ function formatUsd(value?: number): string {
   return value === undefined ? '' : `$${value.toFixed(2)}`;
 }
 
-function formatNearDeadline(iso: string): string {
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime())
-    ? iso
-    : date.toLocaleString(undefined, { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' });
+function formatNearTime(ms: number): string {
+  return new Date(ms).toLocaleString(undefined, { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' });
 }
 
 function renderNearFallbackLink(address: string, token?: NearIntentsToken): string {
@@ -1165,9 +1168,15 @@ function renderNearQuoteSummary(near: NearIntentsState, token: NearIntentsToken)
   const quote = near.quote!;
   const usdIn = formatUsd(quote.amountInUsd);
   const usdOut = formatUsd(quote.amountOutUsd);
-  const feeUsd = quote.amountInUsd !== undefined && quote.amountOutUsd !== undefined
-    ? Math.max(0, quote.amountInUsd - quote.amountOutUsd)
+  // EXACT_OUTPUT: amountIn carries a slippage buffer that is refunded, so the
+  // likely fee is based on minAmountIn; without it, amountIn only bounds it.
+  const spentUsd = quote.amountInUsd !== undefined && quote.minAmountIn !== undefined
+    ? quote.amountInUsd * (Number(quote.minAmountIn) / Number(quote.amountIn))
+    : quote.amountInUsd;
+  const feeUsd = spentUsd !== undefined && quote.amountOutUsd !== undefined
+    ? Math.max(0, spentUsd - quote.amountOutUsd)
     : undefined;
+  const feeQualifier = quote.minAmountIn !== undefined ? 'about' : 'up to';
   const minutes = quote.timeEstimateSec !== undefined ? Math.max(1, Math.round(quote.timeEstimateSec / 60)) : undefined;
   return `
     <div class="near-intents-quote" id="near-intents-quote">
@@ -1182,7 +1191,7 @@ function renderNearQuoteSummary(near: NearIntentsState, token: NearIntentsToken)
       </div>
       <div class="near-quote-row near-quote-sub"><span>at your deposit address</span><span>${escapeHtml(usdOut)}</span></div>
       ${minutes !== undefined ? `<p class="near-quote-note">Usually arrives in about ${minutes} min after your payment confirms.</p>` : ''}
-      <p class="near-quote-note">The rate includes NEAR Intents swap and network fees${feeUsd !== undefined ? ` (about ${escapeHtml(formatUsd(feeUsd))} in total)` : ''}. Confirming fetches a fresh quote and a one-time payment address; the amount may change slightly.</p>
+      <p class="near-quote-note">The rate includes NEAR Intents swap and network fees${feeUsd !== undefined ? ` (${feeQualifier} ${escapeHtml(formatUsd(feeUsd))} in total)` : ''}. Any unused slippage buffer is refunded. Confirming fetches a fresh quote and a one-time payment address; the amount may change slightly.</p>
       <div class="near-quote-actions">
         <button id="near-confirm-btn" class="primary-btn near-btn" ${near.busy ? 'disabled' : ''}>${near.busy === 'confirm' ? 'Preparing…' : 'Get payment address'}</button>
       </div>
@@ -1194,11 +1203,13 @@ function renderNearSwap(swap: NearIntentsSwap): HTMLElement {
   const el = document.createElement('div');
   el.className = 'near-intents-swap';
   const expired = isNearSwapExpired(swap);
-  const status = expired ? NEAR_EXPIRED_TEXT : NEAR_STATUS_TEXT[swap.status];
+  const incomplete = swap.status === 'INCOMPLETE_DEPOSIT';
+  const status = expired
+    ? (incomplete ? NEAR_EXPIRED_INCOMPLETE_TEXT : NEAR_EXPIRED_TEXT)
+    : NEAR_STATUS_TEXT[swap.status];
   const amount = `${formatUnits(swap.amountIn, swap.decimals)} ${swap.symbol}`;
   const chain = nearChainName(swap.blockchain);
-  const canReset = swap.status === 'PENDING_DEPOSIT' || swap.status === 'REFUNDED' || swap.status === 'FAILED';
-  const incomplete = swap.status === 'INCOMPLETE_DEPOSIT';
+  const canReset = expired || swap.status === 'PENDING_DEPOSIT' || swap.status === 'REFUNDED' || swap.status === 'FAILED';
   const showPayment = !expired && (swap.status === 'PENDING_DEPOSIT' || incomplete);
   const instruction = incomplete
     ? `Top up so the total you sent reaches <strong>${escapeHtml(amount)}</strong> on <strong>${escapeHtml(chain)}</strong>. Send only the difference to:`
@@ -1231,7 +1242,7 @@ function renderNearSwap(swap: NearIntentsSwap): HTMLElement {
           <button class="copy-btn" data-copy="${escapeAttr(swap.depositMemo)}">Copy</button>
         </div>` : ''}
       <div class="near-intents-warning">
-        <p>${incomplete ? 'Complete the payment' : `Send exactly <strong>${escapeHtml(amount)}</strong>`} on <strong>${escapeHtml(chain)}</strong> before <strong>${escapeHtml(formatNearDeadline(swap.deadline))}</strong>. Any other asset or network may be lost.</p>
+        <p>${incomplete ? 'Complete the payment' : `Send exactly <strong>${escapeHtml(amount)}</strong>`} on <strong>${escapeHtml(chain)}</strong> before <strong>${escapeHtml(formatNearTime(nearSwapPaymentCutoff(swap)))}</strong>, so it confirms before the swap deadline. Any other asset or network may be lost.</p>
         <p>If the swap can't complete, it is refunded to <code>${escapeHtml(swap.refundTo)}</code>.</p>
       </div>` : ''}
     <p class="near-swap-receive">You receive <strong>${escapeHtml(formatUnits(swap.amountOut, 8))} DASH</strong> at your bridge deposit address.</p>

@@ -20,6 +20,7 @@ import type {
 } from '../types.js';
 import {
   formatUnits,
+  selectableSourceTokens,
   type NearIntentsQuote,
   type NearIntentsToken,
   type NearSwapStatus,
@@ -2272,8 +2273,9 @@ export function setNearIntentsTokensLoading(state: BridgeState): BridgeState {
 
 export function setNearIntentsTokens(state: BridgeState, tokens: NearIntentsToken[]): BridgeState {
   const current = nearIntentsOf(state).originAssetId;
-  const keep = current !== undefined && tokens.some((t) => t.assetId === current);
-  const fallback = tokens.find((t) => t.assetId === NEAR_DEFAULT_ORIGIN_ASSET) ?? tokens[0];
+  const sources = selectableSourceTokens(tokens);
+  const keep = current !== undefined && sources.some((t) => t.assetId === current);
+  const fallback = sources.find((t) => t.assetId === NEAR_DEFAULT_ORIGIN_ASSET) ?? sources[0];
   return patchNearIntents(state, {
     tokens,
     busy: undefined,

@@ -72,6 +72,16 @@ describe('NEAR Intents state', () => {
     expect(setNearIntentsTokens(state, [SOL, USDC]).nearIntents!.originAssetId).toBe(SOL.assetId);
   });
 
+  it('never preselects DASH or another Dash-chain token as the source', () => {
+    const dash = { assetId: 'nep141:dash.omft.near', symbol: 'DASH', blockchain: 'dash', decimals: 8 };
+    const dashOther = { assetId: 'nep141:x-dash.omft.near', symbol: 'XD', blockchain: 'dash', decimals: 8 };
+    const state = setNearIntentsTokens(toggleNearIntentsPanel(depositState()), [dash, dashOther, SOL]);
+    expect(state.nearIntents!.originAssetId).toBe(SOL.assetId);
+    // An earlier DASH selection isn't kept either.
+    const stale = setNearIntentsOriginAsset(state, dash.assetId);
+    expect(setNearIntentsTokens(stale, [dash, SOL]).nearIntents!.originAssetId).toBe(SOL.assetId);
+  });
+
   it('drops a priced quote when an input changes', () => {
     let state = setNearIntentsQuoting(toggleNearIntentsPanel(depositState()));
     expect(state.nearIntents!.busy).toBe('quote');

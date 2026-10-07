@@ -6,8 +6,11 @@ import {
   fetchNearIntentsTokens,
   formatUnits,
   getNearSwapStatus,
+  isNearPriceIncreaseTooLarge,
   isNearSwapExpired,
   nearIntentsAppUrl,
+  nearSwapPaymentCutoff,
+  nearSwapWindowMs,
   parseDashToDuffs,
   requestNearIntentsQuote,
   selectableSourceTokens,
@@ -24,6 +27,8 @@ const USDC: NearIntentsToken = {
 const RECIPIENT = 'XanAvE5GMB8CsPH78B9moJq9viEVKvCS4f';
 const REFUND = '0x2527D02599Ba641c19FEa793cD0F167589a0f10D';
 const NOW = Date.parse('2026-10-07T17:00:00.000Z');
+const MINUTE = 60 * 1000;
+const HOUR = 60 * MINUTE;
 
 function mockFetch(status: number, body: unknown) {
   const fn = vi.fn(async (_url: string, _init?: RequestInit) => ({
@@ -172,6 +177,31 @@ describe('requestNearIntentsQuote', () => {
     await expect(requestNearIntentsQuote(quoteParams(false))).resolves.toMatchObject({ deadline: '2026-10-07T17:30:00.000Z' });
   });
 
+  it('asks for a 3 hour deadline when paying from a slow chain', async () => {
+    const fetchMock = mockFetch(201, quoteResponse({ quoteRequest: { originAsset: 'nep141:btc.omft.near' } }));
+    const btc = { assetId: 'nep141:btc.omft.near', symbol: 'BTC', blockchain: 'btc', decimals: 8 };
+    await requestNearIntentsQuote({ ...quoteParams(true), originAsset: btc });
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]!.body)).deadline).toBe('2026-10-07T20:00:00.000Z');
+  });
+
+  it.each([['2.68'], ['2.680000'], ['02.68']])('accepts amountInFormatted %s matching the decimals', async (formatted) => {
+    mockFetch(201, quoteResponse({ quote: { amountInFormatted: formatted } }));
+    await expect(requestNearIntentsQuote(quoteParams(true))).resolves.toMatchObject({ amountIn: '2680000' });
+  });
+
+  it.each([['0.00000268'], ['2680000'], ['2.68 USDC'], [2.68]])(
+    'refuses a quote whose amountInFormatted %s disagrees with the decimals',
+    async (formatted) => {
+      mockFetch(201, quoteResponse({ quote: { amountInFormatted: formatted } }));
+      await expect(requestNearIntentsQuote(quoteParams(true))).rejects.toMatchObject({ kind: 'invalid_response' });
+    }
+  );
+
+  it('refuses a minimum input above the quoted input', async () => {
+    mockFetch(201, quoteResponse({ quote: { minAmountIn: '2680001' } }));
+    await expect(requestNearIntentsQuote(quoteParams(true))).rejects.toMatchObject({ kind: 'invalid_response' });
+  });
+
   it('turns "No liquidity available" into a friendly message', async () => {
     mockFetch(400, { message: 'No liquidity available', correlationId: 'x' });
     const error = await requestNearIntentsQuote(quoteParams(true)).catch((e) => e);
@@ -269,12 +299,35 @@ describe('helpers', () => {
     expect(parseDashToDuffs('99999999.99999999')).toBeNull();
   });
 
-  it('treats an unfunded swap past its deadline as expired', () => {
+  it('gives slow source chains a longer payment window', () => {
+    expect(nearSwapWindowMs('eth')).toBe(60 * MINUTE);
+    for (const chain of ['btc', 'ltc', 'doge', 'zec', 'bch']) expect(nearSwapWindowMs(chain)).toBe(180 * MINUTE);
+  });
+
+  it('cuts payment off a margin before the deadline: max(10 min, 1/4 of the window)', () => {
     const deadline = '2026-10-07T18:00:00.000Z';
-    const after = Date.parse(deadline) + 1;
-    expect(isNearSwapExpired({ status: 'PENDING_DEPOSIT', deadline }, after)).toBe(true);
-    expect(isNearSwapExpired({ status: 'PENDING_DEPOSIT', deadline }, NOW)).toBe(false);
-    expect(isNearSwapExpired({ status: 'PROCESSING', deadline }, after)).toBe(false);
+    const at = Date.parse(deadline);
+    expect(nearSwapPaymentCutoff({ deadline, blockchain: 'eth' })).toBe(at - 15 * MINUTE);
+    expect(nearSwapPaymentCutoff({ deadline, blockchain: 'btc' })).toBe(at - 45 * MINUTE);
+  });
+
+  it('treats a swap still awaiting payment past the cutoff as expired', () => {
+    const deadline = '2026-10-07T18:00:00.000Z';
+    const cutoff = Date.parse(deadline) - 15 * MINUTE;
+    const swap = { deadline, blockchain: 'eth' };
+    expect(isNearSwapExpired({ ...swap, status: 'PENDING_DEPOSIT' }, cutoff - 1)).toBe(false);
+    expect(isNearSwapExpired({ ...swap, status: 'PENDING_DEPOSIT' }, cutoff)).toBe(true);
+    expect(isNearSwapExpired({ ...swap, status: 'INCOMPLETE_DEPOSIT' }, cutoff)).toBe(true);
+    expect(isNearSwapExpired({ ...swap, status: 'INCOMPLETE_DEPOSIT' }, cutoff - 1)).toBe(false);
+    expect(isNearSwapExpired({ ...swap, status: 'PROCESSING' }, cutoff + HOUR)).toBe(false);
+    expect(isNearSwapExpired({ ...swap, status: 'PENDING_DEPOSIT', deadline: 'garbage' }, NOW)).toBe(true);
+  });
+
+  it('flags a confirmed quote more than the allowed basis points above the approved one', () => {
+    expect(isNearPriceIncreaseTooLarge('1000000', '1020000', 200n)).toBe(false);
+    expect(isNearPriceIncreaseTooLarge('1000000', '1020001', 200n)).toBe(true);
+    expect(isNearPriceIncreaseTooLarge('1000000', '900000', 200n)).toBe(false);
+    expect(isNearPriceIncreaseTooLarge('1', '2', 200n)).toBe(true);
   });
 
   it('checks refund addresses loosely', () => {
