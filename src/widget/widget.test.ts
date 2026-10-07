@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // @vitest-environment-options {"settings":{"navigation":{"disableChildFrameNavigation":true}}}
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { createIdentity, DashBridgeError, IFRAME_SANDBOX } from './index.js';
+import { createIdentity, DashBridgeError, IFRAME_READY_TIMEOUT_MS, IFRAME_SANDBOX } from './index.js';
 import { acceptBridgeEvent, buildBridgeUrl, generateRequestId } from './helpers.js';
 import { buildMessage, isValidRequestId, type MessagePayloads, type MessageType } from '../embed/protocol.js';
 
@@ -148,8 +148,71 @@ describe('createIdentity (iframe)', () => {
     expect(container.querySelector('iframe')).toBeNull();
   });
 
+  it('removing the iframe before a result rejects with cancelled', async () => {
+    vi.useFakeTimers();
+    const { promise, iframe } = setup();
+    iframe.remove();
+    vi.advanceTimersByTime(600);
+    await expect(promise).rejects.toMatchObject({ code: 'cancelled' });
+  });
+
+  it('stops listening once the host removes the iframe after a result', async () => {
+    vi.useFakeTimers();
+    const onProgress = vi.fn();
+    const { promise, iframe, send } = setup({ onProgress });
+    send('identity-created', { identityId: IDENTITY_ID, network: 'testnet' });
+    await expect(promise).resolves.toMatchObject({ identityId: IDENTITY_ID });
+    const removeListener = vi.spyOn(window, 'removeEventListener');
+    iframe.remove();
+    vi.advanceTimersByTime(600);
+    expect(removeListener).toHaveBeenCalledWith('message', expect.any(Function));
+  });
+
+  it('rejects with bridge_unavailable if the bridge never says ready', async () => {
+    vi.useFakeTimers();
+    const { promise, container } = setup();
+    vi.advanceTimersByTime(IFRAME_READY_TIMEOUT_MS + 1);
+    await expect(promise).rejects.toMatchObject({ code: 'bridge_unavailable' });
+    expect(container.querySelector('iframe')).toBeNull();
+  });
+
+  it('does not time out once the bridge is ready', async () => {
+    vi.useFakeTimers();
+    const { promise, send } = setup();
+    send('ready', {});
+    vi.advanceTimersByTime(IFRAME_READY_TIMEOUT_MS + 1);
+    send('identity-created', { identityId: IDENTITY_ID, network: 'testnet' });
+    await expect(promise).resolves.toMatchObject({ identityId: IDENTITY_ID });
+  });
+
   it('requires a container', async () => {
     await expect(createIdentity({ mode: 'iframe' })).rejects.toMatchObject({ code: 'invalid_options' });
+  });
+});
+
+describe('createIdentity option checks', () => {
+  type HappyWindow = { happyDOM: { setURL(url: string): void } };
+  const setPageUrl = (url: string) => (window as unknown as HappyWindow).happyDOM.setURL(url);
+
+  afterEach(() => setPageUrl('http://localhost:3000/'));
+
+  it('rejects an app served over plain http on a public host (the bridge would refuse it)', async () => {
+    setPageUrl('http://app.example/');
+    const open = vi.spyOn(window, 'open');
+    await expect(createIdentity({ bridgeUrl: BRIDGE })).rejects.toMatchObject({ code: 'invalid_options' });
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it('accepts https apps', async () => {
+    setPageUrl('https://app.example/');
+    vi.spyOn(window, 'open').mockReturnValue(null);
+    await expect(createIdentity({ bridgeUrl: BRIDGE })).rejects.toMatchObject({ code: 'popup_blocked' });
+  });
+
+  it('rejects a plain-http bridge URL on a public host', async () => {
+    await expect(createIdentity({ bridgeUrl: 'http://bridge.example/' })).rejects.toMatchObject({
+      code: 'invalid_options',
+    });
   });
 });
 

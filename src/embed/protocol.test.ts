@@ -118,12 +118,23 @@ describe('parseRequestOrigin', () => {
     'file:///etc/passwd',
     'ftp://app.example',
     'http://localhost.evil.example',
+    'http://127.0.0.1.evil.example',
   ])('rejects %s', (origin) => {
     expect(parseRequestOrigin(origin)).toBeNull();
   });
 });
 
 describe('sanitizeAppName / isValidRequestId', () => {
+  it('strips bidi overrides and other format characters', () => {
+    expect(sanitizeAppName('My\u202eppa\u202c App\u200b')).toBe('Myppa App');
+    expect(sanitizeAppName('\u2066x\u2069')).toBe('x');
+  });
+
+  it('caps by code points without splitting surrogate pairs', () => {
+    const name = sanitizeAppName('a'.repeat(63) + '\u{1F600}\u{1F600}');
+    expect(name).toBe('a'.repeat(63) + '\u{1F600}');
+  });
+
   it('trims, strips control characters and caps the app name', () => {
     expect(sanitizeAppName('  My\u0000 App\n ')).toBe('My App');
     expect(sanitizeAppName('x'.repeat(100))).toHaveLength(64);

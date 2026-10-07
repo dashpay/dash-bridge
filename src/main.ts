@@ -539,17 +539,28 @@ function init() {
   if (embedSession) {
     const session = embedSession;
     window.addEventListener('pagehide', () => session.handlePageHide());
-    // Embed mode goes straight to create; skip the deep links below.
-    state = applyEmbed(createInitialState(session.network));
-    if (container) {
-      render(state, container);
-      setupEventListeners(container);
-    }
-    session.start(state);
-    scheduleDashWarmup();
-    return;
+    window.addEventListener('pageshow', (event) => {
+      if (!event.persisted) return;
+      session.expire();
+      updateState(state);
+    });
   }
 
+  // Embed mode goes straight to create; deep links are for standalone use.
+  state = embedSession ? applyEmbed(createInitialState(embedSession.network)) : stateFromUrl();
+
+  // Render UI
+  if (container) {
+    render(state, container);
+    setupEventListeners(container);
+  }
+
+  embedSession?.start(state);
+  scheduleDashWarmup();
+}
+
+/** Initial standalone state, honoring ?network=, ?address= and ?mode= deep links. */
+function stateFromUrl(): BridgeState {
   const urlParams = new URLSearchParams(window.location.search);
 
   // Infer network from ?address= param prefix, falling back to ?network= param
@@ -565,35 +576,28 @@ function init() {
     }
   }
 
-  // Initialize state
-  state = createInitialState(network);
+  let initial = createInitialState(network);
 
   // Deep-link: ?address=<bech32m> opens send-to-address mode with address pre-filled
   if (addressParam && validatePlatformAddress(addressParam, network)) {
-    state = setMode(state, 'send_to_address');
-    state = setRecipientPlatformAddress(state, addressParam);
+    initial = setMode(initial, 'send_to_address');
+    initial = setRecipientPlatformAddress(initial, addressParam);
   }
 
   // Deep-link: ?mode=contract opens contract registration mode
   const modeParam = urlParams.get('mode');
   if (modeParam === 'contract') {
-    state = setMode(state, 'contract');
+    initial = setMode(initial, 'contract');
     const contractParam = urlParams.get('contract');
     if (contractParam) {
       void hydrateContractDeepLink(contractParam);
     }
   } else if (modeParam === 'withdraw') {
     // Deep-link: ?mode=withdraw opens credit withdrawal mode
-    state = setMode(state, 'withdraw');
+    initial = setMode(initial, 'withdraw');
   }
 
-  // Render UI
-  if (container) {
-    render(state, container);
-    setupEventListeners(container);
-  }
-
-  scheduleDashWarmup();
+  return initial;
 }
 
 /**
@@ -641,6 +645,11 @@ function updateState(newState: BridgeState) {
   const prevState = state;
   state = applyEmbed(newState);
   const container = document.getElementById('app');
+  // Embed request cancelled or expired: the flow UI stays replaced.
+  if (embedSession?.notice) {
+    if (container) renderEmbedNotice(container, embedSession.notice);
+    return;
+  }
   if (container) {
     // Save focus state before re-render
     const activeElement = document.activeElement as HTMLInputElement | null;
@@ -737,7 +746,7 @@ function setupEventListeners(container: HTMLElement) {
 
   // Embed mode: Cancel (banner) and Return to app (complete screen)
   container.querySelector('#embed-cancel-btn')?.addEventListener('click', () => {
-    embedSession?.cancel(state);
+    if (embedSession?.cancel(state)) updateState(state);
   });
   container.querySelector('#embed-return-btn')?.addEventListener('click', () => {
     embedSession?.returnToApp();

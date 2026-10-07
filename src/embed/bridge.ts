@@ -3,7 +3,7 @@
  * iframe (see docs/widget.md) and receives the new identity ID back via
  * postMessage. Keys and the mnemonic never leave this window.
  */
-import type { BridgeState, BridgeStep, EmbedDisplay } from '../types.js';
+import type { BridgeState, BridgeStep, EmbedDisplay, EmbedNotice } from '../types.js';
 import { ErrorCodeLabels } from '../ui/state.js';
 import {
   buildMessage,
@@ -16,23 +16,30 @@ import {
   type UnsupportedEmbedParams,
 } from './protocol.js';
 
-/** Message shown instead of the app when it must not run in this context. */
-export interface EmbedNotice {
-  title: string;
-  message: string;
-  /** Offer a link that opens the standalone bridge in a new tab. */
-  openHref?: string;
-}
-
 export type EmbedResolution =
   | { action: 'run'; session?: EmbedSession }
   | { action: 'block'; notice: EmbedNotice };
 
-const EMBED_PARAM_NAMES = ['embed', 'origin', 'app', 'request', 'requestId'];
-
 const CANCEL_AFTER_DEPOSIT_PROMPT =
   'If you already sent DASH to the deposit address, cancelling leaves it locked ' +
   'until you recover it with your key backup. Cancel anyway?';
+
+export const EXPIRED_NOTICE: EmbedNotice = {
+  title: 'Request expired',
+  message: 'This window is no longer connected to the app that opened it. Return to the app and try again.',
+};
+
+const CANCELLED_NOTICE: EmbedNotice = {
+  title: 'Request cancelled',
+  message: 'Nothing was shared with the app.',
+};
+
+/** Steps where the identity may already be on its way to Platform: no cancelling. */
+const NON_CANCELLABLE_STEPS: readonly BridgeStep[] = ['registering_identity', 'complete'];
+
+export function canCancel(step: BridgeStep): boolean {
+  return !NON_CANCELLABLE_STEPS.includes(step);
+}
 
 /** Map internal UI steps of the create flow to the coarse public progress steps. */
 export function toProgressStep(step: BridgeStep): ProgressStep | undefined {
@@ -68,10 +75,15 @@ function isFramed(win: Window): boolean {
   }
 }
 
-/** The current URL without embed parameters, for "open in a new window" links. */
+/**
+ * Standalone bridge URL for "open in a new window" links. Built from scratch
+ * (keeping only the network) so a framer can't smuggle deep-link params.
+ */
 function standaloneHref(win: Window): string {
-  const url = new URL(win.location.href);
-  for (const name of EMBED_PARAM_NAMES) url.searchParams.delete(name);
+  const current = new URL(win.location.href);
+  const url = new URL('/', current.origin);
+  const network = current.searchParams.get('network');
+  if (network) url.searchParams.set('network', network);
   return url.toString();
 }
 
@@ -91,6 +103,16 @@ function framingOrigin(win: Window): string | undefined {
   }
 }
 
+/** A reload or history navigation can't resume a request: its state is gone. */
+function isRevisit(win: Window): boolean {
+  const entry = win.performance?.getEntriesByType?.('navigation')[0] as PerformanceNavigationTiming | undefined;
+  return entry?.type === 'reload' || entry?.type === 'back_forward';
+}
+
+function block(title: string, message: string, openHref?: string): EmbedResolution {
+  return { action: 'block', notice: { title, message, openHref } };
+}
+
 /**
  * Decide how the page may run, given its URL and how it is framed. Returns an
  * embed session when the bridge was opened by an app.
@@ -98,68 +120,45 @@ function framingOrigin(win: Window): string | undefined {
 export function resolveEmbed(win: Window = window): EmbedResolution {
   const parsed = parseEmbedParams(win.location.search);
   const framed = isFramed(win);
-  const kind = parsed.status === 'ok' || parsed.status === 'unsupported' ? parsed.params.kind : undefined;
 
-  // Clickjacking guard: only an explicit, validated iframe embed may be framed.
-  if (framed && kind !== 'iframe') {
-    return {
-      action: 'block',
-      notice: {
-        title: "This page can't run inside another site",
-        message: 'For your security, the Dash Bridge only runs in its own window.',
-        openHref: standaloneHref(win),
-      },
-    };
+  // Clickjacking guard: only an iframe embed may be framed. (Invalid iframe
+  // requests fall through so the user sees the actual reason.)
+  if (framed && new URLSearchParams(win.location.search).get('embed') !== 'iframe') {
+    return block(
+      "This page can't run inside another site",
+      'For your security, the Dash Bridge only runs in its own window.',
+      standaloneHref(win),
+    );
   }
 
   if (parsed.status === 'none') return { action: 'run' };
   if (parsed.status === 'invalid') {
-    return {
-      action: 'block',
-      notice: {
-        title: 'Invalid request',
-        message: `${parsed.reason} Return to the app and try again.`,
-      },
-    };
+    return block('Invalid request', `${parsed.reason} Return to the app and try again.`);
   }
+  if (isRevisit(win)) return { action: 'block', notice: EXPIRED_NOTICE };
 
   const params = parsed.params;
   if (params.kind === 'iframe') {
     if (!framed) {
-      return {
-        action: 'block',
-        notice: {
-          title: 'Nothing to embed',
-          message: 'This link is meant to be embedded by another app.',
-          openHref: standaloneHref(win),
-        },
-      };
+      return block('Nothing to embed', 'This link is meant to be embedded by another app.', standaloneHref(win));
     }
-    const actual = framingOrigin(win);
-    if (actual !== undefined && actual !== params.origin) {
-      return {
-        action: 'block',
-        notice: {
-          title: 'Request refused',
-          message: "The page embedding the bridge doesn't match the origin it declared.",
-          openHref: standaloneHref(win),
-        },
-      };
+    // Unknown framer (no ancestorOrigins, no referrer) is refused too: the
+    // banner would otherwise vouch for an origin nobody checked.
+    if (framingOrigin(win) !== params.origin) {
+      return block(
+        'Request refused',
+        "The bridge couldn't confirm that the page embedding it is the app it claims to be.",
+        standaloneHref(win),
+      );
     }
   } else if (!win.opener) {
-    return {
-      action: 'block',
-      notice: {
-        title: 'Request expired',
-        message: 'This window is no longer connected to the app that opened it. Return to the app and try again.',
-      },
-    };
+    return { action: 'block', notice: EXPIRED_NOTICE };
   }
 
   const session = new EmbedSession(params, win);
   if (parsed.status === 'unsupported') {
     session.failFatal(parsed.code, parsed.reason);
-    return { action: 'block', notice: { title: 'Unsupported request', message: parsed.reason } };
+    return block('Unsupported request', parsed.reason);
   }
   return { action: 'run', session };
 }
@@ -172,6 +171,8 @@ export function resolveEmbed(win: Window = window): EmbedResolution {
 export class EmbedSession {
   readonly display: EmbedDisplay;
   readonly network: EmbedNetwork;
+  /** When set, the app UI is replaced by this notice (cancelled / expired). */
+  notice: EmbedNotice | undefined;
   private lastProgress: ProgressStep | undefined;
   private finished = false;
 
@@ -197,6 +198,14 @@ export class EmbedSession {
     } catch (err) {
       console.warn('Could not message the requesting app:', err);
     }
+  }
+
+  /** Post a terminal message; at most one per session. */
+  private finish<T extends MessageType>(type: T, payload: MessagePayloads[T]): boolean {
+    if (this.finished) return false;
+    this.finished = true;
+    this.post(type, payload);
+    return true;
   }
 
   /** Announce that the bridge loaded, with the initial progress step. */
@@ -228,30 +237,26 @@ export class EmbedSession {
       next.step === 'complete' &&
       next.identityId
     ) {
-      this.finished = true;
-      this.post('identity-created', { identityId: next.identityId, network: next.network });
+      this.finish('identity-created', { identityId: next.identityId, network: next.network });
     }
   }
 
   /** Report a request the bridge cannot serve. */
   failFatal(code: string, message: string): void {
-    if (this.finished) return;
-    this.finished = true;
-    this.post('error', { code, message, fatal: true });
+    this.finish('error', { code, message, fatal: true });
   }
 
   /**
    * User pressed Cancel. Asks for confirmation once funds may be in flight.
-   * Returns false if the user backed out.
+   * Returns false if nothing was cancelled.
    */
   cancel(state: BridgeState, confirm: (message: string) => boolean = (m) => this.win.confirm(m)): boolean {
-    if (this.finished) return false;
-    if (state.assetLockKeyPair && state.step !== 'complete' && !confirm(CANCEL_AFTER_DEPOSIT_PROMPT)) {
-      return false;
-    }
-    this.finished = true;
-    this.post('cancelled', {});
+    if (this.finished || !canCancel(state.step)) return false;
+    if (state.assetLockKeyPair && !confirm(CANCEL_AFTER_DEPOSIT_PROMPT)) return false;
+    this.finish('cancelled', {});
+    // The popup closes; an iframe host may not remove us, so stop the flow UI.
     if (this.params.kind === 'popup') this.win.close();
+    this.notice = CANCELLED_NOTICE;
     return true;
   }
 
@@ -264,10 +269,18 @@ export class EmbedSession {
     }
   }
 
-  /** Best effort: tell the app the window is going away before a result. */
+  /**
+   * iframe mode, best effort: the frame is going away before a result. Popups
+   * don't do this: a reload would orphan the request, and the SDK already
+   * notices a closed popup.
+   */
   handlePageHide(): void {
-    if (this.finished) return;
+    if (this.params.kind === 'iframe') this.finish('cancelled', {});
+  }
+
+  /** Restored from the back/forward cache: the app has moved on. */
+  expire(): void {
     this.finished = true;
-    this.post('cancelled', {});
+    this.notice = EXPIRED_NOTICE;
   }
 }

@@ -57,6 +57,17 @@ describe('embed mode UI', () => {
     expect(container.querySelector('#retry-btn')).toBeNull();
   });
 
+  it('hides Cancel while the identity is being registered', () => {
+    const container = renderState({ ...embedded(), step: 'registering_identity' });
+    expect(container.querySelector('.embed-banner')).not.toBeNull();
+    expect(container.querySelector('#embed-cancel-btn')).toBeNull();
+  });
+
+  it('isolates the app name with <bdi> so it cannot reorder the origin', () => {
+    const container = renderState(embedded());
+    expect(container.querySelector('.embed-banner strong bdi')?.textContent).toBe('Demo App');
+  });
+
   it('leaves the normal UI unchanged outside embed mode', () => {
     const container = renderState(setMode(createInitialState('testnet'), 'create'));
     expect(container.querySelector('.embed-banner')).toBeNull();

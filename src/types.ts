@@ -325,6 +325,14 @@ export interface EmbedDisplay {
   appName?: string;
 }
 
+/** Embed mode: message shown instead of the app when it must not run. */
+export interface EmbedNotice {
+  title: string;
+  message: string;
+  /** Offer a link that opens the standalone bridge in a new tab. */
+  openHref?: string;
+}
+
 export interface BridgeState {
   step: BridgeStep;
   network: string;

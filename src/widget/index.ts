@@ -10,6 +10,12 @@
  */
 import {
   PROTOCOL_VERSION,
+  EMBED_KINDS,
+  EMBED_NETWORKS,
+  isAllowedWebUrl,
+  isOneOf,
+  parseRequestOrigin,
+  sanitizeAppName,
   type BridgeMessage,
   type EmbedKind,
   type EmbedNetwork,
@@ -25,7 +31,10 @@ export const DEFAULT_BRIDGE_URL = 'https://bridge.thepasta.org/';
 
 const POPUP_WIDTH = 480;
 const POPUP_HEIGHT = 760;
-const POPUP_CLOSED_POLL_MS = 500;
+/** How often to check whether the popup was closed / the iframe removed. */
+const WATCH_INTERVAL_MS = 500;
+/** iframe mode: give up if the bridge never says `ready` (e.g. it refused the request). */
+export const IFRAME_READY_TIMEOUT_MS = 30_000;
 const IFRAME_HEIGHT = '760px';
 /** See docs/widget.md: what the bridge needs inside a sandboxed iframe. */
 export const IFRAME_SANDBOX =
@@ -34,9 +43,12 @@ export const IFRAME_ALLOW = 'clipboard-write';
 
 /**
  * - `popup_blocked`: the browser blocked the popup (call from a click handler).
- * - `cancelled`: the user cancelled or closed the bridge.
+ * - `cancelled`: the user cancelled, closed the popup, or the iframe was removed.
  * - `aborted`: the caller's AbortSignal fired.
- * - `invalid_options`: bad arguments.
+ * - `invalid_options`: bad arguments, or the page/bridge URL is not https
+ *   (http is allowed only on localhost).
+ * - `bridge_unavailable`: iframe mode, the bridge did not load or refused the
+ *   request (it shows the reason inside the iframe).
  * - anything else: a fatal error code reported by the bridge
  *   (e.g. `unsupported_network`, `unsupported_request`).
  */
@@ -45,6 +57,7 @@ export type DashBridgeErrorCode =
   | 'cancelled'
   | 'aborted'
   | 'invalid_options'
+  | 'bridge_unavailable'
   | (string & {});
 
 export class DashBridgeError extends Error {
@@ -70,7 +83,7 @@ export interface BridgeRequestOptions {
   mode?: EmbedKind;
   /** iframe mode: element the iframe is appended to. */
   container?: HTMLElement;
-  /** Name shown to the user in the bridge (max 64 chars). */
+  /** Name shown to the user in the bridge (max 64 characters). */
   appName?: string;
   /** Defaults to `https://bridge.thepasta.org/`. */
   bridgeUrl?: string;
@@ -122,13 +135,14 @@ function runBridgeRequest<R>(
     const network = options.network ?? 'testnet';
     const invalid = (message: string) => reject(new DashBridgeError('invalid_options', message));
 
-    if (mode !== 'popup' && mode !== 'iframe') return invalid('mode must be "popup" or "iframe"');
-    if (network !== 'mainnet' && network !== 'testnet') return invalid('network must be "mainnet" or "testnet"');
+    if (!isOneOf(EMBED_KINDS, mode)) return invalid('mode must be "popup" or "iframe"');
+    if (!isOneOf(EMBED_NETWORKS, network)) return invalid('network must be "mainnet" or "testnet"');
     if (mode === 'iframe' && !(options.container instanceof HTMLElement)) {
       return invalid('iframe mode needs a container element');
     }
-    const origin = window.location.origin;
-    if (!origin || origin === 'null') return invalid('the app must be served from an http(s) origin');
+    // Same rule the bridge applies, so it never silently refuses us.
+    const origin = parseRequestOrigin(window.location.origin);
+    if (!origin) return invalid('the app must be served over https (http only on localhost)');
 
     let bridgeUrl: URL;
     try {
@@ -136,9 +150,7 @@ function runBridgeRequest<R>(
     } catch {
       return invalid('bridgeUrl is not a valid URL');
     }
-    if (bridgeUrl.protocol !== 'https:' && bridgeUrl.protocol !== 'http:') {
-      return invalid('bridgeUrl must be http(s)');
-    }
+    if (!isAllowedWebUrl(bridgeUrl)) return invalid('bridgeUrl must be https (http only on localhost)');
     if (options.signal?.aborted) {
       return reject(new DashBridgeError('aborted', 'The request was aborted.'));
     }
@@ -151,7 +163,7 @@ function runBridgeRequest<R>(
       request,
       network,
       requestId,
-      appName: options.appName?.slice(0, 64),
+      appName: sanitizeAppName(options.appName),
     });
     const bridgeOrigin = bridgeUrl.origin;
 
@@ -178,7 +190,7 @@ function runBridgeRequest<R>(
       iframe.title = 'Dash Bridge';
       iframe.setAttribute('sandbox', IFRAME_SANDBOX);
       iframe.setAttribute('allow', IFRAME_ALLOW);
-      // Lets the bridge cross-check the embedding origin where
+      // Lets the bridge check the embedding origin where
       // location.ancestorOrigins is unavailable.
       iframe.referrerPolicy = 'origin';
       iframe.style.cssText = `width:100%;height:${IFRAME_HEIGHT};border:0;display:block;`;
@@ -187,64 +199,60 @@ function runBridgeRequest<R>(
     }
 
     let settled = false;
-    let closedTimer: ReturnType<typeof setInterval> | undefined;
+    let watchTimer: ReturnType<typeof setInterval> | undefined;
+    let readyTimer: ReturnType<typeof setTimeout> | undefined;
 
-    const removeIframe = () => {
+    /** Final cleanup: no more messages, timers stopped, iframe removed. */
+    const teardown = () => {
+      window.removeEventListener('message', onMessage);
+      options.signal?.removeEventListener('abort', onAbort);
+      clearInterval(watchTimer);
+      clearTimeout(readyTimer);
       iframe?.remove();
       iframe = null;
     };
 
-    const stopListening = () => {
-      window.removeEventListener('message', onMessage);
-      options.signal?.removeEventListener('abort', onAbort);
-      if (closedTimer !== undefined) clearInterval(closedTimer);
-      closedTimer = undefined;
-    };
-
-    /** Final cleanup: no more messages, iframe removed. */
-    const teardown = () => {
-      stopListening();
-      removeIframe();
-    };
-
-    const fail = (error: DashBridgeError, closeBridge: boolean) => {
+    const fail = (code: DashBridgeErrorCode, message: string, closePopup = false) => {
       if (settled) return;
       settled = true;
       teardown();
-      if (closeBridge && popup && !popup.closed) popup.close();
-      reject(error);
+      if (closePopup && popup && !popup.closed) popup.close();
+      reject(new DashBridgeError(code, message));
     };
 
     const succeed = (result: R) => {
       if (settled) return;
       settled = true;
       resolve(result);
-      // The user still has to save their keys: the popup stays open, and the
-      // iframe stays until the bridge asks to close (or the signal aborts).
-      if (!iframe) stopListening();
-      else if (closedTimer !== undefined) clearInterval(closedTimer);
+      // The user still has to save their keys. The popup stays open and we're
+      // done with it; the iframe stays until the bridge asks to close, the
+      // host removes it, or the signal aborts.
+      if (popup) teardown();
     };
 
     function onAbort() {
       if (settled) teardown();
-      else fail(new DashBridgeError('aborted', 'The request was aborted.'), true);
+      else fail('aborted', 'The request was aborted.', true);
     }
 
     function onMessage(event: MessageEvent) {
       const msg = acceptBridgeEvent(event, { origin: bridgeOrigin, source: target, request, requestId });
       if (!msg) return;
       switch (msg.type) {
+        case 'ready':
+          clearTimeout(readyTimer);
+          return;
         case 'progress':
           if (!settled) safeCall(options.onProgress, msg.step);
           return;
         case 'error':
-          if (msg.fatal) fail(new DashBridgeError(msg.code, msg.message), false);
+          if (msg.fatal) fail(msg.code, msg.message);
           else if (!settled) safeCall(options.onError, { code: msg.code, message: msg.message });
           return;
         case 'cancelled':
         case 'close':
           if (settled) teardown();
-          else fail(new DashBridgeError('cancelled', 'The user cancelled the request.'), false);
+          else fail('cancelled', 'The user cancelled the request.');
           return;
         default: {
           const result = extractResult(msg);
@@ -255,11 +263,17 @@ function runBridgeRequest<R>(
 
     window.addEventListener('message', onMessage);
     options.signal?.addEventListener('abort', onAbort);
-    if (popup) {
-      const watched = popup;
-      closedTimer = setInterval(() => {
-        if (watched.closed) fail(new DashBridgeError('cancelled', 'The Dash Bridge window was closed.'), false);
-      }, POPUP_CLOSED_POLL_MS);
+    watchTimer = setInterval(() => {
+      const gone = popup ? popup.closed : !iframe?.isConnected;
+      if (!gone) return;
+      if (settled) teardown();
+      else fail('cancelled', popup ? 'The Dash Bridge window was closed.' : 'The Dash Bridge iframe was removed.');
+    }, WATCH_INTERVAL_MS);
+    if (iframe) {
+      readyTimer = setTimeout(
+        () => fail('bridge_unavailable', 'The Dash Bridge did not load or refused the request.'),
+        IFRAME_READY_TIMEOUT_MS,
+      );
     }
   });
 }

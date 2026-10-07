@@ -13,41 +13,40 @@ export const PROTOCOL_SOURCE = 'dash-bridge';
 export const PROTOCOL_VERSION = 1;
 
 /** How the requesting app hosts the bridge. */
-export type EmbedKind = 'popup' | 'iframe';
-export const EMBED_KINDS: readonly EmbedKind[] = ['popup', 'iframe'];
+export const EMBED_KINDS = ['popup', 'iframe'] as const;
+export type EmbedKind = (typeof EMBED_KINDS)[number];
 
 /**
  * What the app asked the bridge to do. Each request type has its own result
  * message; the envelope, origin handling and lifecycle messages are shared.
  */
-export type EmbedRequestType = 'create-identity';
-export const EMBED_REQUEST_TYPES: readonly EmbedRequestType[] = ['create-identity'];
+export const EMBED_REQUEST_TYPES = ['create-identity'] as const;
+export type EmbedRequestType = (typeof EMBED_REQUEST_TYPES)[number];
 export const DEFAULT_REQUEST_TYPE: EmbedRequestType = 'create-identity';
 
-export type EmbedNetwork = 'mainnet' | 'testnet';
-export const EMBED_NETWORKS: readonly EmbedNetwork[] = ['mainnet', 'testnet'];
+export const EMBED_NETWORKS = ['mainnet', 'testnet'] as const;
+export type EmbedNetwork = (typeof EMBED_NETWORKS)[number];
 
 /** Coarse, stable progress steps exposed to apps (decoupled from internal UI steps). */
-export type ProgressStep =
-  | 'configuring'
-  | 'awaiting_deposit'
-  | 'processing'
-  | 'registering'
-  | 'complete'
-  | 'error';
-export const PROGRESS_STEPS: readonly ProgressStep[] = [
+export const PROGRESS_STEPS = [
   'configuring',
   'awaiting_deposit',
   'processing',
   'registering',
   'complete',
   'error',
-];
+] as const;
+export type ProgressStep = (typeof PROGRESS_STEPS)[number];
 
 export const MAX_APP_NAME_LENGTH = 64;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const REQUEST_TYPE_PATTERN = /^[a-z0-9-]{1,32}$/;
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/** Type guard: `value` is one of the literals in `list`. */
+export function isOneOf<T extends string>(list: readonly T[], value: unknown): value is T {
+  return (list as readonly unknown[]).includes(value);
+}
 
 /** Payload per message type. Only these keys are ever emitted. */
 export interface MessagePayloads {
@@ -96,19 +95,13 @@ export type BridgeMessageOf<T extends MessageType> = MessageEnvelope<T> & Messag
 /** Discriminated union of every bridge message (narrow on `type`). */
 export type BridgeMessage = { [T in MessageType]: BridgeMessageOf<T> }[MessageType];
 
-/** Request context the bridge echoes in every message. */
-export interface MessageContext {
-  request: string;
-  requestId?: string;
-}
-
 /**
  * Build an outbound message. Copies only the whitelisted payload fields for
  * `type`, so extra properties on `payload` are dropped.
  */
 export function buildMessage<T extends MessageType>(
   type: T,
-  ctx: MessageContext,
+  ctx: Pick<MessageEnvelope, 'request' | 'requestId'>,
   payload: MessagePayloads[T],
 ): BridgeMessageOf<T> {
   const message: Record<string, unknown> = {
@@ -136,12 +129,12 @@ export function parseBridgeMessage(
   if (!data || typeof data !== 'object') return null;
   const msg = data as Record<string, unknown>;
   if (msg.source !== PROTOCOL_SOURCE || msg.version !== PROTOCOL_VERSION) return null;
-  if (typeof msg.type !== 'string' || !(MESSAGE_TYPES as string[]).includes(msg.type)) return null;
+  if (!isOneOf(MESSAGE_TYPES, msg.type)) return null;
   if (msg.request !== expected.request || msg.requestId !== expected.requestId) return null;
 
-  switch (msg.type as MessageType) {
+  switch (msg.type) {
     case 'progress':
-      if (!(PROGRESS_STEPS as readonly unknown[]).includes(msg.step)) return null;
+      if (!isOneOf(PROGRESS_STEPS, msg.step)) return null;
       break;
     case 'identity-created':
       if (typeof msg.identityId !== 'string' || typeof msg.network !== 'string') return null;
@@ -153,6 +146,11 @@ export function parseBridgeMessage(
       break;
   }
   return msg as unknown as BridgeMessage;
+}
+
+/** https anywhere, or http on a loopback host (local development). */
+export function isAllowedWebUrl(url: URL): boolean {
+  return url.protocol === 'https:' || (url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname));
 }
 
 /**
@@ -168,19 +166,22 @@ export function parseRequestOrigin(value: string | null | undefined): string | n
     return null;
   }
   if (url.origin === 'null' || url.origin !== value) return null;
-  if (url.protocol === 'https:') return url.origin;
-  if (url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname)) return url.origin;
-  return null;
+  return isAllowedWebUrl(url) ? url.origin : null;
 }
 
 export function isValidRequestId(value: unknown): value is string {
   return typeof value === 'string' && REQUEST_ID_PATTERN.test(value);
 }
 
-/** Trim, drop control characters and cap the length of an app display name. */
+/**
+ * Trim, drop control and format characters (including bidi overrides that
+ * could visually reorder the origin next to it) and cap the length of an app
+ * display name, counting code points so surrogate pairs stay intact.
+ */
 export function sanitizeAppName(value: string | null | undefined): string | undefined {
   if (!value) return undefined;
-  const cleaned = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim().slice(0, MAX_APP_NAME_LENGTH).trim();
+  const stripped = value.replace(/[\p{Cc}\p{Cf}]/gu, '').trim();
+  const cleaned = Array.from(stripped).slice(0, MAX_APP_NAME_LENGTH).join('').trim();
   return cleaned || undefined;
 }
 
@@ -215,47 +216,35 @@ export function parseEmbedParams(search: string | URLSearchParams): EmbedParamsR
   const q = typeof search === 'string' ? new URLSearchParams(search) : search;
   const embed = q.get('embed');
   if (embed === null) return { status: 'none' };
-  if (!(EMBED_KINDS as readonly string[]).includes(embed)) {
-    return { status: 'invalid', reason: 'Unknown embed mode.' };
-  }
+  const invalid = (reason: string): EmbedParamsResult => ({ status: 'invalid', reason });
+
+  if (!isOneOf(EMBED_KINDS, embed)) return invalid('Unknown embed mode.');
   const origin = parseRequestOrigin(q.get('origin'));
-  if (!origin) {
-    return { status: 'invalid', reason: 'The requesting app did not provide a valid origin.' };
-  }
+  if (!origin) return invalid('The requesting app did not provide a valid origin.');
   const rawRequestId = q.get('requestId');
-  if (rawRequestId !== null && !isValidRequestId(rawRequestId)) {
-    return { status: 'invalid', reason: 'Invalid request ID.' };
-  }
+  if (rawRequestId !== null && !isValidRequestId(rawRequestId)) return invalid('Invalid request ID.');
+  const request = q.get('request') ?? DEFAULT_REQUEST_TYPE;
+  if (!REQUEST_TYPE_PATTERN.test(request)) return invalid('Invalid request type.');
+
   const base = {
-    kind: embed as EmbedKind,
+    kind: embed,
     origin,
     appName: sanitizeAppName(q.get('app')),
     requestId: rawRequestId ?? undefined,
   };
+  const unsupported = (code: string, reason: string): EmbedParamsResult => ({
+    status: 'unsupported',
+    params: { ...base, request },
+    code,
+    reason,
+  });
 
-  const request = q.get('request') ?? DEFAULT_REQUEST_TYPE;
-  if (!REQUEST_TYPE_PATTERN.test(request)) {
-    return { status: 'invalid', reason: 'Invalid request type.' };
-  }
-  if (!(EMBED_REQUEST_TYPES as readonly string[]).includes(request)) {
-    return {
-      status: 'unsupported',
-      params: { ...base, request },
-      code: 'unsupported_request',
-      reason: 'This bridge does not support the requested operation.',
-    };
+  if (!isOneOf(EMBED_REQUEST_TYPES, request)) {
+    return unsupported('unsupported_request', 'This bridge does not support the requested operation.');
   }
   const network = q.get('network') ?? 'testnet';
-  if (!(EMBED_NETWORKS as readonly string[]).includes(network)) {
-    return {
-      status: 'unsupported',
-      params: { ...base, request },
-      code: 'unsupported_network',
-      reason: 'Only mainnet and testnet are supported in embedded mode.',
-    };
+  if (!isOneOf(EMBED_NETWORKS, network)) {
+    return unsupported('unsupported_network', 'Only mainnet and testnet are supported in embedded mode.');
   }
-  return {
-    status: 'ok',
-    params: { ...base, request: request as EmbedRequestType, network: network as EmbedNetwork },
-  };
+  return { status: 'ok', params: { ...base, request, network } };
 }

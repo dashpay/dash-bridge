@@ -9,8 +9,6 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: false,
     target: 'es2018',
-    minify: 'esbuild',
-    sourcemap: false,
     lib: {
       entry: 'src/widget/index.ts',
       name: 'DashBridge',

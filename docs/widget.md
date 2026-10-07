@@ -14,6 +14,12 @@ exactly as in the standalone flow. The app receives only the fields listed in
   no dependencies and is about 5 KB.
 - Live demo: <https://bridge.thepasta.org/widget-demo.html>
 
+These URLs are not versioned. They always serve the latest SDK, so you can't
+pin them with Subresource Integrity (`integrity="..."`). If you need SRI, host
+a copy of `widget.js` yourself and update it when you choose. The message
+protocol is versioned (`version: 1`), so an older SDK keeps working with a
+newer bridge until the protocol version changes.
+
 ## Quick start
 
 ### Script tag
@@ -64,9 +70,11 @@ DashBridge.createIdentity({
 ```
 
 The SDK adds the iframe to `container`. After the identity is created, the
-iframe stays mounted so the user can save their keys. It is removed when the
-user clicks **Return to <app>**, when the user cancels, or when you abort the
-request.
+promise resolves but the iframe stays mounted so the user can save their keys.
+The SDK removes it, and stops listening, when the user clicks **Return to
+<app>**, when the user cancels, or when you abort the request. If you remove
+the iframe yourself, the SDK notices and cleans up. Before a result, that
+counts as `cancelled`.
 
 ## API
 
@@ -91,9 +99,10 @@ The promise rejects with a `DashBridge.DashBridgeError`. Its `code` is one of:
 | `code` | Meaning |
 | --- | --- |
 | `popup_blocked` | `window.open` was blocked. Call `createIdentity` directly from a click handler. |
-| `cancelled` | The user pressed Cancel or closed the popup. |
+| `cancelled` | The user pressed Cancel, closed the popup, or the iframe was removed. |
 | `aborted` | Your `AbortSignal` fired. |
-| `invalid_options` | Bad arguments, or the page is not served over http(s). |
+| `invalid_options` | Bad arguments. Also returned when your page or `bridgeUrl` is not https. Plain http is allowed only on `localhost`, `127.0.0.1` and `[::1]`, the same rule the bridge applies. |
+| `bridge_unavailable` | iframe mode: the bridge sent no `ready` within 30 seconds. Either it didn't load, or it refused the request and shows the reason inside the iframe. |
 | `unsupported_network`, `unsupported_request` | Fatal error reported by the bridge. |
 
 Recoverable errors, such as a failed InstantSend lock, are not rejections. The
@@ -102,7 +111,12 @@ are passed to `onError`, and `onProgress` receives `error`.
 
 Popup mode: once the identity is created, the promise resolves and the popup
 stays open so the user can download their key backup. **Return to <app>**
-closes it.
+closes it. After the promise settles, the SDK has no listeners or timers left
+in popup mode.
+
+A request lives in one page load. If the user reloads the popup or navigates
+back to it, the bridge shows **Request expired** instead of starting a new
+identity. The promise rejects with `cancelled` when the popup is closed.
 
 ## Popup or iframe?
 
@@ -146,12 +160,14 @@ who open the bridge themselves.
 | `network` | no | `mainnet` or `testnet` (default `testnet`). |
 | `request` | no | `create-identity` (default). |
 | `requestId` | no | Opaque ID, up to 64 characters from `[A-Za-z0-9_-]`. It is echoed in every message. |
-| `app` | no | Display name, trimmed to 64 characters. |
+| `app` | no | Display name. Control and formatting characters (including bidi overrides) are removed, and it is cut to 64 characters. |
 
 In embed mode the bridge skips the landing screen and goes straight to identity
 creation. It hides the network selector, the other modes and the footer. A
 banner shows **Creating an identity for <app> (<origin>)**, with a Cancel
-button.
+button. Cancel is hidden once identity registration starts. After a cancel in
+iframe mode, the bridge replaces the flow with a **Request cancelled** notice,
+in case the host doesn't remove the iframe.
 
 ## Message protocol
 
@@ -175,7 +191,7 @@ never `'*'`. Every message has this envelope:
 | `progress` | `step: ProgressStep` | The coarse step changed. |
 | `identity-created` | `identityId: string`, `network: string` | The identity is registered on Platform. This is the result. |
 | `error` | `code: string`, `message: string`, `fatal: boolean` | `fatal: true` means the request cannot continue. Otherwise the user can still recover in the bridge. `message` is a fixed label, not raw error text. |
-| `cancelled` | none | The user cancelled, or the popup was closed or navigated away before a result (best effort, sent on `pagehide`). |
+| `cancelled` | none | The user cancelled. In iframe mode it is also sent, best effort, when the frame unloads before a result (`pagehide`). Popups don't send it on unload, because a reload would cancel a request the user is still working on. The SDK detects closed popups by polling `popup.closed`. |
 | `close` | none | iframe mode: the user clicked **Return to <app>**. Remove the iframe. |
 
 No other fields are ever sent. Each message is built from a per-type whitelist
@@ -208,18 +224,28 @@ result message.
   shows "This page can't run inside another site" with a link that opens it in
   a new window. With `embed=iframe`, it checks the framing page's origin
   against the declared origin, using `location.ancestorOrigins[0]` or the
-  referrer as a fallback, and refuses on a mismatch. A frame that claims
-  `embed=popup` is also refused.
+  referrer as a fallback. It refuses on a mismatch, and also when neither is
+  available (for example `referrerpolicy="no-referrer"` in Firefox), because
+  the banner would otherwise vouch for an origin nobody checked. A frame that
+  claims `embed=popup` is also refused. The "open in a new window" link is
+  rebuilt from scratch, keeping only `network`, so a framer can't pass
+  deep-link parameters through it.
 - **Strict parameters.** Invalid origins (non-https, paths, credentials),
-  request IDs or request types stop the bridge before it runs. Unsupported
+  request IDs or request types stop the bridge before it runs. The app name is
+  shown inside `<bdi>` after bidi and formatting characters are removed, so it
+  can't visually reorder the origin next to it. Unsupported
   networks or request types are reported to the app as fatal errors.
 - **SDK checks.** The SDK checks the origin, source window, envelope, version
   and `requestId` of every message. It uses a fresh random `requestId` (from
-  `crypto.getRandomValues`) for each request. On settle it removes its
-  listeners and timers.
+  `crypto.getRandomValues`) for each request. When a request ends it removes
+  its listeners and timers. After a successful iframe request, the cleanup
+  waits until the iframe goes away.
 - **Cancelling after a deposit.** Once a deposit address exists, Cancel asks
   for confirmation. The key backup is needed to recover funds that were already
-  sent.
+  sent. Cancel is not offered once the identity is being registered.
+- **One request per page load.** A reload, back/forward navigation or
+  back/forward-cache restore of an embed request shows **Request expired**. It
+  never starts a new identity under the old request.
 
 ## Local development
 

@@ -71,7 +71,7 @@ for (const name of ['widget.js', 'widget.mjs']) {
   if (size > WIDGET_MAX_BYTES) {
     fail(`dist/${name} is ${size} bytes; the widget SDK must stay under ${WIDGET_MAX_BYTES} bytes`);
   }
-  if (/\bimport\s*[\w*{}\s,]*(?:from\s*)?["']|\brequire\(/.test(widget)) {
+  if (/\bimport\s*[\w*{}\s,]*(?:from\s*)?["']|\bimport\s*\(|\brequire\(/.test(widget)) {
     fail(`dist/${name} must be self-contained (found an import/require)`);
   }
   if (name === 'widget.js' && !/^var DashBridge\b/.test(widget)) {

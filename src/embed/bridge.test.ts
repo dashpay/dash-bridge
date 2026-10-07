@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveEmbed, toProgressStep, EmbedSession } from './bridge.js';
+import { resolveEmbed, toProgressStep, EmbedSession, EXPIRED_NOTICE } from './bridge.js';
 import { createInitialState, setMode, setIdentityRegistered, setError, setStep } from '../ui/state.js';
 import type { BridgeState } from '../types.js';
 
@@ -12,6 +12,7 @@ interface FakeWindowOptions {
   ancestorOrigins?: string[];
   referrer?: string;
   hasOpener?: boolean;
+  navigationType?: string;
 }
 
 function fakeWindow(opts: FakeWindowOptions) {
@@ -26,6 +27,7 @@ function fakeWindow(opts: FakeWindowOptions) {
     opener: opts.hasOpener === false ? null : target,
     close: vi.fn(),
     confirm: vi.fn(() => true),
+    performance: { getEntriesByType: () => [{ type: opts.navigationType ?? 'navigate' }] },
   };
   win.self = win;
   win.top = opts.framed ? {} : win;
@@ -101,6 +103,32 @@ describe('resolveEmbed', () => {
     const search = `?embed=iframe&origin=${APP_ORIGIN}`;
     expect(resolveEmbed(fakeWindow({ search, framed: true, referrer: 'https://evil.example/' }).win).action).toBe('block');
     expect(resolveEmbed(fakeWindow({ search, framed: true, referrer: `${APP_ORIGIN}/page` }).win).action).toBe('run');
+  });
+
+  it('refuses an iframe whose framer is unknown (no ancestorOrigins, no referrer)', () => {
+    const { win, target } = fakeWindow({ search: `?embed=iframe&origin=${APP_ORIGIN}`, framed: true });
+    const result = resolveEmbed(win);
+    expect(result.action).toBe('block');
+    expect(result.action === 'block' && result.notice.title).toBe('Request refused');
+    expect(target.postMessage).not.toHaveBeenCalled();
+  });
+
+  it('shows the real reason for an invalid iframe request, not the framing notice', () => {
+    const { win } = fakeWindow({ search: '?embed=iframe&origin=http://app.example', framed: true });
+    const result = resolveEmbed(win);
+    expect(result.action === 'block' && result.notice.title).toBe('Invalid request');
+  });
+
+  it('builds the new-window link from scratch, dropping deep-link params', () => {
+    const { win } = fakeWindow({ search: '?network=mainnet&address=evil&mode=withdraw', framed: true });
+    const result = resolveEmbed(win);
+    expect(result.action === 'block' && result.notice.openHref).toBe('https://bridge.example/?network=mainnet');
+  });
+
+  it.each(['reload', 'back_forward'])('treats a %s of an embed request as expired', (navigationType) => {
+    const { win, target } = fakeWindow({ search: `?embed=popup&origin=${APP_ORIGIN}`, navigationType });
+    expect(resolveEmbed(win)).toEqual({ action: 'block', notice: EXPIRED_NOTICE });
+    expect(target.postMessage).not.toHaveBeenCalled();
   });
 
   it('refuses iframe mode when not actually framed', () => {
@@ -223,12 +251,59 @@ describe('EmbedSession', () => {
     expect(posted(target).map((m) => m.type)).toEqual(['cancelled']);
   });
 
-  it('does not report cancelled on pagehide after the identity was created', () => {
+  it('sends identity-created exactly once', () => {
     const { session, target } = startSession();
+    const state = setStep(createState(), 'registering_identity');
+    const done = setIdentityRegistered(state, IDENTITY_ID);
+    session.onStateChange(state, done);
+    session.onStateChange(done, { ...done });
+    session.onStateChange(state, done);
+    expect(posted(target).filter((m) => m.type === 'identity-created')).toHaveLength(1);
+  });
+
+  it('cannot be cancelled while registering or once complete, and shows a notice after cancelling', () => {
+    const { session, target } = startSession();
+    expect(session.cancel(setStep(createState(), 'registering_identity'))).toBe(false);
+    expect(session.cancel(setIdentityRegistered(createState(), IDENTITY_ID))).toBe(false);
+    expect(target.postMessage).not.toHaveBeenCalled();
+    expect(session.notice).toBeUndefined();
+    expect(session.cancel(createState())).toBe(true);
+    expect(session.notice?.title).toBe('Request cancelled');
+  });
+
+  it('never reports cancelled on popup pagehide (a reload must not orphan the request)', () => {
+    const { session, target } = startSession();
+    session.handlePageHide();
+    expect(target.postMessage).not.toHaveBeenCalled();
+    // Still able to deliver the result afterwards (e.g. pagehide from a cancelled navigation).
     const state = createState();
     session.onStateChange(state, setIdentityRegistered(state, IDENTITY_ID));
+    expect(posted(target).map((m) => m.type)).toContain('identity-created');
+  });
+
+  it('reports cancelled once on iframe pagehide, but not after a result', () => {
+    const fake = fakeWindow({ search: '', framed: true });
+    const params = { kind: 'iframe' as const, origin: APP_ORIGIN, request: 'create-identity' as const, network: 'testnet' as const };
+    const session = new EmbedSession(params, fake.win);
     session.handlePageHide();
-    expect(posted(target).map((m) => m.type)).not.toContain('cancelled');
+    session.handlePageHide();
+    expect(posted(fake.target).map((m) => m.type)).toEqual(['cancelled']);
+
+    const done = fakeWindow({ search: '', framed: true });
+    const finished = new EmbedSession(params, done.win);
+    const state = createState();
+    finished.onStateChange(state, setIdentityRegistered(state, IDENTITY_ID));
+    finished.handlePageHide();
+    expect(posted(done.target).map((m) => m.type)).toEqual(['progress', 'identity-created']);
+  });
+
+  it('expire() stops all messages and shows the expired notice', () => {
+    const { session, target } = startSession();
+    session.expire();
+    expect(session.notice).toBe(EXPIRED_NOTICE);
+    const state = createState();
+    session.onStateChange(state, setIdentityRegistered(state, IDENTITY_ID));
+    expect(target.postMessage).not.toHaveBeenCalled();
   });
 
   it('returnToApp closes the popup, or asks the iframe host to close', () => {

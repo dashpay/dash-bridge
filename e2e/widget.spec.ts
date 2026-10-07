@@ -146,6 +146,35 @@ test.describe('Embeddable identity widget', () => {
     await expect(page.locator('#result')).toContainText('cancelled');
   });
 
+  test('reloading the popup expires the request instead of starting a new one', async ({ page, context }) => {
+    await page.goto('/widget-demo.html?e2e=mock');
+    await expect(page.locator('#popup-btn')).toBeEnabled();
+    const popupPromise = context.waitForEvent('page');
+    await page.click('#popup-btn');
+    const popup = await popupPromise;
+    await expect(popup.locator('#continue-btn')).toBeVisible();
+
+    await popup.reload();
+    await expect(popup.getByText('Request expired')).toBeVisible();
+    await expect(popup.locator('#continue-btn')).toHaveCount(0);
+    // The reload alone does not settle the request...
+    await expect(page.locator('#result')).toHaveText('waiting…');
+    // ...closing the popup does.
+    await popup.close();
+    await expect(page.locator('#result')).toContainText('cancelled');
+  });
+
+  test('SDK iframe cancel rejects and removes the iframe', async ({ page }) => {
+    await page.goto('/widget-demo.html?e2e=mock');
+    await expect(page.locator('#iframe-btn')).toBeEnabled();
+    await page.click('#iframe-btn');
+    const frame = await (await page.waitForSelector('#iframe-container iframe')).contentFrame();
+    if (!frame) throw new Error('no iframe');
+    await frame.click('#embed-cancel-btn');
+    await expect(page.locator('#result')).toContainText('cancelled');
+    await expect(page.locator('#iframe-container iframe')).toHaveCount(0);
+  });
+
   test('SDK iframe flow resolves and removes the iframe on return', async ({ page }) => {
     await page.goto('/widget-demo.html?e2e=mock');
     await expect(page.locator('#iframe-btn')).toBeEnabled();

@@ -1,4 +1,5 @@
-import type { BridgeState, KeyType, KeyPurpose, SecurityLevel, NetworkHealth } from '../types.js';
+import type { BridgeState, KeyType, KeyPurpose, SecurityLevel, NetworkHealth, EmbedNotice } from '../types.js';
+import { canCancel } from '../embed/bridge.js';
 import { getStepProgress, getStepDescription, ErrorCodes, ErrorCodeLabels } from './state.js';
 import { shouldShowContestedWarning, countUsernameStatuses } from '../platform/dpns-utils.js';
 import { MIN_TRANSFER_PROTOCOL_VERSION, isProtocolVersionBlocked } from '../platform/username-transfer-utils.js';
@@ -377,11 +378,6 @@ export function render(state: BridgeState, container: HTMLElement): void {
   container.appendChild(wrapper);
 }
 
-/** Display label for the app that opened the bridge in embed mode. */
-function embedAppLabel(embed: NonNullable<BridgeState['embed']>): string {
-  return embed.appName ?? embed.origin;
-}
-
 /**
  * Embed mode: who the identity is being created for. The origin is shown next
  * to the self-declared app name because only the origin receives the result.
@@ -391,9 +387,9 @@ function renderEmbedBanner(state: BridgeState): HTMLElement {
   const banner = document.createElement('div');
   banner.className = 'embed-banner';
   const who = embed.appName
-    ? `<strong>${escapeHtml(embed.appName)}</strong> <span class="embed-origin">(${escapeHtml(embed.origin)})</span>`
+    ? `<strong><bdi>${escapeHtml(embed.appName)}</bdi></strong> <span class="embed-origin">(${escapeHtml(embed.origin)})</span>`
     : `<strong>${escapeHtml(embed.origin)}</strong>`;
-  const cancel = state.step === 'complete'
+  const cancel = !canCancel(state.step)
     ? ''
     : '<button id="embed-cancel-btn" class="embed-cancel-btn" type="button">Cancel</button>';
   banner.innerHTML = `
@@ -412,7 +408,7 @@ function renderEmbedBanner(state: BridgeState): HTMLElement {
  */
 export function renderEmbedNotice(
   container: HTMLElement,
-  notice: { title: string; message: string; openHref?: string },
+  notice: EmbedNotice,
 ): void {
   const link = notice.openHref
     ? `<a class="primary-btn embed-notice-link" href="${escapeAttr(notice.openHref)}" target="_blank" rel="noopener noreferrer">Open Dash Bridge in a new window</a>`
@@ -1138,7 +1134,7 @@ function renderCompleteStep(state: BridgeState): HTMLElement {
 
   // Embed mode: hand control back to the app instead of offering more flows.
   if (state.embed) {
-    const label = escapeHtml(embedAppLabel(state.embed));
+    const label = `<bdi>${escapeHtml(state.embed.appName ?? state.embed.origin)}</bdi>`;
     const returnSection = document.createElement('div');
     returnSection.className = 'embed-return';
     returnSection.innerHTML = `
