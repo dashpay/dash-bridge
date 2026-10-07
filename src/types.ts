@@ -510,6 +510,13 @@ export interface BridgeState {
   withdrawStatus?: number;
   /** Withdraw: status polling problem / timeout explanation (informational, not a failure) */
   withdrawStatusError?: string;
+  /**
+   * Withdraw: set when the submission errored AND the follow-up lookups could
+   * not tell whether the withdrawal landed. Retrying is unsafe in this state
+   * (it could withdraw twice); the UI offers "Check Again" instead.
+   * `sinceMs` is the lower bound used to match the withdrawal document.
+   */
+  withdrawOutcomeUnknown?: { sinceMs: number; checking: boolean };
 
   // Faucet request state
   /** Current status of faucet request */

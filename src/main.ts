@@ -131,6 +131,8 @@ import {
   setWithdrawSubmitting,
   setWithdrawSubmitted,
   setWithdrawSubmitError,
+  setWithdrawOutcomeUnknown,
+  setWithdrawOutcomeChecking,
   setWithdrawStatusUpdate,
   setWithdrawStatusNote,
   setWithdrawTrackingTimeout,
@@ -180,6 +182,12 @@ import {
 } from './platform/username-transfer-utils.js';
 import { loadSdkModule } from './platform/sdkModule.js';
 import { isAlreadyExistsError } from './platform/identity-confirm.js';
+import {
+  WithdrawalStatus,
+  classifyWithdrawalLookups,
+  type WithdrawalLandedOutcome,
+  type WithdrawalLookupResult,
+} from './platform/withdrawal-status.js';
 import type {
   BridgeState,
   KeyType,
@@ -2040,6 +2048,14 @@ function setupEventListeners(container: HTMLElement) {
     });
   }
 
+  // Withdraw outcome unknown: re-run the landed check (no retry offered)
+  const withdrawCheckAgainBtn = container.querySelector('#withdraw-check-again-btn');
+  if (withdrawCheckAgainBtn) {
+    withdrawCheckAgainBtn.addEventListener('click', () => {
+      void recheckWithdrawalOutcome();
+    });
+  }
+
   const withdrawStartOverBtn = container.querySelector('#withdraw-start-over-btn');
   if (withdrawStartOverBtn) {
     withdrawStartOverBtn.addEventListener('click', () => {
@@ -3824,6 +3840,18 @@ async function startWithdrawal() {
   try {
     if (isE2EMockMode()) {
       await delay(80);
+      e2eMockWithdrawChecks = readE2EMockWithdrawChecks();
+      if (e2eMockWithdrawChecks) {
+        // Scripted submission error; the landed checks replay the script.
+        const sinceMs = Date.now();
+        applyWithdrawalLandedOutcome(
+          await checkWithdrawalLanded(identityId, sinceMs),
+          identityId,
+          sinceMs,
+          'Mock submission error'
+        );
+        return;
+      }
       const mockRemaining = BigInt(E2E_MOCK_WITHDRAW_BALANCE) - amountCredits;
       updateState(setWithdrawSubmitted(state, mockRemaining));
       // Deterministically walk the payout statuses to completion
@@ -3864,15 +3892,12 @@ async function startWithdrawal() {
       // while waiting for the state transition result). Before offering a
       // retryable failure screen, check whether the withdrawal actually
       // landed — a second submission would withdraw twice.
-      if (await didWithdrawalLand(identityId, sinceMs)) {
-        updateState(setWithdrawStatusNote(
-          setWithdrawSubmitted(state),
-          'The submission reported an error, but the withdrawal was found on the network — tracking its payout instead.'
-        ));
-        void pollWithdrawalStatus(identityId, sinceMs);
-        return;
-      }
-      updateState(setWithdrawSubmitError(state, result.error || 'Withdrawal failed'));
+      applyWithdrawalLandedOutcome(
+        await checkWithdrawalLanded(identityId, sinceMs),
+        identityId,
+        sinceMs,
+        result.error || 'Withdrawal failed'
+      );
       return;
     }
 
@@ -3885,24 +3910,107 @@ async function startWithdrawal() {
 }
 
 /**
+ * E2E mock: scripted landed-check verdicts consumed in order, e.g.
+ * `?e2e=mock&e2eWithdrawChecks=unknown,found`. When present, the mock
+ * submission fails and each landed check returns the next verdict.
+ */
+let e2eMockWithdrawChecks: WithdrawalLandedOutcome[] | undefined;
+
+function readE2EMockWithdrawChecks(): WithdrawalLandedOutcome[] | undefined {
+  const raw = new URLSearchParams(window.location.search).get('e2eWithdrawChecks');
+  if (!raw) return undefined;
+  const checks = raw.split(',').filter(
+    (v): v is WithdrawalLandedOutcome => v === 'found' || v === 'not_found' || v === 'unknown'
+  );
+  return checks.length > 0 ? checks : undefined;
+}
+
+/**
  * Check whether a withdrawal document for this identity appeared on the
  * network after `sinceMs`. Used to disambiguate submission errors: an error
  * thrown after broadcast leaves a document behind even though the SDK call
- * failed. A few short attempts cover processing lag; lookup failures count
- * as "not found" (the failure screen already warns about the ambiguity).
+ * failed. A few short attempts cover processing lag. Lookup failures are
+ * NOT treated as "not found": see classifyWithdrawalLookups. Never throws.
  */
-async function didWithdrawalLand(identityId: string, sinceMs: number): Promise<boolean> {
-  const { fetchLatestWithdrawalStatus } = await loadPlatformModule();
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) await delay(5_000);
-    try {
-      const record = await fetchLatestWithdrawalStatus(identityId, state.network, sinceMs);
-      if (record !== null) return true;
-    } catch (error) {
-      console.warn('Withdrawal landed-check failed:', error);
-    }
+async function checkWithdrawalLanded(identityId: string, sinceMs: number): Promise<WithdrawalLandedOutcome> {
+  if (isE2EMockMode() && e2eMockWithdrawChecks) {
+    await delay(30);
+    return e2eMockWithdrawChecks.shift() ?? 'unknown';
   }
-  return false;
+
+  const results: WithdrawalLookupResult[] = [];
+  try {
+    const { fetchLatestWithdrawalStatus } = await loadPlatformModule();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await delay(5_000);
+      try {
+        const record = await fetchLatestWithdrawalStatus(identityId, state.network, sinceMs);
+        if (record !== null) return 'found';
+        results.push('not_found');
+      } catch (error) {
+        console.warn('Withdrawal landed-check failed:', error);
+        results.push('error');
+      }
+    }
+  } catch (error) {
+    console.warn('Withdrawal landed-check could not run:', error);
+  }
+  return classifyWithdrawalLookups(results);
+}
+
+/**
+ * Route a landed-check verdict after a withdrawal submission error:
+ * found → track the payout; not_found → retryable failure; unknown →
+ * outcome-unknown screen (no retry, "Check Again" only).
+ */
+function applyWithdrawalLandedOutcome(
+  outcome: WithdrawalLandedOutcome,
+  identityId: string,
+  sinceMs: number,
+  error: string
+): void {
+  if (outcome === 'found') {
+    updateState(setWithdrawStatusNote(
+      setWithdrawSubmitted(state),
+      'The submission reported an error, but the withdrawal was found on the network — tracking its payout instead.'
+    ));
+    if (isE2EMockMode()) {
+      // Mock mode has no network to poll; finish deterministically.
+      void delay(30).then(() => {
+        if (state.step === 'withdraw_tracking') {
+          updateState(setWithdrawStatusUpdate(state, WithdrawalStatus.COMPLETE));
+        }
+      });
+      return;
+    }
+    void pollWithdrawalStatus(identityId, sinceMs);
+    return;
+  }
+  if (outcome === 'not_found') {
+    updateState(setWithdrawSubmitError(state, error));
+    return;
+  }
+  updateState(setWithdrawOutcomeUnknown(state, error, sinceMs));
+}
+
+/**
+ * "Check Again" on the outcome-unknown screen: re-run the landed check for
+ * the original submission window.
+ */
+async function recheckWithdrawalOutcome(): Promise<void> {
+  const pending = state.withdrawOutcomeUnknown;
+  const identityId = state.targetIdentityId;
+  if (!pending || pending.checking || !identityId) return;
+  const error = state.withdrawResult?.error || 'Withdrawal failed';
+
+  updateState(setWithdrawOutcomeChecking(state));
+  const outcome = await checkWithdrawalLanded(identityId, pending.sinceMs);
+
+  // The user may have started over while the lookups ran.
+  if (state.step !== 'withdraw_complete' || state.withdrawOutcomeUnknown?.sinceMs !== pending.sinceMs) {
+    return;
+  }
+  applyWithdrawalLandedOutcome(outcome, identityId, pending.sinceMs, error);
 }
 
 /**

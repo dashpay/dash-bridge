@@ -116,6 +116,8 @@ export {
   setWithdrawSubmitting,
   setWithdrawSubmitted,
   setWithdrawSubmitError,
+  setWithdrawOutcomeUnknown,
+  setWithdrawOutcomeChecking,
   setWithdrawStatusUpdate,
   setWithdrawStatusNote,
   setWithdrawTrackingTimeout,

@@ -15,6 +15,9 @@ import {
   setWithdrawSubmitting,
   setWithdrawSubmitted,
   setWithdrawSubmitError,
+  setWithdrawOutcomeUnknown,
+  setWithdrawOutcomeChecking,
+  setWithdrawRetry,
   setWithdrawStatusUpdate,
   setWithdrawTrackingTimeout,
 } from './state.js';
@@ -140,6 +143,42 @@ describe('withdraw mode state transitions', () => {
     const result = setWithdrawSubmitError(setWithdrawSubmitting(baseState()), 'boom');
     expect(result.step).toBe('withdraw_complete');
     expect(result.withdrawResult).toEqual({ success: false, error: 'boom' });
+  });
+
+  it('unknown outcome is a non-retryable failure that keeps the lookup window', () => {
+    const unknown = setWithdrawOutcomeUnknown(setWithdrawSubmitting(baseState()), 'boom', 1234);
+    expect(unknown.step).toBe('withdraw_complete');
+    expect(unknown.withdrawResult).toEqual({ success: false, error: 'boom' });
+    expect(unknown.withdrawOutcomeUnknown).toEqual({ sinceMs: 1234, checking: false });
+    // Retry is refused while the outcome is unknown
+    expect(setWithdrawRetry(unknown)).toBe(unknown);
+  });
+
+  it('Check Again marks the unknown outcome as checking', () => {
+    const unknown = setWithdrawOutcomeUnknown(baseState(), 'boom', 1234);
+    expect(setWithdrawOutcomeChecking(unknown).withdrawOutcomeUnknown).toEqual({ sinceMs: 1234, checking: true });
+    // No-op without an unknown outcome
+    const plain = baseState();
+    expect(setWithdrawOutcomeChecking(plain)).toBe(plain);
+  });
+
+  it('resolving an unknown outcome clears it: found tracks, not found becomes retryable', () => {
+    const checking = setWithdrawOutcomeChecking(setWithdrawOutcomeUnknown(baseState(), 'boom', 1234));
+
+    const found = setWithdrawSubmitted(checking);
+    expect(found.step).toBe('withdraw_tracking');
+    expect(found.withdrawOutcomeUnknown).toBeUndefined();
+
+    const notFound = setWithdrawSubmitError(checking, 'boom');
+    expect(notFound.withdrawOutcomeUnknown).toBeUndefined();
+    expect(notFound.withdrawResult).toEqual({ success: false, error: 'boom' });
+    expect(setWithdrawRetry(notFound).step).toBe('withdraw_configure');
+  });
+
+  it('re-entering withdraw mode or resubmitting clears an unknown outcome', () => {
+    const unknown = setWithdrawOutcomeUnknown(baseState(), 'boom', 1234);
+    expect(setMode(unknown, 'withdraw').withdrawOutcomeUnknown).toBeUndefined();
+    expect(setWithdrawSubmitting(unknown).withdrawOutcomeUnknown).toBeUndefined();
   });
 
   it('status updates stay in tracking until terminal', () => {

@@ -235,6 +235,7 @@ export function setMode(state: BridgeState, mode: BridgeMode): BridgeState {
       withdrawResult: undefined,
       withdrawStatus: undefined,
       withdrawStatusError: undefined,
+      withdrawOutcomeUnknown: undefined,
     };
   } else {
     // Manage mode: choose between key management and username transfer
@@ -2006,6 +2007,7 @@ export function setWithdrawSubmitting(state: BridgeState): BridgeState {
     withdrawResult: undefined,
     withdrawStatus: undefined,
     withdrawStatusError: undefined,
+    withdrawOutcomeUnknown: undefined,
   };
 }
 
@@ -2020,17 +2022,46 @@ export function setWithdrawSubmitted(state: BridgeState, remainingBalance?: bigi
     step: 'withdraw_tracking',
     withdrawResult: { success: true, remainingBalance },
     withdrawStatus: WithdrawalStatus.QUEUED,
+    withdrawOutcomeUnknown: undefined,
   };
 }
 
 /**
- * Withdrawal transition failed
+ * Withdrawal transition failed and is known not to have landed (retryable)
  */
 export function setWithdrawSubmitError(state: BridgeState, error: string): BridgeState {
   return {
     ...state,
     step: 'withdraw_complete',
     withdrawResult: { success: false, error },
+    withdrawOutcomeUnknown: undefined,
+  };
+}
+
+/**
+ * The submission errored and the follow-up lookups could not tell whether
+ * the withdrawal landed. Not retryable: a new transition could withdraw
+ * twice. `sinceMs` is kept so "Check Again" can repeat the lookup.
+ */
+export function setWithdrawOutcomeUnknown(state: BridgeState, error: string, sinceMs: number): BridgeState {
+  return {
+    ...state,
+    step: 'withdraw_complete',
+    withdrawResult: { success: false, error },
+    withdrawStatus: undefined,
+    withdrawStatusError: undefined,
+    withdrawOutcomeUnknown: { sinceMs, checking: false },
+  };
+}
+
+/**
+ * "Check Again" is re-running the landed check for an unknown outcome
+ */
+export function setWithdrawOutcomeChecking(state: BridgeState): BridgeState {
+  if (!state.withdrawOutcomeUnknown) return state;
+  return {
+    ...state,
+    withdrawOutcomeUnknown: { ...state.withdrawOutcomeUnknown, checking: true },
   };
 }
 
@@ -2089,9 +2120,11 @@ export function setWithdrawBackToEntry(state: BridgeState): BridgeState {
 }
 
 /**
- * Return to configure step to retry a failed withdrawal
+ * Return to configure step to retry a failed withdrawal. Refused while the
+ * previous outcome is unknown — a retry could withdraw twice.
  */
 export function setWithdrawRetry(state: BridgeState): BridgeState {
+  if (state.withdrawOutcomeUnknown) return state;
   return {
     ...state,
     step: 'withdraw_configure',

@@ -2618,11 +2618,14 @@ function renderWithdrawCompleteStep(state: BridgeState): HTMLElement {
 
   const result = state.withdrawResult;
   const isSuccess = result?.success === true;
+  const unknownOutcome = state.withdrawOutcomeUnknown;
   const status = state.withdrawStatus;
 
   const headline = document.createElement('h2');
   headline.className = 'manage-headline';
-  if (!isSuccess) {
+  if (unknownOutcome) {
+    headline.textContent = 'Withdrawal Outcome Unknown';
+  } else if (!isSuccess) {
     headline.textContent = 'Withdrawal Failed';
   } else if (status === WithdrawalStatus.EXPIRED) {
     headline.textContent = 'Withdrawal Expired';
@@ -2668,6 +2671,32 @@ function renderWithdrawCompleteStep(state: BridgeState): HTMLElement {
       msg.textContent = state.withdrawStatusError;
       div.appendChild(msg);
     }
+  } else if (unknownOutcome) {
+    const box = document.createElement('div');
+    box.className = 'withdraw-error-msg withdraw-unknown-msg';
+
+    const warning = document.createElement('p');
+    warning.className = 'withdraw-unknown-warning';
+    warning.textContent = "We couldn't confirm whether this withdrawal was submitted. Don't retry until you've confirmed — retrying could withdraw the amount twice.";
+    box.appendChild(warning);
+
+    const guidance = document.createElement('p');
+    guidance.textContent = 'Check your identity balance or the destination Core wallet, or use Check Again to look for the withdrawal on the network.';
+    box.appendChild(guidance);
+
+    const detail = document.createElement('p');
+    detail.className = 'error-detail';
+    detail.textContent = `${result?.error || 'Unknown error'} (${ErrorCodes.WITHDRAW})`;
+    box.appendChild(detail);
+
+    div.appendChild(box);
+
+    if (unknownOutcome.checking) {
+      const checking = document.createElement('p');
+      checking.className = 'withdraw-pending-msg';
+      checking.textContent = 'Checking the network for the withdrawal...';
+      div.appendChild(checking);
+    }
   } else {
     const errorMsg = document.createElement('div');
     errorMsg.className = 'withdraw-error-msg';
@@ -2688,7 +2717,14 @@ function renderWithdrawCompleteStep(state: BridgeState): HTMLElement {
   const actionButtons = document.createElement('div');
   actionButtons.className = 'withdraw-action-buttons nav-buttons';
 
-  if (!isSuccess) {
+  if (unknownOutcome) {
+    const checkAgainBtn = document.createElement('button');
+    checkAgainBtn.id = 'withdraw-check-again-btn';
+    checkAgainBtn.className = 'primary-btn';
+    checkAgainBtn.textContent = unknownOutcome.checking ? 'Checking...' : 'Check Again';
+    checkAgainBtn.disabled = unknownOutcome.checking;
+    actionButtons.appendChild(checkAgainBtn);
+  } else if (!isSuccess) {
     const retryBtn = document.createElement('button');
     retryBtn.id = 'withdraw-retry-btn';
     retryBtn.className = 'primary-btn';
