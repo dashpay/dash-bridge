@@ -3,6 +3,8 @@ export {
   setStep,
   setKeyPairs,
   setMode,
+  setMobileAppRiskAcknowledged,
+  continueInBrowserFromMobileAppRecommendation,
   setTargetIdentityId,
   setOneTimeKeyPair,
   setTopUpComplete,
@@ -131,7 +133,29 @@ export {
   setFaucetSuccess,
   setFaucetError,
   resetFaucetState,
+  // NEAR Intents state functions
+  depositMinimumDuffs,
+  toggleNearIntentsPanel,
+  setNearIntentsTokensLoading,
+  setNearIntentsTokens,
+  setNearIntentsError,
+  setNearIntentsAssetFilter,
+  setNearIntentsOriginAsset,
+  setNearIntentsAmountInput,
+  setNearIntentsRefundAddress,
+  setNearIntentsQuoting,
+  setNearIntentsQuote,
+  setNearIntentsConfirming,
+  setNearIntentsSwap,
+  setNearSwapStatus,
+  clearNearIntentsSwap,
+  shouldRecheckAfterNearSwap,
 } from './state.js';
+
+export {
+  getCurrentMobilePlatform,
+  syncSmartAppBanner,
+} from './mobile-app.js';
 
 export { generateQRCodeDataUrl, createQRCodeElement, renderQRCodeToCanvas } from './qrcode.js';
 

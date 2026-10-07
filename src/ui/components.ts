@@ -1,9 +1,26 @@
-import type { BridgeState, KeyType, KeyPurpose, SecurityLevel, NetworkHealth, EmbedNotice } from '../types.js';
+import type { BridgeState, KeyType, KeyPurpose, SecurityLevel, NetworkHealth, EmbedNotice, NearIntentsState, NearIntentsSwap } from '../types.js';
 import { canCancel } from '../embed/bridge.js';
-import { getStepProgress, getStepDescription, ErrorCodes, ErrorCodeLabels } from './state.js';
+import { getStepProgress, getStepDescription, ErrorCodes, ErrorCodeLabels, depositMinimumDuffs } from './state.js';
+import {
+  formatUnits,
+  isNearSwapExpired,
+  nearIntentsAppUrl,
+  nearSwapPaymentCutoff,
+  selectableSourceTokens,
+  type NearIntentsToken,
+  type NearSwapStatus,
+} from '../api/near-intents.js';
 import { shouldShowContestedWarning, countUsernameStatuses } from '../platform/dpns-utils.js';
 import { MIN_TRANSFER_PROTOCOL_VERSION, isProtocolVersionBlocked } from '../platform/username-transfer-utils.js';
 import { generateQRCodeDataUrl } from './qrcode.js';
+import {
+  DASHPAY_ANDROID_APK_URL,
+  DASHPAY_APP_STORE_URL,
+  DASHPAY_GOOGLE_PLAY_URL,
+  getCurrentMobilePlatform,
+  getStoreUrl,
+  shouldRecommendMobileApp,
+} from './mobile-app.js';
 import { privateKeyToWif } from '../utils/wif.js';
 import { formatCreditsAsDash, formatCredits, MIN_WITHDRAWAL_CREDITS } from '../utils/credits.js';
 import { WithdrawalStatus } from '../platform/withdrawal-status.js';
@@ -224,6 +241,10 @@ export function render(state: BridgeState, container: HTMLElement): void {
   switch (state.step) {
     case 'init':
       content.appendChild(renderInitStep(state));
+      break;
+
+    case 'mobile_app_recommended':
+      content.appendChild(renderMobileAppRecommendedStep(state));
       break;
 
     case 'configure_keys':
@@ -497,6 +518,10 @@ function renderInitStep(state: BridgeState): HTMLElement {
   `;
   div.appendChild(networkSelector);
 
+  if (shouldRecommendMobileApp(state.network)) {
+    div.appendChild(renderMobileAppHint());
+  }
+
   // Mode selection buttons
   const modeButtons = document.createElement('div');
   modeButtons.className = 'mode-buttons';
@@ -523,6 +548,150 @@ function renderInitStep(state: BridgeState): HTMLElement {
     </button>
   `;
   div.appendChild(modeButtons);
+
+  return div;
+}
+
+/** Attributes for a link that leaves the bridge (it may be embedded in an iframe or popup). */
+const EXTERNAL_LINK_ATTRS = 'target="_blank" rel="noopener noreferrer"';
+
+/** Lightweight, ungated nudge toward the DashPay app on the mainnet landing screen. */
+function renderMobileAppHint(): HTMLElement {
+  const storeUrl = getStoreUrl(getCurrentMobilePlatform());
+  const links = storeUrl
+    ? `<a href="${escapeAttr(storeUrl)}" ${EXTERNAL_LINK_ATTRS}>Get DashPay</a>`
+    : `<a href="${escapeAttr(DASHPAY_APP_STORE_URL)}" ${EXTERNAL_LINK_ATTRS}>App Store</a>
+       · <a href="${escapeAttr(DASHPAY_GOOGLE_PLAY_URL)}" ${EXTERNAL_LINK_ATTRS}>Google Play</a>`;
+  const hint = document.createElement('p');
+  hint.id = 'mobile-app-hint';
+  hint.className = 'mobile-app-hint';
+  hint.innerHTML = `On mainnet we recommend the <strong>DashPay mobile app</strong> for creating your identity and username. It's the more secure option: your keys stay on your phone. ${links}`;
+  return hint;
+}
+
+/**
+ * Store QR codes, cached so the periodic re-renders (network status, the
+ * acknowledgement checkbox) don't regenerate them and flash "Loading...".
+ */
+const storeQrCache = new Map<string, Promise<string>>();
+function getStoreQrDataUrl(url: string): Promise<string> {
+  let dataUrl = storeQrCache.get(url);
+  if (!dataUrl) {
+    dataUrl = generateQRCodeDataUrl(url, 160);
+    dataUrl.catch(() => storeQrCache.delete(url));
+    storeQrCache.set(url, dataUrl);
+  }
+  return dataUrl;
+}
+
+/** A store button, optionally with a QR code of the same link for scanning from a desktop. */
+function renderStoreButton({ id, label, url, qrAlt }: { id?: string; label: string; url: string; qrAlt?: string }): HTMLElement {
+  const item = document.createElement('div');
+  item.className = 'mobile-app-store';
+
+  if (qrAlt) {
+    const qrContainer = document.createElement('div');
+    qrContainer.className = 'mobile-app-qr';
+    qrContainer.innerHTML = '<div class="qr-loading">Loading...</div>';
+    item.appendChild(qrContainer);
+    getStoreQrDataUrl(url).then((dataUrl) => {
+      const img = document.createElement('img');
+      img.src = dataUrl;
+      img.alt = qrAlt;
+      img.width = 160;
+      img.height = 160;
+      qrContainer.replaceChildren(img);
+    }).catch((err) => {
+      console.error('QR code generation failed:', err);
+      qrContainer.innerHTML = '<div class="qr-error">QR failed</div>';
+    });
+  }
+
+  const link = document.createElement('a');
+  if (id) link.id = id;
+  link.className = 'primary-btn store-btn';
+  link.href = url;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.textContent = label;
+  item.appendChild(link);
+
+  return item;
+}
+
+/**
+ * Mainnet interstitial before identity creation: recommend the DashPay app and
+ * only continue in the browser after an explicit risk acknowledgement.
+ */
+function renderMobileAppRecommendedStep(state: BridgeState): HTMLElement {
+  const platform = getCurrentMobilePlatform();
+  const div = document.createElement('div');
+  div.className = 'mobile-app-step';
+
+  const intro = document.createElement('div');
+  intro.className = 'mobile-app-intro';
+  intro.innerHTML = `
+    <p class="mobile-app-eyebrow">Recommended for mainnet</p>
+    <h2 class="mobile-app-headline">Use the DashPay app &mdash; it's the more secure option</h2>
+    <ul class="mobile-app-reasons">
+      <li>DashPay (Dash Wallet) generates your keys on your phone and keeps them there. They never exist in a browser tab.</li>
+      <li>Browser extensions or a compromised computer can read a web page's memory, including keys created on this page.</li>
+      <li>The app also registers your username and backs up your wallet with a recovery phrase.</li>
+    </ul>
+  `;
+  div.appendChild(intro);
+
+  const ctas = document.createElement('div');
+  ctas.className = `mobile-app-ctas ${platform}`;
+  if (platform === 'ios') {
+    ctas.appendChild(renderStoreButton({ id: 'mobile-app-primary-cta', label: 'Get DashPay on the App Store', url: DASHPAY_APP_STORE_URL }));
+  } else if (platform === 'android') {
+    ctas.appendChild(renderStoreButton({ id: 'mobile-app-primary-cta', label: 'Get DashPay on Google Play', url: DASHPAY_GOOGLE_PLAY_URL }));
+  } else {
+    const scan = document.createElement('p');
+    scan.className = 'mobile-app-scan';
+    scan.textContent = 'Scan with your phone to install DashPay';
+    ctas.appendChild(scan);
+    const stores = document.createElement('div');
+    stores.className = 'mobile-app-stores';
+    stores.appendChild(renderStoreButton({ id: 'mobile-app-app-store-btn', label: 'App Store (iPhone)', url: DASHPAY_APP_STORE_URL, qrAlt: 'App Store QR code for DashPay' }));
+    stores.appendChild(renderStoreButton({ id: 'mobile-app-google-play-btn', label: 'Google Play (Android)', url: DASHPAY_GOOGLE_PLAY_URL, qrAlt: 'Google Play QR code for DashPay' }));
+    ctas.appendChild(stores);
+  }
+  if (platform !== 'ios') {
+    const apk = document.createElement('p');
+    apk.className = 'mobile-app-apk';
+    apk.innerHTML = `No Google Play? <a href="${escapeAttr(DASHPAY_ANDROID_APK_URL)}" ${EXTERNAL_LINK_ATTRS}>Download the Android APK from GitHub</a>
+      (pick <code>dashpay-wallet-&lt;version&gt;.apk</code>, not the <code>-testnet</code> one)`;
+    ctas.appendChild(apk);
+  }
+  if (platform !== 'desktop') {
+    const installed = document.createElement('p');
+    installed.className = 'mobile-app-installed';
+    installed.textContent = 'Already have DashPay? The store page has an Open button.';
+    ctas.appendChild(installed);
+  }
+  div.appendChild(ctas);
+
+  const browser = document.createElement('div');
+  browser.className = 'mobile-app-browser-option';
+  browser.innerHTML = `
+    <p class="mobile-app-browser-title">Continue in browser (advanced)</p>
+    <label class="mobile-app-ack">
+      <input type="checkbox" id="mobile-app-ack-checkbox" ${state.mobileAppRiskAcknowledged ? 'checked' : ''} />
+      <span>I understand the browser is less secure and I am responsible for backing up my keys</span>
+    </label>
+  `;
+  div.appendChild(browser);
+
+  const navButtons = document.createElement('div');
+  navButtons.className = 'nav-buttons';
+  // Embed mode has no landing screen to go back to; Cancel is in the banner.
+  navButtons.innerHTML = `
+    ${state.embed ? '' : '<button id="back-btn" class="secondary-btn">Back</button>'}
+    <button id="mobile-app-continue-browser-btn" class="secondary-btn" ${state.mobileAppRiskAcknowledged ? '' : 'disabled'}>Continue in browser</button>
+  `;
+  div.appendChild(navButtons);
 
   return div;
 }
@@ -955,6 +1124,11 @@ function renderDepositStep(state: BridgeState): HTMLElement {
     div.appendChild(recheckSection);
   }
 
+  // Mainnet: fund the deposit address from another asset via NEAR Intents
+  if (state.network === 'mainnet' && address) {
+    div.appendChild(renderNearIntentsPanel(state, address));
+  }
+
   // Mode-specific note at bottom
   if (state.mode === 'topup' || state.mode === 'send_to_address') {
     // One-time key warning for top-up
@@ -974,6 +1148,274 @@ function renderDepositStep(state: BridgeState): HTMLElement {
   }
 
   return div;
+}
+
+// ============================================================================
+// NEAR Intents ("Pay with other crypto") panel
+// ============================================================================
+
+const NEAR_CHAIN_NAMES: Record<string, string> = {
+  eth: 'Ethereum', btc: 'Bitcoin', sol: 'Solana', base: 'Base', arb: 'Arbitrum',
+  near: 'NEAR', tron: 'Tron', bsc: 'BNB Chain', op: 'Optimism', pol: 'Polygon',
+  avax: 'Avalanche', ton: 'TON', doge: 'Dogecoin', ltc: 'Litecoin', xrp: 'XRP Ledger',
+  zec: 'Zcash', bch: 'Bitcoin Cash', sui: 'Sui', aptos: 'Aptos', cardano: 'Cardano',
+  stellar: 'Stellar', gnosis: 'Gnosis', starknet: 'Starknet', bera: 'Berachain',
+  scroll: 'Scroll', monad: 'Monad', plasma: 'Plasma', xlayer: 'X Layer',
+  hypercore: 'Hyperliquid', aleo: 'Aleo', movement: 'Movement', abs: 'Abstract',
+};
+/** Chains listed first; the rest follow alphabetically. */
+const NEAR_CHAIN_ORDER = ['eth', 'btc', 'sol', 'base', 'arb', 'near', 'tron', 'bsc', 'op', 'pol', 'avax', 'ton', 'ltc', 'doge', 'xrp', 'zec', 'bch'];
+const NEAR_SYMBOL_ORDER = ['USDC', 'USDT', 'ETH', 'BTC', 'SOL'];
+
+const NEAR_STATUS_TEXT: Record<NearSwapStatus, { label: string; detail: string; tone: 'pending' | 'success' | 'error' }> = {
+  PENDING_DEPOSIT: { label: 'Waiting for your payment', detail: 'Send the amount above. This updates automatically.', tone: 'pending' },
+  KNOWN_DEPOSIT_TX: { label: 'Payment seen', detail: 'Waiting for it to confirm on the source chain.', tone: 'pending' },
+  PROCESSING: { label: 'Swapping to DASH', detail: 'NEAR Intents is delivering DASH to your deposit address.', tone: 'pending' },
+  SUCCESS: { label: 'DASH delivered', detail: 'The bridge will pick up the deposit and continue automatically.', tone: 'success' },
+  INCOMPLETE_DEPOSIT: { label: 'Payment too small', detail: 'Less than the required amount arrived. Send the rest before the deadline, or it will be refunded to your refund address.', tone: 'error' },
+  REFUNDED: { label: 'Refunded', detail: 'The swap did not complete and your payment was refunded to your refund address.', tone: 'error' },
+  FAILED: { label: 'Swap failed', detail: 'NEAR Intents could not complete the swap. Contact NEAR Intents support with the reference below.', tone: 'error' },
+};
+
+const NEAR_EXPIRED_TEXT = {
+  label: 'Quote expired',
+  detail: "The time to pay has run out. Don't send to the old address; get a new quote instead.",
+  tone: 'error' as const,
+};
+const NEAR_EXPIRED_INCOMPLETE_TEXT = {
+  label: 'Quote expired',
+  detail: "The time to complete the payment has run out. Don't send more to the old address: what you sent is refunded to your refund address after the deadline. Get a new quote to try again.",
+  tone: 'error' as const,
+};
+
+export function nearChainName(blockchain: string): string {
+  return NEAR_CHAIN_NAMES[blockchain] ?? blockchain.toUpperCase();
+}
+
+function rankOf(list: string[], value: string): number {
+  const i = list.indexOf(value);
+  return i === -1 ? list.length : i;
+}
+
+/** Source assets grouped by chain, filtered by `filter`, always keeping `selectedId`. */
+function groupNearTokens(
+  tokens: NearIntentsToken[],
+  filter: string,
+  selectedId?: string
+): [string, NearIntentsToken[]][] {
+  const needle = filter.trim().toLowerCase();
+  const matches = selectableSourceTokens(tokens).filter((t) =>
+    t.assetId === selectedId ||
+    !needle ||
+    t.symbol.toLowerCase().includes(needle) ||
+    t.blockchain.toLowerCase().includes(needle) ||
+    nearChainName(t.blockchain).toLowerCase().includes(needle)
+  );
+  const groups = new Map<string, NearIntentsToken[]>();
+  for (const t of matches) {
+    const group = groups.get(t.blockchain);
+    if (group) group.push(t);
+    else groups.set(t.blockchain, [t]);
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => rankOf(NEAR_CHAIN_ORDER, a) - rankOf(NEAR_CHAIN_ORDER, b) || nearChainName(a).localeCompare(nearChainName(b)))
+    .map(([chain, list]) => [chain, list.sort((a, b) =>
+      rankOf(NEAR_SYMBOL_ORDER, a.symbol) - rankOf(NEAR_SYMBOL_ORDER, b.symbol) || a.symbol.localeCompare(b.symbol))]);
+}
+
+function formatUsd(value?: number): string {
+  return value === undefined ? '' : `$${value.toFixed(2)}`;
+}
+
+function formatNearTime(ms: number): string {
+  return new Date(ms).toLocaleString(undefined, { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' });
+}
+
+function renderNearFallbackLink(address: string, token?: NearIntentsToken): string {
+  return `
+    <p class="near-intents-fallback">
+      Prefer the NEAR Intents app?
+      <a href="${escapeAttr(nearIntentsAppUrl(token))}" target="_blank" rel="noopener noreferrer">Open NEAR Intents</a>,
+      swap to DASH, then withdraw the DASH to your deposit address:
+      <code class="near-intents-fallback-address">${escapeHtml(address)}</code>
+      <button class="copy-btn" data-copy="${escapeAttr(address)}">Copy</button>
+    </p>
+  `;
+}
+
+function renderNearQuoteSummary(near: NearIntentsState, token: NearIntentsToken): string {
+  const quote = near.quote!;
+  const usdIn = formatUsd(quote.amountInUsd);
+  const usdOut = formatUsd(quote.amountOutUsd);
+  // EXACT_OUTPUT: amountIn carries a slippage buffer that is refunded, so the
+  // likely fee is based on minAmountIn; without it, amountIn only bounds it.
+  const spentUsd = quote.amountInUsd !== undefined && quote.minAmountIn !== undefined
+    ? quote.amountInUsd * (Number(quote.minAmountIn) / Number(quote.amountIn))
+    : quote.amountInUsd;
+  const feeUsd = spentUsd !== undefined && quote.amountOutUsd !== undefined
+    ? Math.max(0, spentUsd - quote.amountOutUsd)
+    : undefined;
+  const feeQualifier = quote.minAmountIn !== undefined ? 'about' : 'up to';
+  const minutes = quote.timeEstimateSec !== undefined ? Math.max(1, Math.round(quote.timeEstimateSec / 60)) : undefined;
+  return `
+    <div class="near-intents-quote" id="near-intents-quote">
+      <div class="near-quote-row">
+        <span>You send</span>
+        <strong>${escapeHtml(formatUnits(quote.amountIn, token.decimals))} ${escapeHtml(token.symbol)}</strong>
+      </div>
+      <div class="near-quote-row near-quote-sub"><span>on ${escapeHtml(nearChainName(token.blockchain))}</span><span>${escapeHtml(usdIn)}</span></div>
+      <div class="near-quote-row">
+        <span>You receive</span>
+        <strong>${escapeHtml(formatUnits(quote.amountOut, 8))} DASH</strong>
+      </div>
+      <div class="near-quote-row near-quote-sub"><span>at your deposit address</span><span>${escapeHtml(usdOut)}</span></div>
+      ${minutes !== undefined ? `<p class="near-quote-note">Usually arrives in about ${minutes} min after your payment confirms.</p>` : ''}
+      <p class="near-quote-note">The rate includes NEAR Intents swap and network fees${feeUsd !== undefined ? ` (${feeQualifier} ${escapeHtml(formatUsd(feeUsd))} in total)` : ''}. Any unused slippage buffer is refunded. Confirming fetches a fresh quote and a one-time payment address; the amount may change slightly.</p>
+      <div class="near-quote-actions">
+        <button id="near-confirm-btn" class="primary-btn near-btn" ${near.busy ? 'disabled' : ''}>${near.busy === 'confirm' ? 'Preparing…' : 'Get payment address'}</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderNearSwap(swap: NearIntentsSwap): HTMLElement {
+  const el = document.createElement('div');
+  el.className = 'near-intents-swap';
+  const expired = isNearSwapExpired(swap);
+  const incomplete = swap.status === 'INCOMPLETE_DEPOSIT';
+  const status = expired
+    ? (incomplete ? NEAR_EXPIRED_INCOMPLETE_TEXT : NEAR_EXPIRED_TEXT)
+    : NEAR_STATUS_TEXT[swap.status];
+  const amount = `${formatUnits(swap.amountIn, swap.decimals)} ${swap.symbol}`;
+  const chain = nearChainName(swap.blockchain);
+  const canReset = expired || swap.status === 'PENDING_DEPOSIT' || swap.status === 'REFUNDED' || swap.status === 'FAILED';
+  const showPayment = !expired && (swap.status === 'PENDING_DEPOSIT' || incomplete);
+  const instruction = incomplete
+    ? `Top up so the total you sent reaches <strong>${escapeHtml(amount)}</strong> on <strong>${escapeHtml(chain)}</strong>. Send only the difference to:`
+    : `Send exactly <strong>${escapeHtml(amount)}</strong> on <strong>${escapeHtml(chain)}</strong> to:`;
+  // A QR holds only the address: a wallet scanning it would skip a required memo.
+  const qrHtml = swap.depositMemo
+    ? ''
+    : `<div class="qr-container near-swap-qr"><div class="qr-loading">Loading...</div></div>
+       <p class="near-swap-qr-note">Address only. Choose ${escapeHtml(swap.symbol)} on ${escapeHtml(chain)} in your wallet.</p>`;
+
+  el.innerHTML = `
+    <div class="near-swap-status ${status.tone}" id="near-swap-status">
+      ${status.tone === 'pending' ? '<span class="faucet-spinner near-spinner"></span>' : ''}
+      <div>
+        <strong>${escapeHtml(status.label)}</strong>
+        <p>${escapeHtml(status.detail)}</p>
+      </div>
+    </div>
+    ${showPayment ? `
+      <p class="near-swap-instruction">${instruction}</p>
+      ${qrHtml}
+      <div class="address-display near-swap-address">
+        <code class="address" id="near-deposit-address">${escapeHtml(swap.depositAddress)}</code>
+        <button class="copy-btn" data-copy="${escapeAttr(swap.depositAddress)}">Copy</button>
+      </div>
+      ${swap.depositMemo ? `
+        <p class="near-swap-memo-label">Memo (required, or the payment is lost)</p>
+        <div class="address-display near-swap-address">
+          <code class="address" id="near-deposit-memo">${escapeHtml(swap.depositMemo)}</code>
+          <button class="copy-btn" data-copy="${escapeAttr(swap.depositMemo)}">Copy</button>
+        </div>` : ''}
+      <div class="near-intents-warning">
+        <p>${incomplete ? 'Complete the payment' : `Send exactly <strong>${escapeHtml(amount)}</strong>`} on <strong>${escapeHtml(chain)}</strong> before <strong>${escapeHtml(formatNearTime(nearSwapPaymentCutoff(swap)))}</strong>, so it confirms before the swap deadline. Any other asset or network may be lost.</p>
+        <p>If the swap can't complete, it is refunded to <code>${escapeHtml(swap.refundTo)}</code>.</p>
+      </div>` : ''}
+    <p class="near-swap-receive">You receive <strong>${escapeHtml(formatUnits(swap.amountOut, 8))} DASH</strong> at your bridge deposit address.</p>
+    ${swap.statusError ? `<p class="near-swap-status-error">Couldn't check the swap status (retrying): ${escapeHtml(swap.statusError)}</p>` : ''}
+    ${swap.correlationId ? `<p class="near-swap-ref">NEAR Intents reference: <code>${escapeHtml(swap.correlationId)}</code></p>` : ''}
+    ${canReset ? `<button id="near-swap-reset-btn" class="tertiary-btn near-swap-reset">${swap.status === 'PENDING_DEPOSIT' && !expired ? "Pay with a different asset (only if you haven't sent anything)" : 'Get a new quote'}</button>` : ''}
+  `;
+
+  const qr = el.querySelector('.near-swap-qr');
+  if (qr) {
+    generateQRCodeDataUrl(swap.depositAddress, 180).then((dataUrl) => {
+      const img = document.createElement('img');
+      img.src = dataUrl;
+      img.alt = 'NEAR Intents payment address QR code';
+      img.width = 180;
+      img.height = 180;
+      qr.innerHTML = '';
+      qr.appendChild(img);
+    }).catch(() => {
+      qr.innerHTML = '<div class="qr-error">QR failed</div>';
+    });
+  }
+  return el;
+}
+
+function renderNearIntentsPanel(state: BridgeState, address: string): HTMLElement {
+  const section = document.createElement('div');
+  section.className = 'near-intents-section';
+  section.id = 'near-intents-section';
+  const near = state.nearIntents;
+  const open = near?.open ?? false;
+
+  section.innerHTML = `
+    <button id="near-intents-toggle" class="deposit-method-toggle near-intents-toggle${open ? ' expanded' : ''}" aria-expanded="${open}">
+      <span>Pay with other crypto <span class="near-intents-via">via NEAR Intents</span></span>
+      <span class="toggle-icon">&#9662;</span>
+    </button>
+  `;
+  if (!open || !near) return section;
+
+  const body = document.createElement('div');
+  body.className = 'near-intents-body';
+  section.appendChild(body);
+  const errorHtml = near.error ? `<p class="near-intents-error" role="alert">${escapeHtml(near.error)}</p>` : '';
+
+  // A swap is only shown for the address it delivers to.
+  if (near.swap && near.swap.recipient === address) {
+    body.appendChild(renderNearSwap(near.swap));
+    return section;
+  }
+
+  const intro = `<p class="near-intents-intro">Pay with USDC, USDT, ETH, BTC, SOL and more from any wallet or exchange. NEAR Intents swaps it and sends DASH to your deposit address.</p>`;
+
+  if (!near.tokens) {
+    body.innerHTML = near.busy === 'tokens' || !near.error
+      ? `${intro}<div class="faucet-loading near-loading"><div class="faucet-spinner"></div><span>Loading assets…</span></div>`
+      : `${intro}${errorHtml}<button id="near-tokens-retry-btn" class="secondary-btn near-btn">Try again</button>${renderNearFallbackLink(address)}`;
+    return section;
+  }
+
+  const selected = near.tokens.find((t) => t.assetId === near.originAssetId);
+  const groups = groupNearTokens(near.tokens, near.assetFilter, near.originAssetId);
+  const options = groups.length === 0
+    ? '<option disabled>No matching assets</option>'
+    : groups.map(([chain, list]) => `
+        <optgroup label="${escapeAttr(nearChainName(chain))}">
+          ${list.map((t) => `<option value="${escapeAttr(t.assetId)}"${t.assetId === near.originAssetId ? ' selected' : ''}>${escapeHtml(t.symbol)} (${escapeHtml(nearChainName(t.blockchain))})</option>`).join('')}
+        </optgroup>`).join('');
+  const minDash = formatUnits(String(depositMinimumDuffs(state)), 8);
+  const chainName = selected ? nearChainName(selected.blockchain) : 'the source chain';
+  const busy = Boolean(near.busy);
+
+  body.innerHTML = `
+    ${intro}
+    <div class="near-intents-form">
+      <label class="input-label" for="near-asset-select">Pay with</label>
+      <input type="search" id="near-asset-filter" class="near-input" placeholder="Search assets or chains" value="${escapeAttr(near.assetFilter)}" autocomplete="off" />
+      <select id="near-asset-select" class="near-input near-select" ${busy ? 'disabled' : ''}>${options}</select>
+
+      <label class="input-label" for="near-amount-input">DASH to receive</label>
+      <input type="text" id="near-amount-input" class="near-input" inputmode="decimal" autocomplete="off" value="${escapeAttr(near.amountInput)}" ${busy ? 'disabled' : ''} />
+      <p class="input-hint">At least ${escapeHtml(minDash)} DASH. This is what reaches your deposit address.</p>
+
+      <label class="input-label" for="near-refund-input">Refund address on ${escapeHtml(chainName)}</label>
+      <input type="text" id="near-refund-input" class="near-input" placeholder="Your ${escapeAttr(chainName)} address" autocomplete="off" spellcheck="false" value="${escapeAttr(near.refundAddress)}" ${busy ? 'disabled' : ''} />
+      <p class="input-hint">If the swap can't complete, your payment is returned here.</p>
+    </div>
+    ${errorHtml}
+    ${near.quote && selected
+      ? renderNearQuoteSummary(near, selected)
+      : `<button id="near-quote-btn" class="primary-btn near-btn" ${busy || !selected ? 'disabled' : ''}>${near.busy === 'quote' ? 'Getting quote…' : 'Get quote'}</button>`}
+    ${renderNearFallbackLink(address, selected)}
+  `;
+  return section;
 }
 
 function renderProcessingStep(state: BridgeState): HTMLElement {

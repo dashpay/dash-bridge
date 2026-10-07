@@ -181,3 +181,15 @@ describe('Sign in with Dash UI', () => {
     expect(renderState(state).querySelector('.login-note')?.textContent).toContain('Signing proves to app.example that');
   });
 });
+
+describe('mainnet DashPay recommendation in embed mode', () => {
+  it('hides Back, since embed mode has no landing screen', () => {
+    const div = document.createElement('div');
+    const base = { ...createInitialState('mainnet'), step: 'mobile_app_recommended' as const };
+    render({ ...base, embed: { kind: 'popup', origin: 'https://app.example', request: 'create-identity' } }, div);
+    expect(div.querySelector('#back-btn')).toBeNull();
+    expect(div.querySelector('#mobile-app-continue-browser-btn')).not.toBeNull();
+    render(base, div);
+    expect(div.querySelector('#back-btn')).not.toBeNull();
+  });
+});

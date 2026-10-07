@@ -55,6 +55,7 @@ export function canCancel(step: BridgeStep): boolean {
 /** Map internal UI steps of the create flow to the coarse public progress steps. */
 export function toProgressStep(step: BridgeStep): ProgressStep | undefined {
   switch (step) {
+    case 'mobile_app_recommended':
     case 'configure_keys':
     case 'generating_keys':
       return 'configuring';

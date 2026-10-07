@@ -1,4 +1,5 @@
 import type { EmbedKind, EmbedRequestType } from './embed/protocol.js';
+import type { NearIntentsQuote, NearIntentsToken, NearSwapStatus } from './api/near-intents.js';
 
 export interface KeyPair {
   privateKey: Uint8Array;
@@ -200,6 +201,7 @@ export interface ManageNewKeyConfig {
 
 export type BridgeStep =
   | 'init'
+  | 'mobile_app_recommended' // Mainnet: recommend the DashPay app before creating an identity here
   | 'configure_keys'
   | 'enter_identity'      // Top-up: user enters identity ID
   | 'generating_keys'
@@ -355,6 +357,49 @@ export interface EmbedNotice {
   openHref?: string;
 }
 
+/** A NEAR Intents swap whose deposit address has been handed to the user. */
+export interface NearIntentsSwap {
+  /** Where the user sends the source asset (origin chain). */
+  depositAddress: string;
+  depositMemo?: string;
+  /** Bridge deposit address the DASH is delivered to. */
+  recipient: string;
+  /** User's origin-chain address that receives refunds. */
+  refundTo: string;
+  originAssetId: string;
+  symbol: string;
+  blockchain: string;
+  decimals: number;
+  /** Amount to send, in the source asset's smallest units. */
+  amountIn: string;
+  /** DASH delivered, in duffs. */
+  amountOut: string;
+  /** ISO time after which an unfunded swap is refunded. */
+  deadline: string;
+  correlationId?: string;
+  status: NearSwapStatus;
+  /** Last status poll failed (informational; polling continues). */
+  statusError?: string;
+}
+
+/** "Pay with other crypto" panel on the mainnet deposit screen. */
+export interface NearIntentsState {
+  open: boolean;
+  tokens?: NearIntentsToken[];
+  /** Search text narrowing the asset list. */
+  assetFilter: string;
+  originAssetId?: string;
+  /** DASH to deliver, as typed. */
+  amountInput: string;
+  refundAddress: string;
+  /** Request in flight: loading tokens, pricing a quote, or opening a swap. */
+  busy?: 'tokens' | 'quote' | 'confirm';
+  /** Dry quote awaiting the user's confirmation. */
+  quote?: NearIntentsQuote;
+  swap?: NearIntentsSwap;
+  error?: string;
+}
+
 export interface BridgeState {
   step: BridgeStep;
   network: string;
@@ -366,6 +411,8 @@ export interface BridgeState {
   retryStatus?: RetryStatus;
   /** Latest network-health snapshot for the header indicator */
   networkStatus?: NetworkStatus;
+  /** Mainnet: user acknowledged the browser is less secure than the DashPay app */
+  mobileAppRiskAcknowledged?: boolean;
   /** BIP39 mnemonic (12 words) for HD key derivation */
   mnemonic?: string;
   assetLockKeyPair?: KeyPair;
@@ -597,4 +644,7 @@ export interface BridgeState {
   faucetTxid?: string;
   /** Error message from failed faucet request */
   faucetError?: string;
+
+  /** Mainnet: fund the deposit address from another asset via NEAR Intents */
+  nearIntents?: NearIntentsState;
 }

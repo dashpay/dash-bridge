@@ -47,6 +47,7 @@ function createState(): BridgeState {
 
 describe('toProgressStep', () => {
   it('maps create-flow steps to coarse steps and ignores the rest', () => {
+    expect(toProgressStep('mobile_app_recommended')).toBe('configuring');
     expect(toProgressStep('configure_keys')).toBe('configuring');
     expect(toProgressStep('detecting_deposit')).toBe('awaiting_deposit');
     expect(toProgressStep('waiting_islock')).toBe('processing');

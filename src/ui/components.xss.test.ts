@@ -153,6 +153,67 @@ describe('rendering untrusted strings', () => {
     expect(deposit.querySelector('.mnemonic-words')!.textContent).toContain('<img');
   });
 
+  it('renders hostile NEAR Intents API strings as text', () => {
+    const hostileToken = { assetId: ATTR_PAYLOAD, symbol: TEXT_PAYLOAD, blockchain: ATTR_PAYLOAD, decimals: 6 };
+    const form = renderState({
+      step: 'detecting_deposit',
+      network: 'mainnet',
+      depositAddress: 'XanAvE5GMB8CsPH78B9moJq9viEVKvCS4f',
+      nearIntents: {
+        open: true,
+        tokens: [hostileToken],
+        originAssetId: ATTR_PAYLOAD,
+        assetFilter: ATTR_PAYLOAD,
+        amountInput: ATTR_PAYLOAD,
+        refundAddress: ATTR_PAYLOAD,
+        error: TEXT_PAYLOAD,
+        quote: { originAssetId: ATTR_PAYLOAD, amountIn: '1', amountOut: '5000000', deadline: ATTR_PAYLOAD },
+      },
+    });
+    expectNoInjection(form);
+    expect(form.querySelector('.near-intents-error')!.textContent).toBe(TEXT_PAYLOAD);
+    expect(form.querySelector<HTMLSelectElement>('#near-asset-select')!.value).toBe(ATTR_PAYLOAD);
+    expect(inputValue(form, 'near-refund-input')).toBe(ATTR_PAYLOAD);
+    expect(inputValue(form, 'near-amount-input')).toBe(ATTR_PAYLOAD);
+    expect(inputValue(form, 'near-asset-filter')).toBe(ATTR_PAYLOAD);
+    expect(form.querySelector('#near-intents-quote')!.textContent).toContain(TEXT_PAYLOAD);
+
+    const swap = renderState({
+      step: 'detecting_deposit',
+      network: 'mainnet',
+      depositAddress: 'XanAvE5GMB8CsPH78B9moJq9viEVKvCS4f',
+      nearIntents: {
+        open: true,
+        assetFilter: '',
+        amountInput: '0.05',
+        refundAddress: '',
+        swap: {
+          depositAddress: ATTR_PAYLOAD,
+          depositMemo: TEXT_PAYLOAD,
+          recipient: 'XanAvE5GMB8CsPH78B9moJq9viEVKvCS4f',
+          refundTo: TEXT_PAYLOAD,
+          originAssetId: ATTR_PAYLOAD,
+          symbol: TEXT_PAYLOAD,
+          blockchain: ATTR_PAYLOAD,
+          decimals: 6,
+          amountIn: '1',
+          amountOut: '5000000',
+          // A valid future deadline, so the payment details are on screen.
+          deadline: new Date(Date.now() + 3_600_000).toISOString(),
+          correlationId: TEXT_PAYLOAD,
+          status: 'PENDING_DEPOSIT',
+          statusError: TEXT_PAYLOAD,
+        },
+      },
+    });
+    expectNoInjection(swap);
+    expect(swap.querySelector('#near-deposit-address')!.textContent).toBe(ATTR_PAYLOAD);
+    expect(swap.querySelector('#near-deposit-memo')!.textContent).toBe(TEXT_PAYLOAD);
+    expect(swap.querySelector('.near-swap-address .copy-btn')!.getAttribute('data-copy')).toBe(ATTR_PAYLOAD);
+    expect(swap.querySelector('.near-swap-status-error')!.textContent).toContain(TEXT_PAYLOAD);
+    expect(swap.querySelector('.near-intents-warning')!.textContent).toContain(TEXT_PAYLOAD);
+  });
+
   it('keeps the explorer link on the explorer origin', () => {
     const container = renderState({ step: 'complete', mode: 'topup', targetIdentityId: ATTR_PAYLOAD });
     expectNoInjection(container);
