@@ -335,6 +335,12 @@ export interface BridgeState {
   /** When true, the error screen offers a "Use chainlock proof instead" recovery button. */
   chainlockFallbackAvailable?: boolean;
   identityId?: string;
+  /**
+   * Identity ID derived from the asset lock when registration was submitted
+   * but not confirmed. Only for the error-screen key backup and diagnostics;
+   * NOT a completed identity (that is `identityId`).
+   */
+  unconfirmedIdentityId?: string;
   error?: Error;
   /** Error code for user-facing display (e.g., "ERR-1006") */
   errorCode?: string;

@@ -8,7 +8,7 @@ export {
   createPublicKeyInfo,
   publicKeyToBase64,
   registerIdentity,
-  confirmRegisteredIdentity,
+  registerIdentityResilient,
   topUpIdentity,
   updateIdentity,
   sendToPlatformAddress,

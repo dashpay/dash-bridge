@@ -33,6 +33,7 @@ import {
   setIdentityRegistered,
   setError,
   setChainlockFallbackStarted,
+  isChainlockFallbackCancelled,
   setChainlockProgress,
   setChainlockProofReady,
   toError,
@@ -180,8 +181,6 @@ import {
   MIN_TRANSFER_PROTOCOL_VERSION,
   type SigningKeySelection,
 } from './platform/username-transfer-utils.js';
-import { loadSdkModule } from './platform/sdkModule.js';
-import { isAlreadyExistsError } from './platform/identity-confirm.js';
 import {
   WithdrawalStatus,
   classifyWithdrawalLookups,
@@ -2615,67 +2614,6 @@ async function startSendToAddress() {
 }
 
 /**
- * Wrapper around `registerIdentity` that handles already-submitted state
- * transitions without trusting them blindly.
- *
- * Tenderdash (Platform's consensus layer) deduplicates state transitions
- * by their bytes: a second submit of the same IdentityCreate is rejected
- * with `Object already exists: tx already exists in cache`. This surfaces
- * when the user retries an identity creation whose first attempt reached
- * Platform (e.g. the first attempt got a `GroveDBProof` decode error in the
- * client AFTER Platform had committed the identity).
- *
- * "tx already exists in cache" only means the transition is in the mempool
- * cache — NOT that it was committed. So on the AlreadyExists family we
- * derive the (deterministic) identity ID from the asset lock proof, then
- * confirm by fetching the identity and checking it carries the keys we
- * tried to register. If it can't be confirmed within a bounded window,
- * `confirmRegisteredIdentity` throws IdentityRegistrationUnconfirmedError,
- * which the error screen turns into a safe "Retry Registration" action.
- * See `confirmRegisteredIdentity` for the devnet-only fallback when
- * Platform cannot be reached at all.
- */
-async function registerIdentityResilient(
-  proof: AssetLockProofData,
-  assetLockPrivateKeyWif: string,
-  identityKeys: typeof state.identityKeys,
-  network: string
-): Promise<{ identityId: string; balance: number; revision: number; alreadyExisted?: boolean }> {
-  const { registerIdentity, confirmRegisteredIdentity } = await loadPlatformModule();
-  try {
-    return await registerIdentity(proof, assetLockPrivateKeyWif, identityKeys, network);
-  } catch (err) {
-    if (!isAlreadyExistsError(err)) throw err;
-
-    // The identity ID is derived from the asset lock outpoint, so instant
-    // and chain proofs for the same asset lock yield the same ID.
-    const { AssetLockProof, OutPoint } = await loadSdkModule();
-    const sdkProof = proof.type === 'instant'
-      ? AssetLockProof.createInstantAssetLockProof(
-        proof.instantLockBytes,
-        proof.transactionBytes,
-        proof.outputIndex
-      )
-      : AssetLockProof.createChainAssetLockProof(
-        proof.coreChainLockedHeight,
-        new OutPoint(proof.txid, proof.vout)
-      );
-    const identityId = sdkProof.createIdentityId().toString();
-    console.log(
-      '[identity-create] Platform reports the state transition was already submitted; confirming identity',
-      identityId
-    );
-    const confirmed = await confirmRegisteredIdentity(identityId, identityKeys, network);
-    return {
-      identityId,
-      balance: confirmed.balance,
-      revision: confirmed.revision,
-      alreadyExisted: true,
-    };
-  }
-}
-
-/**
  * Resubmit identity registration with the asset lock proof already in
  * state. Offered on the error screen after an unconfirmed submission: the
  * asset lock can only be consumed once and the identity ID is
@@ -2837,6 +2775,7 @@ async function startBridge() {
       network
     );
 
+    const { registerIdentityResilient } = await loadPlatformModule();
     const result = await registerIdentityResilient(
       assetLockProof,
       assetLockPrivateKeyWif,
@@ -2982,6 +2921,7 @@ async function recheckDeposit() {
     } else if (state.mode === 'create') {
       // Create mode — register identity
       updateState(setStep(state, 'registering_identity'));
+      const { registerIdentityResilient } = await loadPlatformModule();
       const result = await registerIdentityResilient(
         assetLockProof,
         assetLockPrivateKeyWif,
@@ -3020,7 +2960,7 @@ let chainlockController: AbortController | null = null;
  * happy-path bridge flows (see startBridge / startTopUp / startSendToAddress).
  */
 async function runPlatformSubmission(
-  assetLockProof: import('./types.js').AssetLockProofData,
+  assetLockProof: AssetLockProofData,
   assetLockPrivateKeyWif: string
 ): Promise<void> {
   if (state.mode === 'topup') {
@@ -3051,6 +2991,7 @@ async function runPlatformSubmission(
 
   if (state.mode === 'create') {
     updateState(setStep(state, 'registering_identity'));
+    const { registerIdentityResilient } = await loadPlatformModule();
     const result = await registerIdentityResilient(
       assetLockProof,
       assetLockPrivateKeyWif,
@@ -3202,7 +3143,9 @@ async function startChainlockFallback(): Promise<void> {
     await runPlatformSubmission(proof, assetLockPrivateKeyWif);
     console.log('[chainlock-fallback] Platform submission resolved');
   } catch (error) {
-    if (signal.aborted) {
+    // The signal is aborted on purpose just before submitting (to stop the
+    // height poller), so it only means "cancelled" while still waiting.
+    if (isChainlockFallbackCancelled(signal.aborted, submissionStarted)) {
       // Already transitioned to error via cancelChainlockFallback.
       return;
     }

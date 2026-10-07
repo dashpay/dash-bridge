@@ -28,9 +28,12 @@ import {
 import { getNetwork } from '../config.js';
 import { extractErrorMessage } from '../utils/errors.js';
 import {
+  AssetLockConsumedElsewhereError,
   IdentityRegistrationUnconfirmedError,
   allowUnverifiedDevnetFallback,
   findMissingIdentityKeys,
+  isAlreadyExistsError,
+  isAssetLockConsumedElsewhere,
   pollForIdentity,
 } from './identity-confirm.js';
 
@@ -415,15 +418,18 @@ const CONFIRM_IDENTITY_LOOKUP_TIMEOUT_MS = 15_000;
  * - Found with matching keys → its real balance and revision.
  * - Found with different keys → throws (the deposit was used by a different
  *   registration attempt; this session's keys do not control that identity).
+ * - Asset lock reported consumed (`trigger`) and every lookup answered "not
+ *   found" → throws AssetLockConsumedElsewhereError (not retryable).
  * - Not confirmed in time → throws IdentityRegistrationUnconfirmedError.
  * - Devnet only: if every lookup failed with a transport/unavailability error
  *   (no answer from Platform at all), falls back to the legacy unverified
  *   success with `verified: false`. Never on mainnet/testnet.
  */
-export async function confirmRegisteredIdentity(
+async function confirmRegisteredIdentity(
   identityId: string,
   identityKeys: IdentityKeyConfig[],
-  network: string
+  network: string,
+  trigger: unknown
 ): Promise<{ identityId: string; balance: number; revision: number; verified: boolean }> {
   const networkConfig = getNetwork(network);
   // Non-trusted devnets have no quorum context, so proof-verifying reads
@@ -470,6 +476,14 @@ export async function confirmRegisteredIdentity(
     };
   }
 
+  if (isAssetLockConsumedElsewhere(trigger, summary)) {
+    console.warn(
+      `[identity-create] Asset lock reported consumed, but identity ${identityId} was not found in ` +
+        `${summary.notFound} lookup(s): the deposit was used by another registration or top-up.`
+    );
+    throw new AssetLockConsumedElsewhereError(identityId);
+  }
+
   const lastError = summary.errors.length > 0
     ? summary.errors[summary.errors.length - 1]
     : undefined;
@@ -497,6 +511,46 @@ export async function confirmRegisteredIdentity(
         ? extractErrorMessage(lastError)
         : undefined
   );
+}
+
+/**
+ * `registerIdentity` that handles already-submitted state transitions
+ * without trusting them blindly.
+ *
+ * Tenderdash deduplicates state transitions by their bytes, so resubmitting
+ * an IdentityCreate whose first attempt reached Platform (e.g. the client got
+ * a `GroveDBProof` decode error AFTER Platform committed it) is rejected with
+ * `tx already exists in cache`; once the cache entry is evicted, consensus
+ * rejects it as an existing identity / consumed asset lock instead. None of
+ * these prove the identity exists — "in cache" only means it is in the
+ * mempool — so derive the (outpoint-deterministic) identity ID and confirm by
+ * fetching it. See confirmRegisteredIdentity for the outcomes.
+ */
+export async function registerIdentityResilient(
+  assetLockProofData: AssetLockProofData,
+  assetLockPrivateKeyWif: string,
+  identityKeys: IdentityKeyConfig[],
+  network: string
+): Promise<{ identityId: string; balance: number; revision: number; alreadyExisted?: boolean }> {
+  try {
+    return await registerIdentity(assetLockProofData, assetLockPrivateKeyWif, identityKeys, network);
+  } catch (err) {
+    if (!isAlreadyExistsError(err)) throw err;
+
+    // Instant and chain proofs for the same asset lock yield the same ID.
+    const identityId = (await toSdkProof(assetLockProofData)).createIdentityId().toString();
+    console.log(
+      '[identity-create] Platform reports the state transition was already submitted; confirming identity',
+      identityId
+    );
+    const confirmed = await confirmRegisteredIdentity(identityId, identityKeys, network, err);
+    return {
+      identityId,
+      balance: confirmed.balance,
+      revision: confirmed.revision,
+      alreadyExisted: true,
+    };
+  }
 }
 
 /**

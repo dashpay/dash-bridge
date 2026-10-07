@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
+  AssetLockConsumedElsewhereError,
   IdentityRegistrationUnconfirmedError,
+  isAssetLockConsumedElsewhere,
+  isAssetLockConsumedElsewhereError,
   allowUnverifiedDevnetFallback,
   findMissingIdentityKeys,
   isAlreadyExistsError,
@@ -136,6 +139,27 @@ describe('identity key matching', () => {
       { keyId: 1, data: toHex(hash) },
     ])).toEqual([0]);
     expect(findMissingIdentityKeys(expected, [{ keyId: 5, data: toHex(pub) }])).toEqual([0, 1]);
+  });
+});
+
+describe('isAssetLockConsumedElsewhere', () => {
+  const consumed = new Error('Asset lock transaction abcd output 0 already completely used');
+  const notFound = { attempts: 3, notFound: 3, errors: [] };
+
+  it('is true only when the lock was reported consumed and every lookup said "not found"', () => {
+    expect(isAssetLockConsumedElsewhere(consumed, notFound)).toBe(true);
+    expect(isAssetLockConsumedElsewhere(new Error('tx already exists in cache'), notFound)).toBe(false);
+    expect(isAssetLockConsumedElsewhere(consumed, { ...notFound, errors: [new Error('unavailable')] })).toBe(false);
+    expect(isAssetLockConsumedElsewhere(consumed, { attempts: 3, notFound: 0, errors: [new Error('x')] })).toBe(false);
+    expect(isAssetLockConsumedElsewhere(consumed, { ...notFound, identity: {} })).toBe(false);
+  });
+
+  it('has a non-retryable, recognisable error', () => {
+    const err = new AssetLockConsumedElsewhereError('abc123');
+    expect(isAssetLockConsumedElsewhereError(err)).toBe(true);
+    expect(isIdentityRegistrationUnconfirmedError(err)).toBe(false);
+    expect(err.message).toContain('already used by another registration or top-up');
+    expect(err.message).toContain('Retrying will not help');
   });
 });
 

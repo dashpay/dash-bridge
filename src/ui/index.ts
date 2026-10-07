@@ -15,6 +15,7 @@ export {
   setIdentityRegistered,
   setError,
   setChainlockFallbackStarted,
+  isChainlockFallbackCancelled,
   setChainlockProgress,
   setChainlockProofReady,
   toError,

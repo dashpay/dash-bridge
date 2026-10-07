@@ -5,6 +5,8 @@ import {
   createInitialState,
   getStepDescription,
   setError,
+  setIdentityRegistered,
+  isChainlockFallbackCancelled,
   setMode,
   setWithdrawIdentityFetching,
   setWithdrawIdentityFetched,
@@ -22,7 +24,10 @@ import {
   setWithdrawTrackingTimeout,
 } from './state.js';
 import type { BridgeState } from '../types.js';
-import { IdentityRegistrationUnconfirmedError } from '../platform/identity-confirm.js';
+import {
+  AssetLockConsumedElsewhereError,
+  IdentityRegistrationUnconfirmedError,
+} from '../platform/identity-confirm.js';
 
 function baseState(): BridgeState {
   return createInitialState('testnet');
@@ -66,6 +71,18 @@ describe('setError chainlockFallbackAvailable gating', () => {
     expect(result.chainlockFallbackAvailable).toBe(false);
   });
 
+  it('does NOT enable the fallback when the asset lock was consumed elsewhere', () => {
+    const state: BridgeState = {
+      ...baseState(),
+      step: 'registering_identity',
+      txid: 'abc',
+      signedTxBytes: new Uint8Array([0]),
+    };
+    const result = setError(state, new AssetLockConsumedElsewhereError('someId'));
+    expect(result.chainlockFallbackAvailable).toBe(false);
+    expect(result.unconfirmedIdentityId).toBeUndefined();
+  });
+
   it('does NOT enable the fallback on REGISTER if signedTxBytes is missing', () => {
     const state: BridgeState = {
       ...baseState(),
@@ -85,6 +102,33 @@ describe('setError chainlockFallbackAvailable gating', () => {
     };
     const result = setError(state, new Error('broadcast fail'), ErrorCodes.BROADCAST);
     expect(result.chainlockFallbackAvailable).toBe(false);
+  });
+});
+
+describe('unconfirmed identity registration', () => {
+  it('keeps the derived identity ID across later errors without marking it complete', () => {
+    const registering: BridgeState = { ...baseState(), step: 'registering_identity' };
+    const unconfirmed = setError(registering, new IdentityRegistrationUnconfirmedError('someId'));
+    expect(unconfirmed.unconfirmedIdentityId).toBe('someId');
+    expect(unconfirmed.identityId).toBeUndefined();
+
+    const laterError = setError({ ...unconfirmed, step: 'registering_identity' }, new Error('network down'));
+    expect(laterError.unconfirmedIdentityId).toBe('someId');
+
+    const registered = setIdentityRegistered(laterError, 'someId');
+    expect(registered.identityId).toBe('someId');
+    expect(registered.unconfirmedIdentityId).toBeUndefined();
+  });
+});
+
+describe('isChainlockFallbackCancelled', () => {
+  it('treats an aborted signal as cancellation only before submission starts', () => {
+    expect(isChainlockFallbackCancelled(true, false)).toBe(true);
+    // The fallback aborts its own signal before submitting; errors after
+    // that point must reach the error screen.
+    expect(isChainlockFallbackCancelled(true, true)).toBe(false);
+    expect(isChainlockFallbackCancelled(false, false)).toBe(false);
+    expect(isChainlockFallbackCancelled(false, true)).toBe(false);
   });
 });
 

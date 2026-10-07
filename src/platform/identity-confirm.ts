@@ -34,11 +34,55 @@ export function isIdentityRegistrationUnconfirmedError(error: unknown): boolean 
   return !!error && typeof error === 'object' && (error as { name?: unknown }).name === IDENTITY_REGISTRATION_UNCONFIRMED;
 }
 
+/** `Error.name` of {@link AssetLockConsumedElsewhereError}. */
+export const ASSET_LOCK_CONSUMED_ELSEWHERE = 'AssetLockConsumedElsewhereError';
+
+/**
+ * Platform says the deposit's asset lock was already used, yet no identity
+ * exists at the ID this deposit would create — so it was consumed by a
+ * different registration or a top-up. Retrying cannot help.
+ */
+export class AssetLockConsumedElsewhereError extends Error {
+  constructor(identityId: string) {
+    super(
+      'This deposit was already used by another registration or top-up: Platform reports the asset lock as ' +
+        `spent, but no identity exists at the ID this deposit would create (${identityId}). Retrying will not help. ` +
+        'If you used this deposit in another session, use the key backup from that session to access the identity it funded.'
+    );
+    this.name = ASSET_LOCK_CONSUMED_ELSEWHERE;
+  }
+}
+
+export function isAssetLockConsumedElsewhereError(error: unknown): boolean {
+  return !!error && typeof error === 'object' && (error as { name?: unknown }).name === ASSET_LOCK_CONSUMED_ELSEWHERE;
+}
+
 function errorText(error: unknown): string {
   if (error && typeof error === 'object' && 'message' in error) {
     return String((error as { message: unknown }).message);
   }
   return String(error);
+}
+
+/** Consensus rejection: the asset lock outpoint has already been consumed. */
+export function isAssetLockConsumedError(error: unknown): boolean {
+  return errorText(error).includes('already completely used');
+}
+
+/**
+ * The asset lock was reported consumed AND every lookup definitively said the
+ * identity doesn't exist (no failed lookups) — it was used elsewhere.
+ */
+export function isAssetLockConsumedElsewhere(
+  trigger: unknown,
+  summary: IdentityLookupSummary<unknown>
+): boolean {
+  return (
+    isAssetLockConsumedError(trigger) &&
+    !summary.identity &&
+    summary.notFound > 0 &&
+    summary.errors.length === 0
+  );
 }
 
 /**
@@ -55,7 +99,7 @@ export function isAlreadyExistsError(error: unknown): boolean {
     msg.includes('Object already exists') ||
     msg.includes('tx already exists in cache') ||
     msg.includes('AlreadyExists') ||
-    msg.includes('already completely used') ||
+    isAssetLockConsumedError(error) ||
     /\bIdentity \S+ already exists\b/.test(msg)
   );
 }

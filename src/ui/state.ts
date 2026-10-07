@@ -23,7 +23,11 @@ import {
 import { generateNewMnemonic } from '../crypto/hd.js';
 import { createEmptyUsernameEntry, createUsernameEntry } from '../platform/dpns-utils.js';
 import { WithdrawalStatus } from '../platform/withdrawal-status.js';
-import { isIdentityRegistrationUnconfirmedError } from '../platform/identity-confirm.js';
+import {
+  isAssetLockConsumedElsewhereError,
+  isIdentityRegistrationUnconfirmedError,
+  type IdentityRegistrationUnconfirmedError,
+} from '../platform/identity-confirm.js';
 
 /**
  * Error codes for user-facing display.
@@ -507,6 +511,7 @@ export function setIdentityRegistered(
     ...state,
     step: 'complete',
     identityId,
+    unconfirmedIdentityId: undefined,
   };
 }
 
@@ -537,19 +542,39 @@ function computeChainlockFallbackAvailable(
 
 export function setError(state: BridgeState, error: Error, errorCode?: string): BridgeState {
   const resolvedCode = errorCode ?? StepErrorCodes[state.step] ?? ErrorCodes.UNKNOWN;
+  const unconfirmed = isIdentityRegistrationUnconfirmedError(error);
   return {
     ...state,
     step: 'error',
     error,
     errorCode: resolvedCode,
     errorStep: state.step,
-    // An unconfirmed registration already reached Platform: the fix is to
-    // resubmit the same proof (Retry Registration), not to switch to a chain
-    // proof whose resubmission would bypass the already-exists confirmation.
+    // Both errors mean the deposit's asset lock already reached Platform, so
+    // a chain-lock proof for the same asset lock can't change the outcome
+    // (and the fallback's "InstantSend didn't go through" hint would be
+    // wrong). Unconfirmed → Retry Registration; consumed elsewhere → nothing
+    // to retry.
     chainlockFallbackAvailable:
-      !isIdentityRegistrationUnconfirmedError(error) &&
+      !unconfirmed &&
+      !isAssetLockConsumedElsewhereError(error) &&
       computeChainlockFallbackAvailable(state, resolvedCode),
+    // Keep the derived ID of an unconfirmed registration (for the key backup)
+    // across later errors in the same flow; it is not a completed identity.
+    unconfirmedIdentityId: unconfirmed
+      ? (error as IdentityRegistrationUnconfirmedError).identityId
+      : state.unconfirmedIdentityId,
   };
+}
+
+/**
+ * Whether an error thrown inside the chainlock fallback is the user's
+ * cancellation (already handled by cancelChainlockFallback). The fallback
+ * also aborts its own signal right before submitting to Platform to stop the
+ * height poller, so an aborted signal only means "cancelled" if submission
+ * had not started — later errors must reach the error screen.
+ */
+export function isChainlockFallbackCancelled(signalAborted: boolean, submissionStarted: boolean): boolean {
+  return signalAborted && !submissionStarted;
 }
 
 /**

@@ -1132,6 +1132,7 @@ function buildErrorDiagnostics(state: BridgeState): Record<string, unknown> {
 
   // Identity context
   if (state.identityId) diag.identityId = state.identityId;
+  if (state.unconfirmedIdentityId) diag.unconfirmedIdentityId = state.unconfirmedIdentityId;
   if (state.targetIdentityId) diag.targetIdentityId = state.targetIdentityId;
   if (state.recipientPlatformAddress) diag.recipientPlatformAddress = state.recipientPlatformAddress;
 
@@ -1202,6 +1203,7 @@ function renderErrorStep(state: BridgeState): HTMLElement {
   if (diag.depositAddress) techLines.push(`Deposit: ${diag.depositAddress}`);
   if (diag.txid) techLines.push(`TxID: ${diag.txid}`);
   if (diag.identityId) techLines.push(`Identity: ${diag.identityId}`);
+  if (diag.unconfirmedIdentityId) techLines.push(`Identity (submitted, unconfirmed): ${diag.unconfirmedIdentityId}`);
   if (diag.targetIdentityId) techLines.push(`Target Identity: ${diag.targetIdentityId}`);
   if (diag.recipientPlatformAddress) techLines.push(`Recipient: ${diag.recipientPlatformAddress}`);
   if (diag.stack) techLines.push(`\nStack Trace:\n${diag.stack}`);
@@ -1306,7 +1308,10 @@ export function createKeyBackup(state: BridgeState): string {
   // For create mode: include mnemonic and identity keys
   if (!isTopUp && !isSendToAddress) {
     backup.mnemonic = state.mnemonic;
-    backup.identityId = state.identityId;
+    backup.identityId = state.identityId ?? state.unconfirmedIdentityId;
+    if (!state.identityId && state.unconfirmedIdentityId) {
+      backup.identityStatus = 'submitted, not yet confirmed';
+    }
     backup.identityKeys = state.identityKeys.map((key) => ({
       id: key.id,
       name: key.name,
