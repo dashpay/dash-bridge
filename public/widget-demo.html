@@ -56,8 +56,7 @@
       white-space: pre-wrap;
       margin: 0;
     }
-    #iframe-container:not(:empty),
-    #login-iframe-container:not(:empty) { margin-top: 16px; border: 1px solid #cbd5e0; border-radius: 10px; overflow: hidden; }
+    #iframe-container:not(:empty) { margin-top: 16px; border: 1px solid #cbd5e0; border-radius: 10px; overflow: hidden; }
     h2 { margin: 0 0 8px; font-size: 1.2rem; }
     .note { background: #fff8e1; border: 1px solid #f6c343; border-radius: 8px; padding: 10px 12px; font-size: 0.9rem; }
     #login-result, #login-verify { font-family: monospace; word-break: break-all; }
@@ -118,10 +117,8 @@
       </label>
       <div class="actions">
         <button id="login-popup-btn" disabled>Sign in with Dash (popup)</button>
-        <button id="login-iframe-btn" class="secondary" disabled>Sign in (iframe)</button>
         <button id="login-redirect-btn" class="secondary" disabled>Sign in (redirect)</button>
       </div>
-      <div id="login-iframe-container"></div>
       <p><strong>Login:</strong> <span id="login-result">none yet</span></p>
       <p><strong>Demo verification:</strong> <span id="login-verify">none yet</span></p>
     </div>
@@ -192,8 +189,8 @@
     }
 
     // What your server does: fetch the identity's public keys from Platform.
-    async function fetchIdentityPublicKeys(identityId, network) {
-      if (isMock) {
+    async function fetchIdentityPublicKeys(identityId, { network, mock }) {
+      if (mock) {
         // Mock mode (dev server only): the bridge's mock identity.
         return (await import('/src/e2e-mock-constants.ts')).E2E_MOCK_LOGIN_PUBLIC_KEYS;
       }
@@ -213,7 +210,7 @@
       try {
         const [{ verifyLogin }, identityPublicKeys] = await Promise.all([
           loadVerifier(),
-          fetchIdentityPublicKeys(result.identityId, pending.network),
+          fetchIdentityPublicKeys(result.identityId, pending),
         ]);
         const verdict = verifyLogin(result, {
           expectedOrigin: location.origin,
@@ -233,25 +230,23 @@
 
     function newPendingLogin() {
       // A real app gets this from its server, which remembers it.
-      const pending = { nonce: DashBridge.generateNonce(), network: $('network').value };
+      const pending = { nonce: DashBridge.generateNonce(), network: $('network').value, mock: isMock };
       sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending));
       $('login-result').textContent = 'waiting…';
       $('login-verify').textContent = '';
       return pending;
     }
 
-    function runLogin(mode) {
+    function runLogin() {
       const pending = newPendingLogin();
-      log(`login({ mode: '${mode}' })`);
+      log('login()');
       // Called synchronously from the click handler so the popup isn't blocked.
       DashBridge.login({
-        mode,
         nonce: pending.nonce,
         network: pending.network,
         appName: $('app-name').value,
         statement: $('login-statement').value,
         bridgeUrl: bridgeUrl.href,
-        container: mode === 'iframe' ? $('login-iframe-container') : undefined,
       }).then(
         (result) => showLogin(result, pending),
         (err) => {
@@ -269,7 +264,8 @@
         appName: $('app-name').value,
         statement: $('login-statement').value,
         bridgeUrl: bridgeUrl.href,
-        returnUrl: location.pathname + location.search,
+        // No query string allowed: the pending login (nonce) is the state.
+        returnUrl: location.pathname,
       }));
     }
 
@@ -295,10 +291,9 @@
       DashBridge = sdk;
       $('popup-btn').addEventListener('click', () => run('popup'));
       $('iframe-btn').addEventListener('click', () => run('iframe'));
-      $('login-popup-btn').addEventListener('click', () => runLogin('popup'));
-      $('login-iframe-btn').addEventListener('click', () => runLogin('iframe'));
+      $('login-popup-btn').addEventListener('click', runLogin);
       $('login-redirect-btn').addEventListener('click', runLoginRedirect);
-      for (const id of ['popup-btn', 'iframe-btn', 'login-popup-btn', 'login-iframe-btn', 'login-redirect-btn']) {
+      for (const id of ['popup-btn', 'iframe-btn', 'login-popup-btn', 'login-redirect-btn']) {
         $(id).disabled = false;
       }
       handleLoginRedirect();

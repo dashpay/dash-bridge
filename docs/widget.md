@@ -260,7 +260,7 @@ identity's public keys on Platform. The bridge never sees your app's session,
 and your app never sees the user's private key.
 
 ```
- Your server            Your page (SDK)                Dash Bridge (popup / iframe / redirect)
+ Your server            Your page (SDK)                Dash Bridge (popup or full-page redirect)
  -----------            ---------------                ---------------------------------------
  1. issue nonce  ---->  2. DashBridge.login({ nonce })  ---->  3. user enters identity ID + WIF
                                                                4. bridge fetches the identity's keys
@@ -303,8 +303,7 @@ button.addEventListener('click', async () => {
 DashBridge.login(options: {
   nonce: string;                      // required, 16-128 chars of [A-Za-z0-9_-], from your server
   network?: 'mainnet' | 'testnet';    // default 'testnet'
-  mode?: 'popup' | 'iframe';          // default 'popup'
-  container?: HTMLElement;            // iframe mode
+  mode?: 'popup';                     // the only mode; see "Redirect variant" for full-page
   appName?: string;
   statement?: string;                 // control characters removed, cut to 140 characters
   bridgeUrl?: string;
@@ -326,28 +325,32 @@ DashBridge.generateNonce(): string;   // 32 random bytes, base64url
 ```
 
 `login()` rejects with the same error codes as `createIdentity()`. After the
-result, the SDK closes the popup or removes the iframe; there is nothing left
-to do in the bridge. `generateNonce()` is a convenience for demos and for
+result, the SDK closes the popup; there is nothing left to do in the bridge.
+
+Sign-in never runs in an iframe. `login({ mode: 'iframe' })` rejects with
+`invalid_options`, and the bridge refuses `request=login&embed=iframe` (fatal
+`unsupported_mode`). Users should only paste a key where they can see the
+bridge's own address bar, not into a frame inside someone else's page. `generateNonce()` is a convenience for demos and for
 servers that run JavaScript. The nonce must come from your server and be
 checked there, or a captured result can be replayed.
 
 ### Redirect variant
 
-For full-page flows (no popup, no iframe), send the user to the bridge and
-read the result when they come back:
+For full-page flows (no popup), send the user to the bridge and read the
+result when they come back:
 
 ```js
 // Login page
 location.assign(DashBridge.loginRedirectUrl({
   nonce,                          // from your server
-  returnUrl: '/auth/dash/callback', // must be on this page's origin
+  returnUrl: '/auth/dash/callback', // this page's origin, no query string
   network: 'mainnet',
   appName: 'My Dapp',
 }));
 
-// /auth/dash/callback
+// /auth/dash/callback: run this first, before any other script
 const outcome = DashBridge.parseLoginRedirect(); // reads location.hash
-history.replaceState(null, '', location.pathname + location.search); // drop the fragment
+history.replaceState(null, '', location.pathname); // drop the fragment right away
 if (outcome && 'error' in outcome) {
   // 'cancelled', or 'invalid_response'
 } else if (outcome) {
@@ -356,10 +359,30 @@ if (outcome && 'error' in outcome) {
 ```
 
 The bridge goes back with `location.replace` to
-`returnUrl#dash_login=<base64url(JSON result)>`, or
-`returnUrl#dash_login_error=cancelled` when the user cancels. The result is in
-the fragment, so browsers never send it to any server, including yours: post
-it from the page as above. Redirect mode refuses to run inside a frame.
+`returnUrl#dash_login=<base64url(JSON result)>`. When the user cancels it uses
+`returnUrl#dash_login_error=cancelled`, and for a network it doesn't serve it
+uses `#dash_login_error=unsupported_network`. The result is in the fragment,
+so browsers never send it to any server, including yours: post it from the
+page as above. Redirect mode refuses to run inside a frame.
+
+Anyone can link to a redirect sign-in that names your origin. The link can
+carry the attacker's own nonce for your app. If the signed result then leaked
+from your callback page, the attacker could use it to sign in as the user. So:
+
+- **The bridge checks who sent the user.** It runs a redirect sign-in only
+  when `document.referrer` is a page on the declared origin. If the referrer
+  is missing or from another site, it shows **Request refused** and redirects
+  nowhere. Do not set `Referrer-Policy: no-referrer` on the page that starts
+  the login. The default `strict-origin-when-cross-origin` works, and so does
+  `origin`.
+- **`returnUrl` has no query string.** Your app's state is the nonce. A query
+  is how a generic `/out?to=...` endpoint could be aimed at another site, and
+  browsers carry the fragment across redirects.
+- **Your callback page must:**
+  - never redirect
+  - clear the fragment with `history.replaceState` immediately
+  - not load third-party scripts, analytics or tag managers that could read
+    `location.href` before the fragment is gone
 
 Bridge URL parameters for a login, on top of the ones in
 [Bridge URL parameters](#bridge-url-parameters):
@@ -369,8 +392,8 @@ Bridge URL parameters for a login, on top of the ones in
 | `request` | yes | `login` |
 | `nonce` | yes | 16-128 characters of `[A-Za-z0-9_-]`. |
 | `statement` | no | Short text shown to the user and signed. Control and formatting characters become spaces, then it is cut to 140 characters. |
-| `embed` | yes | `popup`, `iframe`, or `redirect`. |
-| `returnUrl` | redirect only | Absolute URL with exactly the `origin` parameter's origin, no credentials, at most 2048 characters. |
+| `embed` | yes | `popup` or `redirect` (`iframe` is refused). |
+| `returnUrl` | redirect only | Absolute http(s) URL with exactly the `origin` parameter's origin, no credentials, no query string, at most 2048 characters. |
 
 ### The signed message
 
@@ -449,9 +472,9 @@ app.post('/auth/dash/verify', async (req, res) => {
 | `expectedOrigin` | Your app's origin. The message's `URI:` line must match. |
 | `expectedNonce` | The nonce you issued for this attempt. |
 | `network` | `'mainnet'` or `'testnet'`: where you fetched the identity. |
-| `identityPublicKeys` | The identity's keys. Accepts `identity.toJSON().publicKeys` (base64 data), `identity.publicKeys` or `sdk.identities.getKeys(...)` objects (`keyId`, `keyType`, string enums, hex data), `toObject()` output, or plain `{ id, type, purpose, securityLevel, data, disabledAt? }` objects with `data` as `Uint8Array`, `number[]`, hex or base64. |
+| `identityPublicKeys` | The identity's keys. Accepts `identity.toJSON().publicKeys` (base64 data), `identity.publicKeys` or `sdk.identities.getKeys(...)` objects (`keyId`, `keyType`, string enums, hex data), `toObject()` output, or plain `{ id, type, purpose, securityLevel, data, disabledAt?, contractBounds? }` objects with `data` as `Uint8Array`, `number[]`, hex or base64. |
 | `expectedStatement` | Optional. Require exactly this statement. |
-| `now` | Optional `Date` or milliseconds, for tests. |
+| `now` | Optional `Date` or milliseconds, for tests. A value that isn't a valid time fails with `invalid_options`. |
 
 It checks, in order:
 
@@ -464,8 +487,9 @@ It checks, in order:
 4. `issuedAt` is at most 60 seconds in the future (`not_yet_valid`), it is
    before `expiresAt` (`expired`), and the window is at most 10 minutes
    (`malformed`).
-5. Key `keyId` exists (`key_not_found`), is not disabled (`key_disabled`), has
-   AUTHENTICATION purpose (`wrong_key_purpose`), and is CRITICAL or HIGH
+5. Key `keyId` exists (`key_not_found`), is not disabled (`key_disabled`), is
+   not restricted to a contract (`key_contract_bound`), has AUTHENTICATION
+   purpose (`wrong_key_purpose`), and is CRITICAL or HIGH
    (`wrong_security_level`). It must be `ECDSA_SECP256K1` or `ECDSA_HASH160`
    (`unsupported_key_type`).
 6. The signature recovers to that key (`invalid_signature`). For
@@ -477,19 +501,23 @@ It checks, in order:
 - **Single-use nonces.** Issue a fresh random nonce per attempt on your server,
   bind it to the browser session, and delete it on first use, whether or not
   verification passes. That stops replay of a captured result.
-- **Origin binding.** The signed message names your origin, and in popup or
-  iframe mode the bridge posts the result only to that origin. Hard-code
+- **Origin binding.** The signed message names your origin. In popup mode the
+  bridge posts the result only to that origin. In redirect mode it returns
+  only to a query-free `returnUrl` on that origin, and only when your page sent
+  the user. Hard-code
   `expectedOrigin` on the server; never take it from the request. A result
   signed for another site fails with `origin_mismatch`.
 - **Short expiry.** A proof is valid for 10 minutes, with 60 seconds of clock
   skew allowed.
 - **HTTPS.** The bridge accepts only https origins (http only on localhost).
   Serve your app, and the result upload, over https.
-- **Keys stay in the bridge.** The user pastes a WIF into the bridge, which
-  fetches the identity's keys, checks that the WIF matches an enabled HIGH or
-  CRITICAL AUTHENTICATION key, and shows the app (name and origin), identity,
-  key and statement before the user clicks **Sign in**. MASTER keys are
-  refused. The WIF is dropped from memory as soon as the message is signed or
+- **Keys stay in the bridge.** The user pastes a WIF into the bridge, never
+  into a frame. The bridge fetches the identity's keys and checks that the WIF
+  matches an enabled HIGH or CRITICAL AUTHENTICATION key that isn't bound to a
+  contract. Keys whose type, purpose or level it doesn't recognize are refused.
+  Before the user clicks **Sign in**, it shows the app's origin (with its
+  self-declared name as a label only), the identity, the key and the
+  statement. MASTER keys are refused. The WIF is dropped from memory as soon as the message is signed or
   the request is cancelled. Results are built from a field whitelist and never
   contain private material.
 - **The bridge never sees your session.** It only signs a message. Your server
@@ -517,7 +545,7 @@ with `vite.widget.config.ts`, and `dist/widget-verify.mjs` with
 three stay small and self-contained, that the SDK doesn't bundle the verifier,
 and that the verifier loads in Node. The e2e suite (`e2e/widget.spec.ts`)
 covers a cross-origin iframe host, the clickjacking guard, the SDK popup and
-iframe flows, and sign-in in all three modes.
+iframe flows, and sign-in by popup and redirect (including the refusals).
 
 In mock mode (`?e2e=mock`), sign-in uses the mock identity
 `4ufjwRfdhMM87uBaGmTvesgLm6k2Q2r7SVyZdTUzFebA` with real keys from

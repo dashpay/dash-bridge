@@ -4,9 +4,10 @@
  * Built as `dist/widget-verify.mjs` (ES module, no imports). Works in Node 18+
  * and browsers. Not part of `widget.js`: verification belongs on your server.
  */
-import { ripemd160 } from '@noble/hashes/ripemd160';
-import { sha256 } from '@noble/hashes/sha256';
 import { recoverDashMessageSigner } from '../crypto/message-signing.js';
+import { hash160 } from '../crypto/hash.js';
+import { bytesEqual, hexToBytes } from '../utils/hex.js';
+import { base64ToBytes } from '../utils/base64.js';
 import {
   LOGIN_CLOCK_SKEW_MS,
   LOGIN_TTL_MS,
@@ -42,6 +43,8 @@ export interface VerifierPublicKey {
   /** Set (non-null) when the key is disabled. */
   disabledAt?: number | bigint | string | null;
   isDisabled?: boolean;
+  /** Set (non-null) when the key may only be used with one contract. Such keys never verify. */
+  contractBounds?: unknown;
 }
 
 export interface VerifyLoginOptions {
@@ -55,11 +58,13 @@ export interface VerifyLoginOptions {
   identityPublicKeys: readonly VerifierPublicKey[];
   /** If set, the message must carry exactly this statement. */
   expectedStatement?: string;
-  /** Defaults to the current time. */
+  /** Defaults to the current time. Must be a valid time. */
   now?: Date | number;
 }
 
 export type VerifyLoginFailure =
+  /** `options.now` is not a valid time. */
+  | 'invalid_options'
   | 'malformed'
   | 'nonce_mismatch'
   | 'network_mismatch'
@@ -70,6 +75,7 @@ export type VerifyLoginFailure =
   | 'expired'
   | 'key_not_found'
   | 'key_disabled'
+  | 'key_contract_bound'
   | 'wrong_key_purpose'
   | 'wrong_security_level'
   | 'unsupported_key_type'
@@ -98,19 +104,15 @@ function keyBytes(data: VerifierPublicKey['data'], expectedLength: number): Uint
   if (data instanceof Uint8Array) return data;
   if (Array.isArray(data)) return Uint8Array.from(data as number[]);
   if (typeof data !== 'string') return null;
-  if (data.length === expectedLength * 2 && /^[0-9a-fA-F]+$/.test(data)) {
-    return Uint8Array.from(data.match(/../g)!, (h) => parseInt(h, 16));
-  }
+  if (data.length === expectedLength * 2 && /^[0-9a-fA-F]+$/.test(data)) return hexToBytes(data);
   try {
-    return Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+    return base64ToBytes(data);
   } catch {
     return null;
   }
 }
 
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  return a.length === b.length && a.every((byte, i) => byte === b[i]);
-}
+const isSet = (value: unknown) => value !== undefined && value !== null;
 
 function fail(reason: VerifyLoginFailure): VerifyLoginResult {
   return { ok: false, reason };
@@ -125,6 +127,10 @@ function fail(reason: VerifyLoginFailure): VerifyLoginResult {
  * fetched from Platform for `result.identityId` on `network`.
  */
 export function verifyLogin(result: unknown, options: VerifyLoginOptions): VerifyLoginResult {
+  // A NaN clock would make every time comparison below false, i.e. pass.
+  const now = options.now === undefined ? Date.now() : Number(options.now);
+  if (!Number.isFinite(now)) return fail('invalid_options');
+
   const login = pickLoginResult(result);
   if (!login || !isLoginTime(login.issuedAt) || !isLoginTime(login.expiresAt)) return fail('malformed');
 
@@ -156,13 +162,13 @@ export function verifyLogin(result: unknown, options: VerifyLoginOptions): Verif
   const issuedMs = Date.parse(login.issuedAt);
   const expiresMs = Date.parse(login.expiresAt);
   if (expiresMs <= issuedMs || expiresMs - issuedMs > LOGIN_TTL_MS) return fail('malformed');
-  const now = options.now === undefined ? Date.now() : Number(options.now);
   if (issuedMs > now + LOGIN_CLOCK_SKEW_MS) return fail('not_yet_valid');
   if (now >= expiresMs) return fail('expired');
 
   const key = options.identityPublicKeys.find((k) => (k.id ?? k.keyId) === login.keyId);
   if (!key) return fail('key_not_found');
-  if (key.isDisabled || (key.disabledAt !== undefined && key.disabledAt !== null)) return fail('key_disabled');
+  if (key.isDisabled || isSet(key.disabledAt)) return fail('key_disabled');
+  if (isSet(key.contractBounds)) return fail('key_contract_bound');
   if (enumValue(key.purpose, PURPOSES) !== PURPOSE_AUTHENTICATION) return fail('wrong_key_purpose');
   const level = enumValue(key.securityLevel, SECURITY_LEVELS);
   if (level === undefined || !ALLOWED_SECURITY_LEVELS.includes(level)) return fail('wrong_security_level');
@@ -172,7 +178,7 @@ export function verifyLogin(result: unknown, options: VerifyLoginOptions): Verif
   const expected = keyBytes(key.data, type === KEY_TYPE_SECP256K1 ? 33 : 20);
   const signer = recoverDashMessageSigner(login.message, login.signature);
   if (!expected || !signer) return fail('invalid_signature');
-  const signerData = type === KEY_TYPE_SECP256K1 ? signer : ripemd160(sha256(signer));
+  const signerData = type === KEY_TYPE_SECP256K1 ? signer : hash160(signer);
   if (!bytesEqual(signerData, expected)) return fail('invalid_signature');
 
   return { ok: true, identityId: login.identityId, keyId: login.keyId };

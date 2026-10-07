@@ -123,7 +123,13 @@ export function createIdentity(options: CreateIdentityOptions = {}): Promise<Cre
   );
 }
 
-export interface LoginOptions extends Omit<BridgeRequestOptions, 'onProgress' | 'onError'> {
+export interface LoginOptions extends Omit<BridgeRequestOptions, 'onProgress' | 'onError' | 'mode' | 'container'> {
+  /**
+   * Only `'popup'` (the default). Sign-in never runs in an iframe: users
+   * should only paste a key where they can see the bridge's address bar. For
+   * a full-page flow use `loginRedirectUrl`.
+   */
+  mode?: 'popup';
   /**
    * Single-use challenge your server generated and remembers (16-128 chars of
    * `[A-Za-z0-9_-]`). `generateNonce()` makes one, but the server must issue
@@ -147,19 +153,24 @@ export interface LoginRedirectOptions {
 const NONCE_HINT = 'nonce must be 16-128 characters of [A-Za-z0-9_-], issued by your server';
 
 /**
- * Ask the user to sign in with a Dash Platform identity. Resolves with a
- * signed proof; check it on your server with `verifyLogin` from
- * `widget-verify.mjs` before trusting `identityId`. In popup mode, call this
- * synchronously from a user gesture (click).
+ * Ask the user to sign in with a Dash Platform identity, in a popup. Resolves
+ * with a signed proof; check it on your server with `verifyLogin` from
+ * `widget-verify.mjs` before trusting `identityId`. Call this synchronously
+ * from a user gesture (click).
  */
 export function login(options: LoginOptions): Promise<LoginResult> {
   if (!options || !isValidNonce(options.nonce)) {
     return Promise.reject(new DashBridgeError('invalid_options', NONCE_HINT));
   }
+  if ((options.mode ?? 'popup') !== 'popup') {
+    return Promise.reject(
+      new DashBridgeError('invalid_options', 'login runs only in a popup; use loginRedirectUrl for a full-page flow'),
+    );
+  }
   const params: LoginParams = { nonce: options.nonce, statement: sanitizeStatement(options.statement) };
   return runBridgeRequest(
     'login',
-    options,
+    { ...options, mode: 'popup' },
     (msg) => (msg.type === 'login' ? pickLoginResult(msg) ?? undefined : undefined),
     params,
   );
@@ -183,9 +194,9 @@ export function loginRedirectUrl(options: LoginRedirectOptions): string {
   } catch {
     // reported below
   }
-  if (!returnUrl) throw invalid("returnUrl must be a URL on this page's origin");
+  if (!returnUrl) throw invalid("returnUrl must be an http(s) URL on this page's origin, without a query string");
   return buildBridgeUrl({
-    bridgeUrl: resolveBridgeUrl(options.bridgeUrl, invalid).href,
+    bridgeUrl: resolveBridgeUrl(options.bridgeUrl).href,
     kind: 'redirect',
     origin,
     request: 'login',
@@ -205,14 +216,17 @@ export function parseLoginRedirect(hash: string = window.location.hash): LoginRe
   return parseLoginFragment(hash);
 }
 
-function resolveBridgeUrl(value: string | undefined, invalid: (message: string) => Error): URL {
+/** Throws DashBridgeError('invalid_options'). */
+function resolveBridgeUrl(value: string | undefined): URL {
   let url: URL;
   try {
     url = new URL(value ?? DEFAULT_BRIDGE_URL, window.location.href);
   } catch {
-    throw invalid('bridgeUrl is not a valid URL');
+    throw new DashBridgeError('invalid_options', 'bridgeUrl is not a valid URL');
   }
-  if (!isAllowedWebUrl(url)) throw invalid('bridgeUrl must be https (http only on localhost)');
+  if (!isAllowedWebUrl(url)) {
+    throw new DashBridgeError('invalid_options', 'bridgeUrl must be https (http only on localhost)');
+  }
   return url;
 }
 
@@ -229,7 +243,7 @@ function safeCall<A>(fn: ((arg: A) => void) | undefined, arg: A): void {
  * Shared lifecycle for every request type: open the bridge, route messages,
  * and clean up. `extractResult` turns the request's result message into the
  * resolved value. A login has nothing left to do in the bridge after its
- * result, so its iframe is removed and its popup closed right away.
+ * result, so its popup is closed right away.
  */
 function runBridgeRequest<R>(
   request: EmbedRequestType,
@@ -253,7 +267,7 @@ function runBridgeRequest<R>(
 
     let bridgeUrl: URL;
     try {
-      bridgeUrl = resolveBridgeUrl(options.bridgeUrl, (message) => new DashBridgeError('invalid_options', message));
+      bridgeUrl = resolveBridgeUrl(options.bridgeUrl);
     } catch (err) {
       return reject(err);
     }

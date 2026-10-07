@@ -1,4 +1,5 @@
-import type { DpnsUsernameEntry } from '../types.js';
+import type { DpnsUsernameEntry, IdentityPublicKeyInfo } from '../types.js';
+import type { PlatformIdentityKeyRecord } from './client.js';
 
 /**
  * Validate a DPNS label according to platform rules:
@@ -114,4 +115,48 @@ export function countUsernameStatuses(usernames: DpnsUsernameEntry[]): {
   const nonContested = usernames.filter((u) => u.isValid && u.isAvailable && !u.isContested).length;
 
   return { available, taken, invalid, contested, nonContested };
+}
+
+const KEY_TYPES: Record<string, number> = { ECDSA_SECP256K1: 0, ECDSA_HASH160: 2 };
+const KEY_PURPOSES: Record<string, number> = {
+  AUTHENTICATION: 0, ENCRYPTION: 1, DECRYPTION: 2, TRANSFER: 3, OWNER: 4, VOTING: 5,
+};
+const SECURITY_LEVELS: Record<string, number> = { MASTER: 0, CRITICAL: 1, HIGH: 2, MEDIUM: 3 };
+
+/**
+ * Convert an SDK key record (`IdentityPublicKey` getters: string enums, hex
+ * `data`) to our numeric form.
+ *
+ * Unknown or missing enum strings keep their historical fallbacks (type and
+ * purpose 0, level MASTER) for the existing flows, but set `unrecognized` so
+ * callers that must fail closed (Sign in with Dash) can refuse the key.
+ */
+export function identityKeyFromRecord(key: PlatformIdentityKeyRecord): IdentityPublicKeyInfo {
+  const known = (map: Record<string, number>, value: unknown) =>
+    typeof value === 'string' && Object.prototype.hasOwnProperty.call(map, value);
+
+  const rawData = key.data;
+  let data: Uint8Array;
+  if (typeof rawData === 'string' && /^[0-9a-fA-F]+$/.test(rawData)) {
+    data = new Uint8Array(rawData.match(/.{1,2}/g)!.map((byte) => parseInt(byte, 16)));
+  } else if (typeof rawData === 'string') {
+    data = new Uint8Array(atob(rawData).split('').map((c) => c.charCodeAt(0)));
+  } else {
+    console.warn('Unexpected key data format:', rawData);
+    data = new Uint8Array(0);
+  }
+
+  return {
+    id: key.keyId,
+    type: KEY_TYPES[key.keyType ?? 'ECDSA_SECP256K1'] ?? 0,
+    purpose: KEY_PURPOSES[key.purpose ?? 'AUTHENTICATION'] ?? 0,
+    securityLevel: SECURITY_LEVELS[key.securityLevel ?? 'MASTER'] ?? 0,
+    data,
+    // The SDK reports a disabled key with a disabledAt timestamp.
+    isDisabled: key.disabledAt !== undefined && key.disabledAt !== null,
+    // `contractBounds` getter (undefined) or toJSON() (null) when unbound.
+    isContractBound: key.contractBounds !== undefined && key.contractBounds !== null,
+    unrecognized:
+      !known(KEY_TYPES, key.keyType) || !known(KEY_PURPOSES, key.purpose) || !known(SECURITY_LEVELS, key.securityLevel),
+  };
 }

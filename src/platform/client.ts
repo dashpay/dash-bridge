@@ -12,6 +12,7 @@ export interface PlatformIdentityKeyRecord {
   securityLevel?: string;
   data?: unknown;
   disabledAt?: unknown;
+  contractBounds?: unknown;
 }
 
 const PLATFORM_REQUEST_SETTINGS = {

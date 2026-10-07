@@ -117,6 +117,25 @@ describe('verifyLogin', () => {
     expect(verifyLogin(high, { ...OPTIONS, identityPublicKeys: flagged })).toEqual({ ok: false, reason: 'key_disabled' });
   });
 
+  it('refuses a contract-bound key', () => {
+    const bounds = { contractId: '7'.repeat(44), type: 'singleContract' };
+    for (const key of [
+      { ...KEYS[1], contractBounds: bounds },
+      // IdentityPublicKey getter shape
+      { keyId: 1, keyType: 'ECDSA_SECP256K1', purpose: 'AUTHENTICATION', securityLevel: 'HIGH', data: KEYS[1].data, contractBounds: bounds },
+    ]) {
+      expect(verifyLogin(high, { ...OPTIONS, identityPublicKeys: [key] })).toEqual({ ok: false, reason: 'key_contract_bound' });
+    }
+    // toJSON() reports unbound keys as null.
+    expect(verifyLogin(high, { ...OPTIONS, identityPublicKeys: [{ ...KEYS[1], contractBounds: null }] }).ok).toBe(true);
+  });
+
+  it('rejects a clock that is not a valid time instead of skipping the time checks', () => {
+    expect(verifyLogin(high, { ...OPTIONS, now: Number.NaN })).toEqual({ ok: false, reason: 'invalid_options' });
+    expect(verifyLogin(high, { ...OPTIONS, now: new Date('nope') })).toEqual({ ok: false, reason: 'invalid_options' });
+    expect(verifyLogin(high, { ...OPTIONS, now: Infinity })).toEqual({ ok: false, reason: 'invalid_options' });
+  });
+
   it('refuses a key with another purpose', async () => {
     const result = await sign(E2E_MOCK_LOGIN_TRANSFER_WIF, 3);
     expect(verifyLogin(result, OPTIONS)).toEqual({ ok: false, reason: 'wrong_key_purpose' });

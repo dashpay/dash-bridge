@@ -234,7 +234,7 @@ describe('parseEmbedParams: login', () => {
   });
 
   it('parses a redirect login with a return URL on the declared origin', () => {
-    const returnUrl = 'https://app.example/auth/callback?next=%2Fhome';
+    const returnUrl = 'https://app.example/auth/callback';
     const result = parseEmbedParams(`${base}&embed=redirect&returnUrl=${encodeURIComponent(returnUrl)}`);
     expect(result).toMatchObject({ status: 'ok', params: { kind: 'redirect', login: { nonce: NONCE, returnUrl } } });
   });
@@ -244,6 +244,9 @@ describe('parseEmbedParams: login', () => {
     [`${base}&embed=redirect&returnUrl=${encodeURIComponent('https://app.example.evil.example/cb')}`, 'return URL'],
     [`${base}&embed=redirect&returnUrl=${encodeURIComponent('http://app.example/cb')}`, 'return URL'],
     [`${base}&embed=redirect`, 'return URL'],
+    [`${base}&embed=redirect&returnUrl=${encodeURIComponent('https://app.example/out?to=https://evil.example')}`, 'query string'],
+    [`${base}&embed=redirect&returnUrl=${encodeURIComponent('https://app.example/cb?')}`, 'query string'],
+    [`${base}&embed=redirect&returnUrl=${encodeURIComponent('blob:https://app.example/1234')}`, 'return URL'],
     [`?origin=https://app.example&embed=redirect&returnUrl=${encodeURIComponent('https://app.example/cb')}`, 'only available for sign-in'],
     ['?origin=https://app.example&request=login&embed=popup', 'nonce'],
     ['?origin=https://app.example&request=login&embed=popup&nonce=short', 'nonce'],
@@ -252,6 +255,27 @@ describe('parseEmbedParams: login', () => {
     const result = parseEmbedParams(query);
     expect(result.status).toBe('invalid');
     expect(result.status === 'invalid' && result.reason).toContain(reason);
+  });
+});
+
+describe('parseEmbedParams: login modes and networks', () => {
+  const base = '?origin=https://app.example&request=login&nonce=abcdefghijklmnop1234';
+
+  it('refuses iframe logins as unsupported, so the framing app is told', () => {
+    expect(parseEmbedParams(`${base}&embed=iframe`)).toMatchObject({
+      status: 'unsupported',
+      code: 'unsupported_mode',
+      params: { kind: 'iframe', request: 'login' },
+    });
+  });
+
+  it('keeps the redirect target for an unsupported network', () => {
+    const returnUrl = 'https://app.example/cb';
+    expect(parseEmbedParams(`${base}&embed=redirect&network=devnet&returnUrl=${encodeURIComponent(returnUrl)}`)).toMatchObject({
+      status: 'unsupported',
+      code: 'unsupported_network',
+      params: { kind: 'redirect', login: { returnUrl } },
+    });
   });
 });
 

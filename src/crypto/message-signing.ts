@@ -10,7 +10,9 @@
  * recovers), so keep it free of app dependencies.
  */
 import * as secp256k1 from '@noble/secp256k1';
-import { sha256 } from '@noble/hashes/sha256';
+import { hash256 } from './hash.js';
+import { concatBytes } from '../utils/hex.js';
+import { base64ToBytes, bytesToBase64 } from '../utils/base64.js';
 
 const MESSAGE_MAGIC = 'DarkCoin Signed Message:\n';
 const COMPACT_SIGNATURE_LENGTH = 65;
@@ -26,33 +28,19 @@ function varint(n: number): Uint8Array {
 
 function varstr(text: string): Uint8Array {
   const bytes = new TextEncoder().encode(text);
-  const prefix = varint(bytes.length);
-  const out = new Uint8Array(prefix.length + bytes.length);
-  out.set(prefix);
-  out.set(bytes, prefix.length);
-  return out;
+  return concatBytes(varint(bytes.length), bytes);
 }
 
 /** The 32-byte digest a Dash message signature commits to. */
 export function dashMessageHash(message: string): Uint8Array {
-  const magic = varstr(MESSAGE_MAGIC);
-  const body = varstr(message);
-  const data = new Uint8Array(magic.length + body.length);
-  data.set(magic);
-  data.set(body, magic.length);
-  return sha256(sha256(data));
+  return hash256(concatBytes(varstr(MESSAGE_MAGIC), varstr(message)));
 }
 
-function toBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary);
-}
-
+/** Strict base64 (padded, standard alphabet), or null. */
 function fromBase64(value: string): Uint8Array | null {
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) return null;
   try {
-    return Uint8Array.from(atob(value), (c) => c.charCodeAt(0));
+    return base64ToBytes(value);
   } catch {
     return null;
   }
@@ -61,10 +49,7 @@ function fromBase64(value: string): Uint8Array | null {
 /** Sign `message` with a private key; returns the base64 compact signature (compressed key). */
 export async function signDashMessage(message: string, privateKey: Uint8Array): Promise<string> {
   const sig = await secp256k1.signAsync(dashMessageHash(message), privateKey, { lowS: true });
-  const out = new Uint8Array(COMPACT_SIGNATURE_LENGTH);
-  out[0] = COMPRESSED_HEADER_MIN + sig.recovery;
-  out.set(sig.toCompactRawBytes(), 1);
-  return toBase64(out);
+  return bytesToBase64(concatBytes(Uint8Array.of(COMPRESSED_HEADER_MIN + sig.recovery), sig.toCompactRawBytes()));
 }
 
 /**

@@ -17,7 +17,6 @@ import type {
   UsernameTransferOutcome,
   LoginKeyInfo,
 } from '../types.js';
-import type { LoginResult } from '../embed/login.js';
 import {
   generateDefaultIdentityKeysHD,
   generateIdentityKeyFromMnemonic,
@@ -787,6 +786,7 @@ export function getStepDescription(step: BridgeStep): string {
     login_verifying: 'Checking your key...',
     login_review: 'Approve sign-in',
     login_complete: 'Signed in',
+    login_cancelled: 'Sign-in cancelled',
   };
   return descriptions[step];
 }
@@ -851,6 +851,7 @@ export function getStepProgress(step: BridgeStep): number {
     login_verifying: 50,
     login_review: 70,
     login_complete: 100,
+    login_cancelled: 0,
   };
   return progress[step];
 }
@@ -2226,7 +2227,6 @@ const CLEARED_LOGIN_FIELDS = {
   loginShowWif: undefined,
   loginError: undefined,
   loginKey: undefined,
-  loginResult: undefined,
 } satisfies Partial<BridgeState>;
 
 /** Login: keep typed values across re-renders; editing clears a stale error. */
@@ -2263,18 +2263,17 @@ export function setLoginBackToInput(state: BridgeState): BridgeState {
   return { ...state, step: 'login_input', loginKey: undefined };
 }
 
-/** Signed: keep only the public result; the WIF is dropped here. */
-export function setLoginComplete(state: BridgeState, result: LoginResult): BridgeState {
-  return {
-    ...state,
-    step: 'login_complete',
-    loginResult: result,
-    loginPrivateKeyWif: undefined,
-    loginShowWif: undefined,
-  };
-}
-
-/** Drop the WIF (cancel, or any exit from the login flow). */
+/** Drop the WIF (any exit from the login flow). */
 export function clearLoginSecret(state: BridgeState): BridgeState {
   return { ...state, loginPrivateKeyWif: undefined, loginShowWif: undefined };
+}
+
+/** Signed and delivered: the WIF is dropped here. */
+export function setLoginComplete(state: BridgeState): BridgeState {
+  return { ...clearLoginSecret(state), step: 'login_complete' };
+}
+
+/** Cancelled: terminal, so in-flight work can see the flow is over. */
+export function setLoginCancelled(state: BridgeState): BridgeState {
+  return { ...clearLoginSecret(state), step: 'login_cancelled', loginKey: undefined };
 }

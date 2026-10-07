@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { checkLoginKey, describeLoginFetchError, signLogin, validateLoginWif, MASTER_KEY_REFUSED } from './login.js';
+import {
+  checkLoginKey,
+  describeLoginFetchError,
+  signLogin,
+  validateLoginWif,
+  LoginAttempts,
+  MASTER_KEY_REFUSED,
+} from './login.js';
+import { identityKeyFromRecord } from './dpns-utils.js';
 import { buildMessage } from '../embed/protocol.js';
 import { buildLoginRedirectUrl, LOGIN_RESULT_FIELDS } from '../embed/login.js';
 import { getPublicKey } from '../crypto/keys.js';
@@ -59,6 +67,13 @@ describe('checkLoginKey', () => {
     });
   });
 
+  it('refuses contract-bound keys and keys with unrecognized enums (fail closed)', () => {
+    const bound = KEYS.map((k) => (k.id === 1 ? { ...k, isContractBound: true } : k));
+    expect(checkLoginKey(E2E_MOCK_LOGIN_HIGH_WIF, bound, 'testnet')).toMatchObject({ ok: false, error: expect.stringContaining('restricted to one data contract') });
+    const unknown = KEYS.map((k) => (k.id === 1 ? { ...k, unrecognized: true } : k));
+    expect(checkLoginKey(E2E_MOCK_LOGIN_HIGH_WIF, unknown, 'testnet')).toMatchObject({ ok: false, error: expect.stringContaining("isn't recognized") });
+  });
+
   it('checks the WIF format and network', () => {
     const mainnetWif = privateKeyToWif(wifToPrivateKey(E2E_MOCK_LOGIN_HIGH_WIF).privateKey, MAINNET);
     expect(validateLoginWif(mainnetWif, 'testnet')).toBe('This private key is not for testnet.');
@@ -66,6 +81,52 @@ describe('checkLoginKey', () => {
     expect(validateLoginWif('not-a-wif', 'testnet')).toContain('not a valid private key');
     expect(validateLoginWif('', 'testnet')).toContain('Enter the private key');
     expect(checkLoginKey(mainnetWif, KEYS, 'testnet')).toMatchObject({ ok: false, error: 'This private key is not for testnet.' });
+  });
+});
+
+describe('identityKeyFromRecord', () => {
+  const record = { keyId: 1, keyType: 'ECDSA_SECP256K1', purpose: 'AUTHENTICATION', securityLevel: 'HIGH', data: E2E_MOCK_LOGIN_PUBLIC_KEYS[1].data };
+
+  it('converts SDK getter records', () => {
+    expect(identityKeyFromRecord(record)).toEqual({
+      id: 1, type: 0, purpose: 0, securityLevel: 2, data: hexToBytes(record.data),
+      isDisabled: false, isContractBound: false, unrecognized: false,
+    });
+    expect(identityKeyFromRecord({ ...record, disabledAt: 5n }).isDisabled).toBe(true);
+  });
+
+  it('carries contract bounds from the getter (object) and toJSON (null when unbound)', () => {
+    expect(identityKeyFromRecord({ ...record, contractBounds: { contractId: 'x' } }).isContractBound).toBe(true);
+    expect(identityKeyFromRecord({ ...record, contractBounds: null }).isContractBound).toBe(false);
+  });
+
+  it('flags unknown or missing enums, which login then refuses', () => {
+    for (const odd of [{ purpose: 'SYSTEM' }, { keyType: 'BLS12_381' }, { securityLevel: 'ULTRA' }, { purpose: undefined }]) {
+      const info = identityKeyFromRecord({ ...record, ...odd });
+      expect(info.unrecognized).toBe(true);
+      expect(checkLoginKey(E2E_MOCK_LOGIN_HIGH_WIF, [info], 'testnet').ok).toBe(false);
+    }
+  });
+});
+
+describe('LoginAttempts', () => {
+  it('lets only the latest attempt land (Back, Cancel or a new Continue invalidate older ones)', async () => {
+    const attempts = new LoginAttempts();
+    const landed: string[] = [];
+    const run = async (label: string, delayMs: number) => {
+      const token = attempts.next();
+      await new Promise((r) => setTimeout(r, delayMs));
+      if (attempts.isCurrent(token)) landed.push(label);
+    };
+    const slow = run('first Continue (slow fetch)', 20);
+    const fast = run('second Continue', 1);
+    await Promise.all([slow, fast]);
+    expect(landed).toEqual(['second Continue']);
+
+    const pending = run('sign before Cancel', 5);
+    attempts.next(); // Cancel
+    await pending;
+    expect(landed).toEqual(['second Continue']);
   });
 });
 

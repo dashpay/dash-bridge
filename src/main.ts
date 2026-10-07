@@ -226,9 +226,15 @@ import {
   setLoginReview,
   setLoginBackToInput,
   setLoginComplete,
-  clearLoginSecret,
+  setLoginCancelled,
 } from './ui/state.js';
-import { checkLoginKey, describeLoginFetchError, signLogin, validateLoginWif } from './platform/login.js';
+import {
+  LoginAttempts,
+  checkLoginKey,
+  describeLoginFetchError,
+  signLogin,
+  validateLoginWif,
+} from './platform/login.js';
 import { hexToBytes } from './utils/hex.js';
 
 // Global state
@@ -767,7 +773,13 @@ function setupEventListeners(container: HTMLElement) {
 
   // Embed mode: Cancel (banner, and the login screens) and Return to app (complete screen)
   const cancelEmbed = () => {
-    if (embedSession?.cancel(state)) updateState(clearLoginSecret(state));
+    if (!embedSession?.cancel(state)) return;
+    if (state.mode === 'login') {
+      loginAttempts.next();
+      updateState(setLoginCancelled(state));
+    } else {
+      updateState(state);
+    }
   };
   container.querySelector('#embed-cancel-btn')?.addEventListener('click', cancelEmbed);
   container.querySelector('#login-cancel-btn')?.addEventListener('click', cancelEmbed);
@@ -796,6 +808,7 @@ function setupEventListeners(container: HTMLElement) {
     void startLoginVerification();
   });
   container.querySelector('#login-back-btn')?.addEventListener('click', () => {
+    loginAttempts.next();
     updateState(setLoginBackToInput(state));
   });
   container.querySelector('#login-sign-btn')?.addEventListener('click', () => {
@@ -2383,9 +2396,16 @@ function setupEventListeners(container: HTMLElement) {
 // Sign in with Dash
 // ============================================================================
 
+/**
+ * Bumped by Continue, Sign in, Back and Cancel. Every await in the login flow
+ * re-checks its token, so a stale fetch or signature never lands on a newer
+ * screen (or after Cancel).
+ */
+const loginAttempts = new LoginAttempts();
+
 /** Re-read after an await (TypeScript keeps the pre-await narrowing of `state`). */
-function isCurrentStep(step: BridgeStep): boolean {
-  return state.step === step;
+function isCurrentLogin(token: number, step: BridgeStep): boolean {
+  return loginAttempts.isCurrent(token) && state.step === step;
 }
 
 async function fetchLoginIdentityKeys(identityId: string): Promise<IdentityPublicKeyInfo[]> {
@@ -2411,14 +2431,15 @@ async function startLoginVerification(): Promise<void> {
     return;
   }
 
+  const token = loginAttempts.next();
   updateState(setLoginVerifying(setLoginInput(state, { identityId, privateKeyWif })));
   try {
     const keys = await fetchLoginIdentityKeys(identityId);
-    if (!isCurrentStep('login_verifying')) return; // cancelled meanwhile
+    if (!isCurrentLogin(token, 'login_verifying')) return; // cancelled meanwhile
     const check = checkLoginKey(privateKeyWif, keys, state.network);
     updateState(check.ok ? setLoginReview(state, check.key) : setLoginError(state, check.error));
   } catch (error) {
-    if (!isCurrentStep('login_verifying')) return;
+    if (!isCurrentLogin(token, 'login_verifying')) return;
     updateState(setLoginError(state, describeLoginFetchError(error, state.network)));
   }
 }
@@ -2431,6 +2452,7 @@ async function approveLogin(): Promise<void> {
   if (state.step !== 'login_review' || !session || !login || !loginKey || !loginIdentityId || !loginPrivateKeyWif) {
     return;
   }
+  const token = loginAttempts.next();
   try {
     const result = await signLogin({
       origin: session.origin,
@@ -2441,12 +2463,12 @@ async function approveLogin(): Promise<void> {
       keyId: loginKey.keyId,
       privateKeyWif: loginPrivateKeyWif,
     });
-    // Double click, or cancelled while signing.
-    if (!isCurrentStep('login_review')) return;
-    updateState(setLoginComplete(state, result));
+    // Double click, Back, or Cancel while signing.
+    if (!isCurrentLogin(token, 'login_review')) return;
+    updateState(setLoginComplete(state));
     session.completeLogin(result);
   } catch (error) {
-    if (!isCurrentStep('login_review')) return;
+    if (!isCurrentLogin(token, 'login_review')) return;
     updateState(setLoginError(state, `Could not sign in: ${extractErrorMessage(error)}`));
   }
 }

@@ -234,6 +234,8 @@ export interface UnsupportedEmbedParams {
   request: string;
   appName?: string;
   requestId?: string;
+  /** Redirect-mode logins: where to send the error back to. */
+  login?: LoginParams;
 }
 
 export type EmbedParamsResult =
@@ -264,29 +266,36 @@ export function parseEmbedParams(search: string | URLSearchParams): EmbedParamsR
     appName: sanitizeAppName(q.get('app')),
     requestId: rawRequestId ?? undefined,
   };
+  let login: LoginParams | undefined;
   const unsupported = (code: string, reason: string): EmbedParamsResult => ({
     status: 'unsupported',
-    params: { ...base, request },
+    params: { ...base, request, login },
     code,
     reason,
   });
 
-  // Redirect mode has no channel for a fatal reply, so everything it needs is
-  // validated up front.
+  // Redirect mode can only answer by navigating to returnUrl, so that and the
+  // nonce are validated before anything is reported back.
   let returnUrl: string | undefined;
   if (embed === 'redirect') {
     if (request !== 'login') return invalid('Redirect mode is only available for sign-in requests.');
     returnUrl = parseReturnUrl(q.get('returnUrl'), origin) ?? undefined;
-    if (!returnUrl) return invalid("The app's return URL is missing or not on its origin.");
+    if (!returnUrl) {
+      return invalid("The app's return URL is missing, not on its origin, or has a query string.");
+    }
   }
   if (!isOneOf(EMBED_REQUEST_TYPES, request)) {
     return unsupported('unsupported_request', 'This bridge does not support the requested operation.');
   }
-  let login: LoginParams | undefined;
   if (request === 'login') {
     const nonce = q.get('nonce');
     if (!isValidNonce(nonce)) return invalid('The sign-in request has no valid nonce.');
     login = { nonce, statement: sanitizeStatement(q.get('statement')), returnUrl };
+    // Never ask users to paste keys into a frame on someone else's page:
+    // sign-in runs where they can see the bridge's address bar.
+    if (embed === 'iframe') {
+      return unsupported('unsupported_mode', 'Sign-in opens in a popup or a full-page redirect, not in an embedded frame.');
+    }
   }
   const network = q.get('network') ?? 'testnet';
   if (!isOneOf(EMBED_NETWORKS, network)) {

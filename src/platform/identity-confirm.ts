@@ -6,6 +6,8 @@
  * name and so the decision logic is unit-testable without the wasm SDK.
  */
 
+import { bytesEqual } from '../utils/hex.js';
+
 /** `Error.name` of {@link IdentityRegistrationUnconfirmedError}. */
 export const IDENTITY_REGISTRATION_UNCONFIRMED = 'IdentityRegistrationUnconfirmedError';
 
@@ -220,14 +222,6 @@ function base64ToBytesOrNull(value: string): Uint8Array | null {
   } catch {
     return null;
   }
-}
-
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
 }
 
 /**

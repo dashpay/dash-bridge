@@ -15,6 +15,7 @@ import {
   setLoginError,
   setLoginReview,
   setLoginComplete,
+  setLoginCancelled,
   toggleLoginShowWif,
   clearLoginSecret,
 } from './state.js';
@@ -156,23 +157,27 @@ describe('Sign in with Dash UI', () => {
 
   it('drops the WIF once signed or cancelled, or when leaving the mode', () => {
     const typed = setLoginInput(loginState(), { identityId: IDENTITY_ID, privateKeyWif: WIF });
-    const done = setLoginComplete(typed, {
-      identityId: IDENTITY_ID,
-      keyId: 1,
-      network: 'testnet',
-      message: 'm',
-      signature: 's',
-      nonce: 'n'.repeat(16),
-      issuedAt: '2026-10-07T12:00:00Z',
-      expiresAt: '2026-10-07T12:10:00Z',
-    });
+    const done = setLoginComplete(typed);
+    expect(done.step).toBe('login_complete');
     expect(done.loginPrivateKeyWif).toBeUndefined();
+    const cancelled = setLoginCancelled(typed);
+    expect(cancelled.step).toBe('login_cancelled');
+    expect(cancelled.loginPrivateKeyWif).toBeUndefined();
     expect(JSON.stringify(done)).not.toContain(WIF);
     expect(clearLoginSecret(typed).loginPrivateKeyWif).toBeUndefined();
     expect(setMode(typed, 'create').loginPrivateKeyWif).toBeUndefined();
     const container = renderState(done);
     expect(container.querySelector('h2')?.textContent).toBe('Signed in');
     expect(container.querySelector('#embed-cancel-btn')).toBeNull();
-    expect(container.querySelector('#embed-return-btn')?.textContent).toBe('Return to Demo App');
+    // Named by the origin's host, not the app's self-declared name.
+    expect(container.querySelector('#embed-return-btn')?.textContent).toBe('Return to app.example');
+  });
+
+  it('says who receives the proof by host, not by the self-declared name', () => {
+    const state = setLoginReview(
+      setLoginInput(loginState({ ...LOGIN_EMBED, appName: 'Dash Core Team' }), { identityId: IDENTITY_ID, privateKeyWif: WIF }),
+      { keyId: 1, securityLevel: 2, type: 0 },
+    );
+    expect(renderState(state).querySelector('.login-note')?.textContent).toContain('Signing proves to app.example that');
   });
 });

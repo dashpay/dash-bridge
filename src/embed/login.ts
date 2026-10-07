@@ -7,16 +7,17 @@
  * disagree about what was signed. Keep this module dependency-free: the SDK
  * and the verifier both bundle it.
  */
+import { base64UrlToBytes, bytesToBase64Url } from '../utils/base64.js';
 
 /** Lifetime of a login proof: `expiresAt = issuedAt + LOGIN_TTL_MS`. */
 export const LOGIN_TTL_MS = 10 * 60 * 1000;
 /** Clock skew the verifier tolerates for an `issuedAt` in the future. */
 export const LOGIN_CLOCK_SKEW_MS = 60 * 1000;
-export const MAX_STATEMENT_LENGTH = 140;
+const MAX_STATEMENT_LENGTH = 140;
 
 /** URL fragment parameters used in redirect mode. */
-export const LOGIN_REDIRECT_PARAM = 'dash_login';
-export const LOGIN_REDIRECT_ERROR_PARAM = 'dash_login_error';
+const LOGIN_REDIRECT_PARAM = 'dash_login';
+const LOGIN_REDIRECT_ERROR_PARAM = 'dash_login_error';
 const MAX_RETURN_URL_LENGTH = 2048;
 
 const NONCE_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
@@ -83,8 +84,8 @@ export function formatLoginTime(time: Date | number): string {
 
 /** `issuedAt` / `expiresAt` for a login signed at `now`. */
 export function loginValidity(now: Date | number = Date.now()): { issuedAt: string; expiresAt: string } {
-  const issuedMs = Date.parse(formatLoginTime(now));
-  return { issuedAt: formatLoginTime(issuedMs), expiresAt: formatLoginTime(issuedMs + LOGIN_TTL_MS) };
+  const issuedAt = formatLoginTime(now);
+  return { issuedAt, expiresAt: formatLoginTime(Date.parse(issuedAt) + LOGIN_TTL_MS) };
 }
 
 /**
@@ -182,8 +183,15 @@ export function pickLoginResult(value: unknown): LoginResult | null {
 }
 
 /**
- * Validate a redirect-mode `returnUrl`: an absolute https URL (http only on
- * loopback) on exactly `origin`, without credentials.
+ * Validate a redirect-mode `returnUrl`: an absolute http(s) URL on exactly
+ * `origin` (already vetted: https, or http on loopback), without credentials
+ * and without a query string.
+ *
+ * The query is refused because the app's state is the nonce, and a query is
+ * how a generic "redirect to ?to=..." endpoint on the app's origin would be
+ * aimed elsewhere: browsers carry the fragment (the signed login) across
+ * redirects. The scheme check stops `blob:https://app.example/...`, whose
+ * origin is also `https://app.example`.
  */
 export function parseReturnUrl(value: string | null | undefined, origin: string): string | null {
   if (!value || value.length > MAX_RETURN_URL_LENGTH) return null;
@@ -193,22 +201,19 @@ export function parseReturnUrl(value: string | null | undefined, origin: string)
   } catch {
     return null;
   }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
   if (url.origin !== origin || url.username || url.password) return null;
+  if (url.search || url.href.split('#')[0].includes('?')) return null;
   return url.href;
 }
 
 function base64UrlEncode(text: string): string {
-  const bytes = new TextEncoder().encode(text);
-  let binary = '';
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return bytesToBase64Url(new TextEncoder().encode(text));
 }
 
 function base64UrlDecode(value: string): string {
   if (!/^[A-Za-z0-9_-]*$/.test(value)) throw new Error('invalid base64url');
-  const base64 = value.replace(/-/g, '+').replace(/_/g, '/');
-  const binary = atob(base64 + '='.repeat((4 - (base64.length % 4)) % 4));
-  return new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(binary, (c) => c.charCodeAt(0)));
+  return new TextDecoder('utf-8', { fatal: true }).decode(base64UrlToBytes(value));
 }
 
 /**

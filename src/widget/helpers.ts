@@ -7,6 +7,7 @@ import {
   type EmbedRequestType,
   type LoginParams,
 } from '../embed/protocol.js';
+import { bytesToBase64Url } from '../utils/base64.js';
 
 /** Random request ID matching the protocol's `[A-Za-z0-9_-]{1,64}`. */
 export function generateRequestId(): string {
@@ -17,11 +18,7 @@ export function generateRequestId(): string {
 
 /** 32 random bytes, base64url (43 characters): a valid login nonce. */
 export function generateNonce(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  let binary = '';
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return bytesToBase64Url(crypto.getRandomValues(new Uint8Array(32)));
 }
 
 /** Build the bridge URL for a request. */

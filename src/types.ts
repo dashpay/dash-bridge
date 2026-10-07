@@ -1,5 +1,4 @@
 import type { EmbedKind, EmbedRequestType } from './embed/protocol.js';
-import type { LoginResult } from './embed/login.js';
 
 export interface KeyPair {
   privateKey: Uint8Array;
@@ -134,6 +133,10 @@ export interface IdentityPublicKeyInfo {
   data: Uint8Array;
   /** Whether the key is disabled */
   isDisabled?: boolean;
+  /** Whether the key is restricted to a single contract (contractBounds set) */
+  isContractBound?: boolean;
+  /** The SDK reported a key type, purpose or security level we don't know */
+  unrecognized?: boolean;
 }
 
 /**
@@ -250,7 +253,8 @@ export type BridgeStep =
   | 'login_input'               // Enter identity ID + AUTHENTICATION key WIF
   | 'login_verifying'           // Fetching the identity's keys, checking the WIF
   | 'login_review'              // Approve: which app, identity and key
-  | 'login_complete';           // Signed; result delivered to the app
+  | 'login_complete'            // Signed; result delivered to the app
+  | 'login_cancelled';          // User cancelled; terminal
 
 /**
  * Status of network retry attempts
@@ -585,8 +589,6 @@ export interface BridgeState {
   loginError?: string;
   /** Login: the key that will sign (set on the review step) */
   loginKey?: LoginKeyInfo;
-  /** Login: the delivered result (public fields only) */
-  loginResult?: LoginResult;
 
   // Faucet request state
   /** Current status of faucet request */

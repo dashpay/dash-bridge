@@ -41,7 +41,12 @@ const CANCELLED_NOTICE: EmbedNotice = {
  * Steps where the identity may already be on its way to Platform, or the
  * login result was already delivered: no cancelling.
  */
-const NON_CANCELLABLE_STEPS: readonly BridgeStep[] = ['registering_identity', 'complete', 'login_complete'];
+const NON_CANCELLABLE_STEPS: readonly BridgeStep[] = [
+  'registering_identity',
+  'complete',
+  'login_complete',
+  'login_cancelled',
+];
 
 export function canCancel(step: BridgeStep): boolean {
   return !NON_CANCELLABLE_STEPS.includes(step);
@@ -93,13 +98,7 @@ function standaloneHref(win: Window): string {
   return url.toString();
 }
 
-/**
- * Origin of the page framing us, when the browser tells us. Chromium/WebKit
- * expose `location.ancestorOrigins`; elsewhere fall back to the referrer.
- */
-function framingOrigin(win: Window): string | undefined {
-  const ancestors = win.location.ancestorOrigins;
-  if (ancestors && ancestors.length > 0) return ancestors[0];
+function referrerOrigin(win: Window): string | undefined {
   const referrer = win.document.referrer;
   if (!referrer) return undefined;
   try {
@@ -107,6 +106,16 @@ function framingOrigin(win: Window): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Origin of the page framing us, when the browser tells us. Chromium/WebKit
+ * expose `location.ancestorOrigins`; elsewhere fall back to the referrer.
+ */
+function framingOrigin(win: Window): string | undefined {
+  const ancestors = win.location.ancestorOrigins;
+  if (ancestors && ancestors.length > 0) return ancestors[0];
+  return referrerOrigin(win);
 }
 
 /** A reload or history navigation can't resume a request: its state is gone. */
@@ -159,6 +168,21 @@ export function resolveEmbed(win: Window = window): EmbedResolution {
     }
   } else if (params.kind === 'popup' && !win.opener) {
     return { action: 'block', notice: EXPIRED_NOTICE };
+  } else if (params.kind === 'redirect') {
+    // Anyone can link to a redirect login for the app's origin, with their
+    // own nonce, and hope the signed result leaks from the return page. Only
+    // run when the app's own page sent the user here. Neither failure
+    // redirects anywhere: the request is not known to come from the app.
+    const sender = referrerOrigin(win);
+    if (!sender) {
+      return block(
+        'Request refused',
+        "The bridge couldn't confirm which site sent you here, so it won't sign you in. Go back to the app and start again.",
+      );
+    }
+    if (sender !== params.origin) {
+      return block('Request refused', 'This sign-in request came from a different site than the app it names.');
+    }
   }
 
   const session = new EmbedSession(params, win);
@@ -191,14 +215,14 @@ export class EmbedSession {
       origin: params.origin,
       appName: params.appName,
       request: params.request === 'login' ? 'login' : 'create-identity',
-      statement: 'login' in params ? params.login?.statement : undefined,
+      statement: params.login?.statement,
     };
     this.network = 'network' in params ? params.network : 'testnet';
   }
 
   /** The sign-in request, when the app asked for `login`. */
   get login(): LoginParams | undefined {
-    return 'login' in this.params ? this.params.login : undefined;
+    return this.params.login;
   }
 
   get origin(): string {
@@ -268,19 +292,29 @@ export class EmbedSession {
    * removes an iframe), or navigate back to the app in redirect mode.
    */
   completeLogin(result: LoginResult): void {
-    const returnUrl = this.login?.returnUrl;
     if (this.params.kind === 'redirect') {
-      if (this.finished || !returnUrl) return;
-      this.finished = true;
-      this.win.location.replace(buildLoginRedirectUrl(returnUrl, result));
+      this.redirectBack(result);
       return;
     }
     if (this.finish('login', result) && this.params.kind === 'popup') this.win.close();
   }
 
+  /**
+   * Redirect mode: settle the request by navigating to the app's returnUrl
+   * with the outcome in the fragment. At most once.
+   */
+  private redirectBack(outcome: LoginResult | { error: string }): boolean {
+    const returnUrl = this.params.login?.returnUrl;
+    if (this.finished || !returnUrl) return false;
+    this.finished = true;
+    this.win.location.replace(buildLoginRedirectUrl(returnUrl, outcome));
+    return true;
+  }
+
   /** Report a request the bridge cannot serve. */
   failFatal(code: string, message: string): void {
-    this.finish('error', { code, message, fatal: true });
+    if (this.params.kind === 'redirect') this.redirectBack({ error: code });
+    else this.finish('error', { code, message, fatal: true });
   }
 
   /**
@@ -290,11 +324,9 @@ export class EmbedSession {
   cancel(state: BridgeState, confirm: (message: string) => boolean = (m) => this.win.confirm(m)): boolean {
     if (this.finished || !canCancel(state.step)) return false;
     if (state.assetLockKeyPair && !confirm(CANCEL_AFTER_DEPOSIT_PROMPT)) return false;
-    const returnUrl = this.login?.returnUrl;
-    if (this.params.kind === 'redirect' && returnUrl) {
-      this.finished = true;
+    if (this.params.kind === 'redirect') {
+      if (!this.redirectBack({ error: 'cancelled' })) return false;
       this.notice = CANCELLED_NOTICE;
-      this.win.location.replace(buildLoginRedirectUrl(returnUrl, { error: 'cancelled' }));
       return true;
     }
     this.finish('cancelled', {});

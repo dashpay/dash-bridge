@@ -219,17 +219,49 @@ test.describe('Sign in with Dash', () => {
     await target.click('#login-continue-btn');
   }
 
-  test('iframe login posts a login message that verifies for the host origin', async ({ page, baseURL }) => {
-    await openHostPage(page, `${baseURL}/${loginQuery('iframe', '&requestId=lg1')}`);
-    const frame = await bridgeFrame(page);
-    await expect(frame.locator('.embed-banner')).toContainText('Sign in to Host App');
-    await expect(frame.locator('#login-wif-input')).toHaveAttribute('type', 'password');
-    await enterCredentials(frame, E2E_MOCK_LOGIN_HIGH_WIF);
+  /** Host page at https://host.test/ that opens `src` in a popup and records its messages. */
+  async function openPopupFromHost(page: Page, src: string): Promise<Page> {
+    const bridgeOrigin = new URL(src).origin;
+    await page.route(`${HOST_ORIGIN}/**`, (route) =>
+      route.fulfill({
+        contentType: 'text/html',
+        body: `<!DOCTYPE html><html><body>
+          <button id="open">Sign in</button>
+          <script>
+            window.__msgs = [];
+            let popup = null;
+            document.getElementById('open').onclick = () => {
+              popup = window.open(${JSON.stringify(src)}, 'bridge', 'popup=yes,width=480,height=760');
+            };
+            window.addEventListener('message', (event) => {
+              if (event.origin !== ${JSON.stringify(bridgeOrigin)} || event.source !== popup) return;
+              window.__msgs.push(event.data);
+            });
+          </script>
+        </body></html>`,
+      }),
+    );
+    await page.goto(`${HOST_ORIGIN}/`);
+    const popupPromise = page.context().waitForEvent('page');
+    await page.click('#open');
+    const popup = await popupPromise;
+    await popup.waitForLoadState();
+    return popup;
+  }
 
-    await expect(frame.locator('#login-review-key')).toHaveText('Key #1 · AUTHENTICATION · HIGH · ECDSA_SECP256K1');
-    await expect(frame.locator('#login-review-identity')).toHaveText(E2E_MOCK_IDENTITY_ID);
-    await expect(frame.getByText('Welcome back')).toBeVisible();
-    await frame.click('#login-sign-btn');
+  test('popup login posts a login message that verifies for the host origin', async ({ page, baseURL }) => {
+    const popup = await openPopupFromHost(page, `${baseURL}/${loginQuery('popup', '&requestId=lg1')}`);
+    await expect(popup.locator('.embed-banner')).toContainText('Sign in to Host App');
+    await expect(popup.locator('#login-wif-input')).toHaveAttribute('type', 'password');
+    await enterCredentials(popup, E2E_MOCK_LOGIN_HIGH_WIF);
+
+    await expect(popup.locator('#login-review-key')).toHaveText('Key #1 · AUTHENTICATION · HIGH · ECDSA_SECP256K1');
+    await expect(popup.locator('#login-review-identity')).toHaveText(E2E_MOCK_IDENTITY_ID);
+    await expect(popup.getByText('Welcome back')).toBeVisible();
+    await expect(popup.locator('.login-note')).toContainText('Signing proves to host.test');
+    const closed = popup.waitForEvent('close');
+    await popup.click('#login-sign-btn');
+    await closed;
 
     await expect.poll(async () => (await hostMessages(page)).some((m) => m.type === 'login')).toBe(true);
     const msgs = await hostMessages(page);
@@ -247,16 +279,25 @@ test.describe('Sign in with Dash', () => {
   });
 
   test('refuses the MASTER key and unknown identities', async ({ page, baseURL }) => {
-    await openHostPage(page, `${baseURL}/${loginQuery('iframe')}`);
-    const frame = await bridgeFrame(page);
+    const popup = await openPopupFromHost(page, `${baseURL}/${loginQuery('popup')}`);
 
-    await enterCredentials(frame, E2E_MOCK_LOGIN_MASTER_WIF);
-    await expect(frame.locator('#login-error')).toContainText('never paste your MASTER key');
-    await expect(frame.locator('#login-sign-btn')).toHaveCount(0);
+    await enterCredentials(popup, E2E_MOCK_LOGIN_MASTER_WIF);
+    await expect(popup.locator('#login-error')).toContainText('never paste your MASTER key');
+    await expect(popup.locator('#login-sign-btn')).toHaveCount(0);
 
-    await enterCredentials(frame, E2E_MOCK_LOGIN_HIGH_WIF, E2E_MOCK_XFER_RECIPIENT_ID);
-    await expect(frame.locator('#login-error')).toContainText('Identity not found on testnet');
+    await enterCredentials(popup, E2E_MOCK_LOGIN_HIGH_WIF, E2E_MOCK_XFER_RECIPIENT_ID);
+    await expect(popup.locator('#login-error')).toContainText('Identity not found on testnet');
     expect((await hostMessages(page)).map((m) => m.type)).toEqual(['ready']);
+  });
+
+  test('refuses to sign in inside an iframe and tells the host', async ({ page, baseURL }) => {
+    await openHostPage(page, `${baseURL}/${loginQuery('iframe', '&requestId=lg2')}`);
+    const frame = await bridgeFrame(page);
+    await expect(frame.getByText('Unsupported request')).toBeVisible();
+    await expect(frame.locator('#login-wif-input')).toHaveCount(0);
+    await expect.poll(() => hostMessages(page)).toEqual([
+      expect.objectContaining({ type: 'error', request: 'login', requestId: 'lg2', code: 'unsupported_mode', fatal: true }),
+    ]);
   });
 
   test('SDK popup login resolves and verifies on the demo page', async ({ page, context }) => {
@@ -277,20 +318,23 @@ test.describe('Sign in with Dash', () => {
     await expect(page.locator('#login-verify')).toHaveText(`verified: ${E2E_MOCK_IDENTITY_ID} key #1`);
   });
 
-  test('SDK iframe login resolves and removes the iframe', async ({ page }) => {
+  test('SDK redirect login round-trips through the bridge on the demo page', async ({ page }) => {
     await page.goto('/widget-demo.html?e2e=mock');
-    await expect(page.locator('#login-iframe-btn')).toBeEnabled();
-    await page.click('#login-iframe-btn');
-    const frame = await (await page.waitForSelector('#login-iframe-container iframe')).contentFrame();
-    if (!frame) throw new Error('no iframe');
-    await enterCredentials(frame, E2E_MOCK_LOGIN_HIGH_WIF);
-    await frame.click('#login-sign-btn');
+    await expect(page.locator('#login-redirect-btn')).toBeEnabled();
+    await page.click('#login-redirect-btn');
+    await expect(page.locator('.embed-banner')).toContainText('Sign in to Widget Demo');
+    await enterCredentials(page, E2E_MOCK_LOGIN_HIGH_WIF);
+    await page.click('#login-sign-btn');
+
     await expect(page.locator('#login-verify')).toHaveText(`verified: ${E2E_MOCK_IDENTITY_ID} key #1`);
-    await expect(page.locator('#login-iframe-container iframe')).toHaveCount(0);
+    // The demo clears the fragment as soon as it has read it.
+    expect(new URL(page.url()).hash).toBe('');
   });
 
   test.describe('redirect mode', () => {
-    const RETURN_URL = `${HOST_ORIGIN}/auth/callback?next=home`;
+    const RETURN_URL = `${HOST_ORIGIN}/auth/callback`;
+    const FROM_HOST = { referer: `${HOST_ORIGIN}/login` };
+    const redirectQuery = (returnUrl = RETURN_URL) => loginQuery('redirect', `&returnUrl=${encodeURIComponent(returnUrl)}`);
 
     test.beforeEach(async ({ page }) => {
       await page.route(`${HOST_ORIGIN}/**`, (route) =>
@@ -299,12 +343,12 @@ test.describe('Sign in with Dash', () => {
     });
 
     test('lands on returnUrl with #dash_login= holding a verifiable result', async ({ page, baseURL }) => {
-      await page.goto(`${baseURL}/${loginQuery('redirect', `&returnUrl=${encodeURIComponent(RETURN_URL)}`)}`);
+      await page.goto(`${baseURL}/${redirectQuery()}`, FROM_HOST);
       await expect(page.locator('.embed-banner')).toContainText('Sign in to Host App');
       await enterCredentials(page, E2E_MOCK_LOGIN_HIGH_WIF);
       await page.click('#login-sign-btn');
 
-      await page.waitForURL(/^https:\/\/host\.test\/auth\/callback\?next=home#dash_login=/);
+      await page.waitForURL(/^https:\/\/host\.test\/auth\/callback#dash_login=/);
       const url = new URL(page.url());
       expect(url.hash).not.toContain(E2E_MOCK_LOGIN_HIGH_WIF);
       const result = parseLoginFragment(url.hash) as LoginResult;
@@ -312,15 +356,26 @@ test.describe('Sign in with Dash', () => {
     });
 
     test('cancel lands on returnUrl with #dash_login_error=cancelled', async ({ page, baseURL }) => {
-      await page.goto(`${baseURL}/${loginQuery('redirect', `&returnUrl=${encodeURIComponent(RETURN_URL)}`)}`);
+      await page.goto(`${baseURL}/${redirectQuery()}`, FROM_HOST);
       await page.click('#login-cancel-btn');
       await page.waitForURL(`${RETURN_URL}#dash_login_error=cancelled`);
     });
 
-    test('refuses a returnUrl on another origin', async ({ page, baseURL }) => {
-      await page.goto(`${baseURL}/${loginQuery('redirect', `&returnUrl=${encodeURIComponent('https://evil.test/cb')}`)}`);
-      await expect(page.getByText('Invalid request')).toBeVisible();
-      await expect(page.locator('#login-identity-input')).toHaveCount(0);
+    test('refuses a request that the app did not send (no or foreign referrer)', async ({ page, baseURL }) => {
+      for (const options of [{}, { referer: 'https://evil.test/phish' }]) {
+        await page.goto(`${baseURL}/${redirectQuery()}`, options);
+        await expect(page.getByText('Request refused')).toBeVisible();
+        await expect(page.locator('#login-identity-input')).toHaveCount(0);
+        expect(new URL(page.url()).origin).toBe(new URL(baseURL!).origin);
+      }
+    });
+
+    test('refuses a returnUrl on another origin or with a query string', async ({ page, baseURL }) => {
+      for (const returnUrl of ['https://evil.test/cb', `${HOST_ORIGIN}/out?to=https://evil.test`]) {
+        await page.goto(`${baseURL}/${redirectQuery(returnUrl)}`, FROM_HOST);
+        await expect(page.getByText('Invalid request')).toBeVisible();
+        await expect(page.locator('#login-identity-input')).toHaveCount(0);
+      }
     });
   });
 });

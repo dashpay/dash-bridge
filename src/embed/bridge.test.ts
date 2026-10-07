@@ -364,26 +364,51 @@ describe('login requests', () => {
     expect(win.close).toHaveBeenCalled();
   });
 
-  it('iframe: posts the login result and leaves removal to the SDK', () => {
-    const { session: s, target, win } = session(loginSearch('iframe'), { framed: true, ancestorOrigins: [APP_ORIGIN] });
-    s.completeLogin(RESULT);
-    expect(posted(target).map((m) => m.type)).toEqual(['login']);
-    expect(win.close).not.toHaveBeenCalled();
-    s.handlePageHide();
-    expect(posted(target).map((m) => m.type)).toEqual(['login']);
+  it('refuses iframe logins and tells the framing app', () => {
+    const { win, target } = fakeWindow({ search: loginSearch('iframe'), framed: true, ancestorOrigins: [APP_ORIGIN] });
+    const result = resolveEmbed(win);
+    expect(result.action === 'block' && result.notice.title).toBe('Unsupported request');
+    expect(posted(target)).toEqual([
+      expect.objectContaining({ type: 'error', request: 'login', code: 'unsupported_mode', fatal: true }),
+    ]);
   });
 
   it('cannot be cancelled after the login was delivered', () => {
     const { session: s, target } = session(loginSearch('popup'));
     expect(s.cancel({ ...createInitialState('testnet'), mode: 'login', step: 'login_complete' })).toBe(false);
+    expect(s.cancel({ ...createInitialState('testnet'), mode: 'login', step: 'login_cancelled' })).toBe(false);
     expect(target.postMessage).not.toHaveBeenCalled();
   });
 
   describe('redirect mode', () => {
     const search = loginSearch('redirect', `&returnUrl=${encodeURIComponent(RETURN_URL)}`);
+    const fromApp = { hasOpener: false, referrer: `${APP_ORIGIN}/login` };
 
-    it('runs top-level without an opener', () => {
-      expect(resolveEmbed(fakeWindow({ search, hasOpener: false }).win).action).toBe('run');
+    it('runs top-level without an opener when the app sent the user', () => {
+      expect(resolveEmbed(fakeWindow({ search, ...fromApp }).win).action).toBe('run');
+    });
+
+    it.each([
+      ['no referrer', '', "couldn't confirm which site sent you"],
+      ['another site', 'https://evil.example/phish', 'different site'],
+      ['a lookalike host', 'https://app.example.evil.example/', 'different site'],
+    ])('refuses a request from %s without redirecting anywhere', (_label, referrer, text) => {
+      const { win } = fakeWindow({ search, hasOpener: false, referrer });
+      const result = resolveEmbed(win);
+      expect(result.action === 'block' && result.notice.title).toBe('Request refused');
+      expect(result.action === 'block' && result.notice.message).toContain(text);
+      expect(replaced(win)).toEqual([]);
+    });
+
+    it('sends an unsupported network back as an error, but only for the app itself', () => {
+      const devnet = loginSearch('redirect', `&returnUrl=${encodeURIComponent(RETURN_URL)}`).replace('request=login', 'request=login&network=devnet');
+      const ok = fakeWindow({ search: devnet, ...fromApp });
+      expect(resolveEmbed(ok.win).action).toBe('block');
+      expect(replaced(ok.win)).toEqual([`${RETURN_URL}#dash_login_error=unsupported_network`]);
+
+      const spoofed = fakeWindow({ search: devnet, hasOpener: false, referrer: 'https://evil.example/' });
+      expect(resolveEmbed(spoofed.win).action).toBe('block');
+      expect(replaced(spoofed.win)).toEqual([]);
     });
 
     it('refuses to run framed', () => {
@@ -396,7 +421,7 @@ describe('login requests', () => {
     });
 
     it('navigates back with the result in the fragment, once, posting nothing', () => {
-      const { session: s, target, win } = session(search, { hasOpener: false });
+      const { session: s, target, win } = session(search, fromApp);
       s.start(createInitialState('testnet'));
       s.completeLogin({ ...RESULT, privateKeyWif: 'cSecretWif' } as LoginResult);
       s.completeLogin(RESULT);
@@ -410,7 +435,7 @@ describe('login requests', () => {
     });
 
     it('navigates back with dash_login_error=cancelled on cancel', () => {
-      const { session: s, win } = session(search, { hasOpener: false });
+      const { session: s, win } = session(search, fromApp);
       expect(s.cancel({ ...createInitialState('testnet'), mode: 'login', step: 'login_input' })).toBe(true);
       expect(replaced(win)).toEqual([`${RETURN_URL}#dash_login_error=cancelled`]);
       s.completeLogin(RESULT);

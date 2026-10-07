@@ -154,10 +154,17 @@ describe('isValidNonce', () => {
 
 describe('parseReturnUrl', () => {
   it('accepts URLs on exactly the declared origin', () => {
-    expect(parseReturnUrl('https://app.example/cb?x=1', 'https://app.example')).toBe('https://app.example/cb?x=1');
+    expect(parseReturnUrl('https://app.example/cb', 'https://app.example')).toBe('https://app.example/cb');
+    expect(parseReturnUrl('https://app.example/cb#x', 'https://app.example')).toBe('https://app.example/cb#x');
+    expect(parseReturnUrl('http://localhost:3000/cb', 'http://localhost:3000')).toBe('http://localhost:3000/cb');
   });
 
   it.each([
+    'https://app.example/cb?x=1',
+    'https://app.example/out?to=https://evil.example',
+    'https://app.example/cb?',
+    'https://app.example/cb?#frag',
+    'blob:https://app.example/0b3f6f1e-1111-2222-3333-444455556666',
     'https://app.example.evil.example/cb',
     'https://evil.example/cb',
     'http://app.example/cb',

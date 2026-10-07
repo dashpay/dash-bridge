@@ -3757,8 +3757,6 @@ function renderContractCompleteStep(state: BridgeState): HTMLElement {
 // Sign in with Dash (embed request=login)
 // ============================================================================
 
-const KEY_TYPE_NAMES: Record<number, string> = { 0: 'ECDSA_SECP256K1', 2: 'ECDSA_HASH160' };
-
 function loginNavButton(id: string, label: string, primary = false, disabled = false): HTMLButtonElement {
   const button = document.createElement('button');
   button.id = id;
@@ -3820,10 +3818,14 @@ function renderLoginVerifyingStep(): HTMLElement {
   return div;
 }
 
+/** The requesting app's host: what the user can trust, unlike its self-declared name. */
+function embedHost(embed: NonNullable<BridgeState['embed']>): string {
+  return escapeHtml(new URL(embed.origin).host);
+}
+
 function renderLoginReviewStep(state: BridgeState): HTMLElement {
   const embed = state.embed!;
   const key = state.loginKey!;
-  const appLabel = `<bdi>${escapeHtml(embed.appName ?? embed.origin)}</bdi>`;
   const statement = embed.statement
     ? `<div class="xfer-summary-row">
         <span class="xfer-summary-label">Message from the app</span>
@@ -3845,7 +3847,7 @@ function renderLoginReviewStep(state: BridgeState): HTMLElement {
       </div>
       <div class="xfer-summary-row">
         <span class="xfer-summary-label">Signing key</span>
-        <span class="xfer-summary-value" id="login-review-key">Key #${key.keyId} · AUTHENTICATION · ${escapeHtml(getSecurityLevelName(key.securityLevel))} · ${KEY_TYPE_NAMES[key.type] ?? 'UNKNOWN'}</span>
+        <span class="xfer-summary-value" id="login-review-key">Key #${key.keyId} · AUTHENTICATION · ${escapeHtml(getSecurityLevelName(key.securityLevel))} · ${getKeyTypeName(key.type)}</span>
       </div>
       <div class="xfer-summary-row">
         <span class="xfer-summary-label">Network</span>
@@ -3853,8 +3855,8 @@ function renderLoginReviewStep(state: BridgeState): HTMLElement {
       </div>
       ${statement}
     </div>
-    <p class="login-note">Signing proves to ${appLabel} that you control this identity. It does not move funds
-      or change your identity, and it expires in 10 minutes.</p>
+    <p class="login-note">Signing proves to <strong>${embedHost(embed)}</strong> that you control this identity.
+      It does not move funds or change your identity, and it expires in 10 minutes.</p>
   `;
   const nav = document.createElement('div');
   nav.className = 'nav-buttons';
@@ -3866,15 +3868,14 @@ function renderLoginReviewStep(state: BridgeState): HTMLElement {
 }
 
 function renderLoginCompleteStep(state: BridgeState): HTMLElement {
-  const embed = state.embed;
-  const appLabel = `<bdi>${escapeHtml(embed?.appName ?? embed?.origin ?? 'the app')}</bdi>`;
+  const host = embedHost(state.embed!);
   const div = document.createElement('div');
   div.className = 'login-step login-complete';
   div.innerHTML = `
     <h2 class="login-headline">Signed in</h2>
-    <p class="login-note">${appLabel} received your identity ID and signature. You can close this window.</p>
+    <p class="login-note">${host} received your identity ID and signature. You can close this window.</p>
     <div class="embed-return">
-      <button id="embed-return-btn" class="secondary-btn" type="button">Return to ${appLabel}</button>
+      <button id="embed-return-btn" class="secondary-btn" type="button">Return to ${host}</button>
     </div>
   `;
   return div;

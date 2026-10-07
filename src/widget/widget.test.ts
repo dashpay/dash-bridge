@@ -291,32 +291,30 @@ describe('Sign in with Dash', () => {
     expect(generateNonce()).not.toBe(nonce);
   });
 
-  it('login (iframe) passes nonce and statement, resolves with the result and removes the iframe', async () => {
-    const container = document.createElement('div');
-    document.body.appendChild(container);
-    const promise = login({ nonce: NONCE, statement: ' Hello\nworld ', mode: 'iframe', container, bridgeUrl: `${BRIDGE}/` });
-    const iframe = container.querySelector('iframe')!;
-    const params = new URL(iframe.src).searchParams;
+  it('login opens a popup with nonce and statement, resolves with the whitelisted result and closes it', async () => {
+    const popup = { closed: false, close: vi.fn() };
+    const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    const promise = login({ nonce: NONCE, statement: ' Hello\nworld ', bridgeUrl: BRIDGE });
+    const url = open.mock.calls[0][0] as string;
+    const params = new URL(url).searchParams;
+    expect(params.get('embed')).toBe('popup');
     expect(params.get('request')).toBe('login');
     expect(params.get('nonce')).toBe(NONCE);
     expect(params.get('statement')).toBe('Hello world');
     // Results for another request type are ignored.
-    sendLogin(iframe.contentWindow, iframe.src, { identityId: 'x', network: 'testnet' } as never, 'identity-created');
-    sendLogin(iframe.contentWindow, iframe.src, { ...RESULT, privateKeyWif: 'cSecret' } as LoginResult);
-    const result = await promise;
-    expect(result).toEqual(RESULT);
-    expect(container.querySelector('iframe')).toBeNull();
-  });
-
-  it('login (popup) resolves and closes the popup', async () => {
-    const popup = { closed: false, close: vi.fn() };
-    const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
-    const promise = login({ nonce: NONCE, bridgeUrl: BRIDGE });
-    const url = open.mock.calls[0][0] as string;
-    expect(new URL(url).searchParams.get('embed')).toBe('popup');
-    sendLogin(popup as unknown as Window, url);
+    sendLogin(popup as unknown as Window, url, { identityId: 'x', network: 'testnet' } as never, 'identity-created');
+    sendLogin(popup as unknown as Window, url, { ...RESULT, privateKeyWif: 'cSecret' } as LoginResult);
     await expect(promise).resolves.toEqual(RESULT);
     expect(popup.close).toHaveBeenCalled();
+  });
+
+  it('login refuses iframe mode without touching the page', async () => {
+    const container = document.createElement('div');
+    const open = vi.spyOn(window, 'open');
+    const options = { nonce: NONCE, mode: 'iframe', container, bridgeUrl: BRIDGE } as unknown as Parameters<typeof login>[0];
+    await expect(login(options)).rejects.toMatchObject({ code: 'invalid_options', message: expect.stringContaining('popup') });
+    expect(container.children).toHaveLength(0);
+    expect(open).not.toHaveBeenCalled();
   });
 
   it('login rejects a missing or malformed nonce without opening anything', async () => {
@@ -344,6 +342,7 @@ describe('Sign in with Dash', () => {
   it('loginRedirectUrl refuses cross-origin return URLs and bad options', () => {
     setPageUrl('https://app.example/login');
     expect(() => loginRedirectUrl({ nonce: NONCE, returnUrl: 'https://evil.example/cb' })).toThrow(DashBridgeError);
+    expect(() => loginRedirectUrl({ nonce: NONCE, returnUrl: '/out?to=https://evil.example' })).toThrow(/query string/);
     expect(() => loginRedirectUrl({ nonce: 'x', returnUrl: '/cb' })).toThrow(/nonce/);
     expect(() => loginRedirectUrl({ nonce: NONCE, returnUrl: '/cb', network: 'devnet' as never })).toThrow(/network/);
     expect(() => loginRedirectUrl({ nonce: NONCE, returnUrl: '/cb', bridgeUrl: 'http://bridge.example/' })).toThrow(/bridgeUrl/);

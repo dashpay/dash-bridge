@@ -37,7 +37,9 @@ export type LoginKeyCheck = { ok: true; key: LoginKeyInfo } | { ok: false; error
 
 /**
  * Find the identity key `privateKeyWif` controls and check it may sign in:
- * enabled, AUTHENTICATION purpose, CRITICAL or HIGH security level.
+ * enabled, not bound to a contract, AUTHENTICATION purpose, CRITICAL or HIGH
+ * security level. Keys whose type, purpose or level the SDK reported in a form
+ * we don't recognize are refused (fail closed).
  */
 export function checkLoginKey(
   privateKeyWif: string,
@@ -54,6 +56,13 @@ export function checkLoginKey(
       ? refuse('This key is disabled on the identity. Use another authentication key.')
       : refuse('This key does not belong to this identity.');
   }
+  const key = identityKeys.find((k) => k.id === match.keyId);
+  if (!key || key.unrecognized) {
+    return refuse("This key's type, purpose or security level isn't recognized, so it can't be used to sign in.");
+  }
+  if (key.isContractBound) {
+    return refuse('This key is restricted to one data contract and cannot be used to sign in. Use another authentication key.');
+  }
   if (!isPurposeAllowedForDpns(match.purpose)) {
     return refuse(
       `This key has ${getPurposeName(match.purpose)} purpose. Sign in with an AUTHENTICATION key (HIGH or CRITICAL).`
@@ -65,8 +74,24 @@ export function checkLoginKey(
       `This key has ${getSecurityLevelName(match.securityLevel)} security level. Use a HIGH or CRITICAL authentication key.`
     );
   }
-  const type = identityKeys.find((k) => k.id === match.keyId)?.type ?? 0;
-  return { ok: true, key: { keyId: match.keyId, securityLevel: match.securityLevel, type } };
+  return { ok: true, key: { keyId: match.keyId, securityLevel: match.securityLevel, type: match.type } };
+}
+
+/**
+ * Tracks the current login attempt so async work (identity fetch, signing)
+ * can tell whether the user moved on (Back, Cancel, a new Continue) meanwhile.
+ */
+export class LoginAttempts {
+  private current = 0;
+
+  /** Start a new attempt (or invalidate the running one); returns its token. */
+  next(): number {
+    return ++this.current;
+  }
+
+  isCurrent(token: number): boolean {
+    return token === this.current;
+  }
 }
 
 /** User-facing reason an identity's keys could not be fetched. */
