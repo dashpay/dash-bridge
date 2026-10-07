@@ -47,6 +47,7 @@ import {
   addIdentityKey,
   removeIdentityKey,
   render,
+  renderEmbedNotice,
   downloadKeyBackup,
   // DPNS state functions
   setModeDpnsFromIdentity,
@@ -214,9 +215,12 @@ import {
   E2E_MOCK_XFER_MNEMONIC,
   E2E_MOCK_XFER_RECIPIENT_ID,
 } from './e2e-mock-constants.js';
+import { resolveEmbed, type EmbedSession } from './embed/bridge.js';
 
 // Global state
 let state: BridgeState;
+/** Set when a third-party app opened the bridge to create an identity. */
+let embedSession: EmbedSession | undefined;
 let insightClient: InsightClient;
 let islockService: IslockService | undefined;
 let clientInitPromise: Promise<void> | undefined;
@@ -523,6 +527,29 @@ function init() {
     if (menu) menu.style.display = 'none';
   });
 
+  const container = document.getElementById('app');
+
+  // Embed mode / framing guard: may refuse to run at all.
+  const embed = resolveEmbed(window);
+  if (embed.action === 'block') {
+    if (container) renderEmbedNotice(container, embed.notice);
+    return;
+  }
+  embedSession = embed.session;
+  if (embedSession) {
+    const session = embedSession;
+    window.addEventListener('pagehide', () => session.handlePageHide());
+    // Embed mode goes straight to create; skip the deep links below.
+    state = applyEmbed(createInitialState(session.network));
+    if (container) {
+      render(state, container);
+      setupEventListeners(container);
+    }
+    session.start(state);
+    scheduleDashWarmup();
+    return;
+  }
+
   const urlParams = new URLSearchParams(window.location.search);
 
   // Infer network from ?address= param prefix, falling back to ?network= param
@@ -561,13 +588,22 @@ function init() {
   }
 
   // Render UI
-  const container = document.getElementById('app');
   if (container) {
     render(state, container);
     setupEventListeners(container);
   }
 
   scheduleDashWarmup();
+}
+
+/**
+ * In embed mode, keep the embed context on every state and send any return
+ * to the landing screen (Start Over, Try Again) back into the create flow.
+ */
+function applyEmbed(next: BridgeState): BridgeState {
+  if (!embedSession) return next;
+  const withEmbed = next.embed ? next : { ...next, embed: embedSession.display };
+  return withEmbed.step === 'init' ? setMode(withEmbed, 'create') : withEmbed;
 }
 
 async function hydrateContractDeepLink(contractParam: string): Promise<void> {
@@ -602,7 +638,8 @@ async function parseAndEstimateContract(json: unknown) {
  * Update state and re-render
  */
 function updateState(newState: BridgeState) {
-  state = newState;
+  const prevState = state;
+  state = applyEmbed(newState);
   const container = document.getElementById('app');
   if (container) {
     // Save focus state before re-render
@@ -647,6 +684,10 @@ function updateState(newState: BridgeState) {
       }
     }
   }
+
+  // Single hook for embed progress/result messages (all setIdentityRegistered
+  // call sites land here).
+  embedSession?.onStateChange(prevState, state);
 }
 
 /**
@@ -692,6 +733,14 @@ function setupEventListeners(container: HTMLElement) {
         switchNetwork(network);
       }
     });
+  });
+
+  // Embed mode: Cancel (banner) and Return to app (complete screen)
+  container.querySelector('#embed-cancel-btn')?.addEventListener('click', () => {
+    embedSession?.cancel(state);
+  });
+  container.querySelector('#embed-return-btn')?.addEventListener('click', () => {
+    embedSession?.returnToApp();
   });
 
   // Mode selection buttons (init page)

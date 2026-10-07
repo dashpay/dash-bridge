@@ -1,3 +1,5 @@
+import type { EmbedKind } from './embed/protocol.js';
+
 export interface KeyPair {
   privateKey: Uint8Array;
   publicKey: Uint8Array;
@@ -314,9 +316,20 @@ export interface NetworkStatus {
   checkedAtMs: number;
 }
 
+/** Embed mode: who asked the bridge to run (shown in the UI banner). */
+export interface EmbedDisplay {
+  kind: EmbedKind;
+  /** Verified-by-delivery origin that receives the result. */
+  origin: string;
+  /** Self-declared app name; display only. */
+  appName?: string;
+}
+
 export interface BridgeState {
   step: BridgeStep;
   network: string;
+  /** Set when a third-party app opened the bridge (see src/embed). */
+  embed?: EmbedDisplay;
   /** Bridge operation mode */
   mode: BridgeMode;
   /** Current network retry status (for displaying retry indicator) */

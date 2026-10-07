@@ -12,6 +12,24 @@ A non-custodial bridge for converting Dash Core funds to Dash Platform credits.
 - HD wallet support with BIP39 mnemonic generation
 - QR code generation for deposit addresses
 
+## Identity widget for other apps
+
+Web apps can add a **Create Dash identity** button. The bridge runs the
+identity flow in a popup or iframe and returns only the new identity ID. Keys
+never leave the bridge window.
+
+```html
+<script src="https://bridge.thepasta.org/widget.js"></script>
+<script>
+  button.onclick = async () => {
+    const { identityId } = await DashBridge.createIdentity({ network: 'testnet', appName: 'My Dapp' });
+  };
+</script>
+```
+
+See [docs/widget.md](docs/widget.md) for the integration guide, the message
+protocol and the security model. Try it at `/widget-demo.html`.
+
 ## Development
 
 ```bash

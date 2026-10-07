@@ -1,0 +1,237 @@
+# Embeddable identity widget
+
+Third-party web apps (for example Dash Platform dapps) can add a **Create Dash
+identity** button. The button opens the Dash Bridge, the user creates an
+identity there, and the app receives the new **identity ID**.
+
+The bridge stays non-custodial. The mnemonic, private keys and key backup never
+leave the bridge window. The user downloads their key backup inside the bridge,
+exactly as in the standalone flow. The app receives only the fields listed in
+[Message protocol](#message-protocol).
+
+- SDK: `https://bridge.thepasta.org/widget.js` (classic script, global
+  `DashBridge`) or `https://bridge.thepasta.org/widget.mjs` (ES module). It has
+  no dependencies and is about 5 KB.
+- Live demo: <https://bridge.thepasta.org/widget-demo.html>
+
+## Quick start
+
+### Script tag
+
+```html
+<button id="create-identity">Create Dash identity</button>
+<script src="https://bridge.thepasta.org/widget.js"></script>
+<script>
+  document.getElementById('create-identity').addEventListener('click', async () => {
+    try {
+      // Call createIdentity synchronously inside the click handler so the
+      // browser lets the popup open.
+      const { identityId, network } = await DashBridge.createIdentity({
+        network: 'testnet',
+        appName: 'My Dapp',
+        onProgress: (step) => console.log('bridge step:', step),
+      });
+      console.log('New identity', identityId, 'on', network);
+    } catch (err) {
+      if (err.code === 'cancelled') return; // user closed the bridge
+      if (err.code === 'popup_blocked') alert('Please allow popups for this site');
+      else console.error(err);
+    }
+  });
+</script>
+```
+
+### ES module
+
+```js
+import { createIdentity } from 'https://bridge.thepasta.org/widget.mjs';
+
+button.addEventListener('click', () => {
+  createIdentity({ network: 'mainnet', appName: 'My Dapp' })
+    .then(({ identityId }) => saveIdentity(identityId))
+    .catch((err) => console.warn(err.code, err.message));
+});
+```
+
+### iframe mode
+
+```js
+DashBridge.createIdentity({
+  mode: 'iframe',
+  container: document.getElementById('bridge-slot'),
+  network: 'testnet',
+});
+```
+
+The SDK adds the iframe to `container`. After the identity is created, the
+iframe stays mounted so the user can save their keys. It is removed when the
+user clicks **Return to <app>**, when the user cancels, or when you abort the
+request.
+
+## API
+
+```ts
+DashBridge.createIdentity(options?: {
+  network?: 'mainnet' | 'testnet';    // default 'testnet'
+  mode?: 'popup' | 'iframe';          // default 'popup' (recommended)
+  container?: HTMLElement;            // required in iframe mode
+  appName?: string;                   // shown to the user, max 64 chars
+  bridgeUrl?: string;                 // default 'https://bridge.thepasta.org/'
+  onProgress?: (step: ProgressStep) => void;
+  onError?: (error: { code: string; message: string }) => void; // recoverable errors
+  signal?: AbortSignal;               // abort: closes the popup / removes the iframe
+}): Promise<{ identityId: string; network: string }>;
+```
+
+`ProgressStep` is one of `configuring`, `awaiting_deposit`, `processing`,
+`registering`, `complete` or `error`.
+
+The promise rejects with a `DashBridge.DashBridgeError`. Its `code` is one of:
+
+| `code` | Meaning |
+| --- | --- |
+| `popup_blocked` | `window.open` was blocked. Call `createIdentity` directly from a click handler. |
+| `cancelled` | The user pressed Cancel or closed the popup. |
+| `aborted` | Your `AbortSignal` fired. |
+| `invalid_options` | Bad arguments, or the page is not served over http(s). |
+| `unsupported_network`, `unsupported_request` | Fatal error reported by the bridge. |
+
+Recoverable errors, such as a failed InstantSend lock, are not rejections. The
+user can retry or recover inside the bridge, so the promise keeps waiting. They
+are passed to `onError`, and `onProgress` receives `error`.
+
+Popup mode: once the identity is created, the promise resolves and the popup
+stays open so the user can download their key backup. **Return to <app>**
+closes it.
+
+## Popup or iframe?
+
+**Use popup mode.** The user sees the bridge's own address bar, so they can
+check where they are typing. File downloads (the key backup) and clipboard
+access also work without extra permissions.
+
+iframe mode is available for apps that need an inline flow. The SDK creates the
+iframe with these attributes. If you create the iframe yourself, use the same
+attributes:
+
+```html
+<iframe
+  src="https://bridge.thepasta.org/?embed=iframe&origin=https%3A%2F%2Fyour.app&network=testnet&requestId=..."
+  allow="clipboard-write"
+  sandbox="allow-scripts allow-same-origin allow-downloads allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals"
+  referrerpolicy="origin"
+  style="width:100%;height:760px;border:0"></iframe>
+```
+
+- `allow-downloads`: the key backup download.
+- `allow-popups` and `allow-popups-to-escape-sandbox`: explorer links.
+- `allow-modals`: the "cancel after deposit?" confirmation.
+- `clipboard-write`: the copy buttons.
+- `referrerpolicy="origin"`: lets browsers without `location.ancestorOrigins`
+  (Firefox) check who is framing the bridge.
+
+Popup mode needs `window.opener`. If your app sends
+`Cross-Origin-Opener-Policy: same-origin`, the browser cuts that link and the
+bridge cannot report back. Use `same-origin-allow-popups` instead.
+
+## Bridge URL parameters
+
+The SDK builds these parameters for you. They are listed here for integrators
+who open the bridge themselves.
+
+| Parameter | Required | Description |
+| --- | --- | --- |
+| `embed` | yes | `popup` or `iframe`. |
+| `origin` | yes | Your app's origin, bare: `https://app.example` (no path or trailing slash). `http` is accepted only for `localhost`, `127.0.0.1` and `[::1]`. |
+| `network` | no | `mainnet` or `testnet` (default `testnet`). |
+| `request` | no | `create-identity` (default). |
+| `requestId` | no | Opaque ID, up to 64 characters from `[A-Za-z0-9_-]`. It is echoed in every message. |
+| `app` | no | Display name, trimmed to 64 characters. |
+
+In embed mode the bridge skips the landing screen and goes straight to identity
+creation. It hides the network selector, the other modes and the footer. A
+banner shows **Creating an identity for <app> (<origin>)**, with a Cancel
+button.
+
+## Message protocol
+
+The bridge sends messages with `postMessage` to `window.opener` (popup) or
+`window.parent` (iframe). The target origin is always the declared `origin`,
+never `'*'`. Every message has this envelope:
+
+```ts
+{
+  source: 'dash-bridge',
+  version: 1,
+  type: string,
+  request: 'create-identity',  // echoes the request type
+  requestId?: string,          // echoed if provided
+}
+```
+
+| `type` | Extra fields | When |
+| --- | --- | --- |
+| `ready` | none | The bridge loaded and accepted the request. |
+| `progress` | `step: ProgressStep` | The coarse step changed. |
+| `identity-created` | `identityId: string`, `network: string` | The identity is registered on Platform. This is the result. |
+| `error` | `code: string`, `message: string`, `fatal: boolean` | `fatal: true` means the request cannot continue. Otherwise the user can still recover in the bridge. `message` is a fixed label, not raw error text. |
+| `cancelled` | none | The user cancelled, or the popup was closed or navigated away before a result (best effort, sent on `pagehide`). |
+| `close` | none | iframe mode: the user clicked **Return to <app>**. Remove the iframe. |
+
+No other fields are ever sent. Each message is built from a per-type whitelist
+(`src/embed/protocol.ts`), and a unit test checks that secrets passed in by
+mistake are dropped.
+
+If you handle messages yourself instead of using the SDK, accept a message only
+if all of these hold:
+
+1. `event.origin` is the bridge origin (`https://bridge.thepasta.org`).
+2. `event.source` is the popup or iframe window you opened.
+3. `data.source === 'dash-bridge'` and `data.version === 1`.
+4. `data.requestId` is the random ID you generated for this request.
+
+The bridge ignores all incoming messages. Apps cannot drive or query it.
+
+Future request types, such as a planned `login`, will use the same envelope,
+URL parameters and lifecycle messages. Each adds its own `request` value and
+result message.
+
+## Security model
+
+- **Keys stay in the bridge.** The mnemonic, WIFs and the key backup are never
+  posted. The user downloads the backup inside the bridge before returning.
+- **Origin-bound delivery.** Results are posted only to the declared origin, so
+  a page that lies about its origin receives nothing. The banner shows the
+  origin next to the app name, because the app name is self-declared and the
+  origin is what receives the identity ID.
+- **Clickjacking guard.** If the bridge is framed without `embed=iframe`, it
+  shows "This page can't run inside another site" with a link that opens it in
+  a new window. With `embed=iframe`, it checks the framing page's origin
+  against the declared origin, using `location.ancestorOrigins[0]` or the
+  referrer as a fallback, and refuses on a mismatch. A frame that claims
+  `embed=popup` is also refused.
+- **Strict parameters.** Invalid origins (non-https, paths, credentials),
+  request IDs or request types stop the bridge before it runs. Unsupported
+  networks or request types are reported to the app as fatal errors.
+- **SDK checks.** The SDK checks the origin, source window, envelope, version
+  and `requestId` of every message. It uses a fresh random `requestId` (from
+  `crypto.getRandomValues`) for each request. On settle it removes its
+  listeners and timers.
+- **Cancelling after a deposit.** Once a deposit address exists, Cancel asks
+  for confirmation. The key backup is needed to recover funds that were already
+  sent.
+
+## Local development
+
+```bash
+npm run dev
+# Open http://localhost:5173/widget-demo.html
+# Mock flow, no funds needed: http://localhost:5173/widget-demo.html?e2e=mock
+```
+
+In development, the demo page loads the SDK source. In production it loads
+`/widget.mjs`. `npm run build` writes `dist/widget.js` and `dist/widget.mjs`
+with `vite.widget.config.ts`, and `scripts/check-build-artifacts.mjs` checks
+that both stay small and self-contained. The e2e suite (`e2e/widget.spec.ts`)
+covers a cross-origin iframe host, the clickjacking guard, and the SDK popup
+and iframe flows.

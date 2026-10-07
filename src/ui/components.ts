@@ -199,6 +199,8 @@ export function render(state: BridgeState, container: HTMLElement): void {
   `;
   wrapper.appendChild(header);
 
+  if (state.embed) wrapper.appendChild(renderEmbedBanner(state));
+
   // Detailed warning banner when Platform health is degraded/stalled
   const statusBanner = renderNetworkStatusBanner(state);
   if (statusBanner) wrapper.appendChild(statusBanner);
@@ -370,6 +372,64 @@ export function render(state: BridgeState, container: HTMLElement): void {
 
   wrapper.appendChild(content);
 
+  if (!state.embed) wrapper.appendChild(renderFooter());
+
+  container.appendChild(wrapper);
+}
+
+/** Display label for the app that opened the bridge in embed mode. */
+function embedAppLabel(embed: NonNullable<BridgeState['embed']>): string {
+  return embed.appName ?? embed.origin;
+}
+
+/**
+ * Embed mode: who the identity is being created for. The origin is shown next
+ * to the self-declared app name because only the origin receives the result.
+ */
+function renderEmbedBanner(state: BridgeState): HTMLElement {
+  const embed = state.embed!;
+  const banner = document.createElement('div');
+  banner.className = 'embed-banner';
+  const who = embed.appName
+    ? `<strong>${escapeHtml(embed.appName)}</strong> <span class="embed-origin">(${escapeHtml(embed.origin)})</span>`
+    : `<strong>${escapeHtml(embed.origin)}</strong>`;
+  const cancel = state.step === 'complete'
+    ? ''
+    : '<button id="embed-cancel-btn" class="embed-cancel-btn" type="button">Cancel</button>';
+  banner.innerHTML = `
+    <div class="embed-banner-text">
+      <span>Creating an identity for ${who}</span>
+      <span class="embed-banner-hint">Only your identity ID is shared. Your keys stay in this window.</span>
+    </div>
+    ${cancel}
+  `;
+  return banner;
+}
+
+/**
+ * Shown instead of the app when it must not run here (framed by another
+ * site, or an invalid embed request).
+ */
+export function renderEmbedNotice(
+  container: HTMLElement,
+  notice: { title: string; message: string; openHref?: string },
+): void {
+  const link = notice.openHref
+    ? `<a class="primary-btn embed-notice-link" href="${escapeAttr(notice.openHref)}" target="_blank" rel="noopener noreferrer">Open Dash Bridge in a new window</a>`
+    : '';
+  container.innerHTML = `
+    <div class="bridge-container embed-notice">
+      <header><h1>Dash Core → Platform Bridge</h1></header>
+      <div class="content">
+        <h2>${escapeHtml(notice.title)}</h2>
+        <p>${escapeHtml(notice.message)}</p>
+        ${link}
+      </div>
+    </div>
+  `;
+}
+
+function renderFooter(): HTMLElement {
   // Footer with GitHub link
   const footer = document.createElement('footer');
   footer.innerHTML = `
@@ -380,9 +440,7 @@ export function render(state: BridgeState, container: HTMLElement): void {
       View on GitHub
     </a>
   `;
-  wrapper.appendChild(footer);
-
-  container.appendChild(wrapper);
+  return footer;
 }
 
 function renderInitStep(state: BridgeState): HTMLElement {
@@ -512,11 +570,14 @@ function renderConfigureKeysStep(state: BridgeState): HTMLElement {
   const navButtons = document.createElement('div');
   navButtons.className = 'nav-buttons';
 
-  const backBtn = document.createElement('button');
-  backBtn.id = 'back-btn';
-  backBtn.className = 'secondary-btn';
-  backBtn.textContent = 'Back';
-  navButtons.appendChild(backBtn);
+  // Embed mode has no landing screen to go back to; Cancel is in the banner.
+  if (!state.embed) {
+    const backBtn = document.createElement('button');
+    backBtn.id = 'back-btn';
+    backBtn.className = 'secondary-btn';
+    backBtn.textContent = 'Back';
+    navButtons.appendChild(backBtn);
+  }
 
   const continueBtn = document.createElement('button');
   continueBtn.id = 'continue-btn';
@@ -1073,6 +1134,19 @@ function renderCompleteStep(state: BridgeState): HTMLElement {
   // Transaction ID (for top-up/send_to_address mode)
   if ((isTopUp || isSendToAddress) && state.txid) {
     div.appendChild(renderIdSection('Transaction ID', state.txid, { copyBtnId: 'copy-txid-btn' }));
+  }
+
+  // Embed mode: hand control back to the app instead of offering more flows.
+  if (state.embed) {
+    const label = escapeHtml(embedAppLabel(state.embed));
+    const returnSection = document.createElement('div');
+    returnSection.className = 'embed-return';
+    returnSection.innerHTML = `
+      <p class="embed-return-hint">Save your key backup first: ${label} only receives your identity ID, never your keys.</p>
+      <button id="embed-return-btn" class="secondary-btn" type="button">Return to ${label}</button>
+    `;
+    div.appendChild(returnSection);
+    return div;
   }
 
   // Contract prompt (when user came from contract flow)

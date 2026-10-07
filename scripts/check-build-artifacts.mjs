@@ -62,4 +62,21 @@ if (staticImportPattern.test(entryChunk)) {
   fail('entry chunk statically imports a heavy Dash chunk');
 }
 
+// The embeddable widget SDK (docs/widget.md) must ship, stay tiny, and never
+// pull in the Dash SDK or other heavy dependencies.
+const WIDGET_MAX_BYTES = 30 * 1024;
+for (const name of ['widget.js', 'widget.mjs']) {
+  const widget = readBuiltFile(new URL(name, distDir));
+  const size = Buffer.byteLength(widget);
+  if (size > WIDGET_MAX_BYTES) {
+    fail(`dist/${name} is ${size} bytes; the widget SDK must stay under ${WIDGET_MAX_BYTES} bytes`);
+  }
+  if (/\bimport\s*[\w*{}\s,]*(?:from\s*)?["']|\brequire\(/.test(widget)) {
+    fail(`dist/${name} must be self-contained (found an import/require)`);
+  }
+  if (name === 'widget.js' && !/^var DashBridge\b/.test(widget)) {
+    fail('dist/widget.js must expose the global DashBridge');
+  }
+}
+
 console.log('Build artifact smoke check passed');

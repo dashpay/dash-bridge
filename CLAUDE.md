@@ -44,6 +44,10 @@ src/
 │   └── dapi.ts          # DAPI client (Platform operations, InstantSend)
 ├── platform/            # Dash Platform operations
 │   └── identity.ts      # Identity registration and top-up
+├── embed/               # Embed mode for third-party apps (docs/widget.md)
+│   ├── protocol.ts      # Shared postMessage protocol + URL param validation
+│   └── bridge.ts        # Bridge side: framing guard, EmbedSession messaging
+├── widget/              # widget.js SDK (separate lib build: vite.widget.config.ts)
 └── ui/                  # UI layer
     ├── state.ts         # State machine and state transitions
     ├── components.ts    # UI rendering
