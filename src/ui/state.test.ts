@@ -10,6 +10,9 @@ import {
   setDepositTimedOut,
   setDepositVerificationFailed,
   setMode,
+  setMobileAppRiskAcknowledged,
+  continueInBrowserFromMobileAppRecommendation,
+  setDpnsIdentitySource,
   setWithdrawIdentityFetching,
   setWithdrawIdentityFetched,
   setWithdrawKeyValidated,
@@ -316,5 +319,53 @@ describe('deposit verification failure', () => {
   it('a deposit timeout always lands on the deposit step', () => {
     const state: BridgeState = { ...baseState(), step: 'building_transaction' };
     expect(setDepositTimedOut(state, true, 5).step).toBe('detecting_deposit');
+  });
+});
+
+describe('mainnet DashPay app recommendation', () => {
+  it('shows the recommendation before key configuration on mainnet', () => {
+    const state = setMode(createInitialState('mainnet'), 'create');
+    expect(state.step).toBe('mobile_app_recommended');
+    expect(state.mode).toBe('create');
+    expect(state.mobileAppRiskAcknowledged).toBe(false);
+    // Keys are ready, so continuing in the browser needs no extra work.
+    expect(state.mnemonic).toBeDefined();
+    expect(state.identityKeys.length).toBeGreaterThan(0);
+  });
+
+  it('goes straight to key configuration off mainnet', () => {
+    expect(setMode(createInitialState('testnet'), 'create').step).toBe('configure_keys');
+  });
+
+  it('gates creating a new identity for a username on mainnet', () => {
+    const state = setDpnsIdentitySource(setMode(createInitialState('mainnet'), 'dpns'), 'new');
+    expect(state.step).toBe('mobile_app_recommended');
+    expect(state.dpnsFromIdentityCreation).toBe(true);
+    expect(setDpnsIdentitySource(setMode(createInitialState('testnet'), 'dpns'), 'new').step).toBe('configure_keys');
+  });
+
+  it('refuses to continue in the browser until the risk is acknowledged', () => {
+    const gated = setMode(createInitialState('mainnet'), 'create');
+    expect(continueInBrowserFromMobileAppRecommendation(gated)).toBe(gated);
+
+    const acknowledged = setMobileAppRiskAcknowledged(gated, true);
+    expect(continueInBrowserFromMobileAppRecommendation(acknowledged).step).toBe('configure_keys');
+
+    const unticked = setMobileAppRiskAcknowledged(acknowledged, false);
+    expect(continueInBrowserFromMobileAppRecommendation(unticked).step).toBe('mobile_app_recommended');
+  });
+
+  it('does not carry an earlier username or contract detour into a standalone creation', () => {
+    const leftover: BridgeState = { ...createInitialState('mainnet'), dpnsFromIdentityCreation: true, contractFromIdentityCreation: true };
+    const state = setMode(leftover, 'create');
+    expect(state.dpnsFromIdentityCreation).toBe(false);
+    expect(state.contractFromIdentityCreation).toBe(false);
+  });
+
+  it('resets the acknowledgement when identity creation starts again', () => {
+    const acknowledged = setMobileAppRiskAcknowledged(setMode(createInitialState('mainnet'), 'create'), true);
+    const restarted = setMode({ ...acknowledged, step: 'init' }, 'create');
+    expect(restarted.step).toBe('mobile_app_recommended');
+    expect(restarted.mobileAppRiskAcknowledged).toBe(false);
   });
 });

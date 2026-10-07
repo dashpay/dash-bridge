@@ -28,6 +28,7 @@ import {
   isIdentityRegistrationUnconfirmedError,
   type IdentityRegistrationUnconfirmedError,
 } from '../platform/identity-confirm.js';
+import { shouldRecommendMobileApp } from './mobile-app.js';
 
 /**
  * Error codes for user-facing display.
@@ -138,6 +139,28 @@ export function setKeyPairs(
 }
 
 /**
+ * First step of identity creation. On mainnet that is the DashPay app
+ * recommendation, which the user must explicitly acknowledge to continue here.
+ */
+function identityCreationEntryStep(network: string): BridgeStep {
+  return shouldRecommendMobileApp(network) ? 'mobile_app_recommended' : 'configure_keys';
+}
+
+/** Record the "browser is less secure" acknowledgement on the mainnet app recommendation. */
+export function setMobileAppRiskAcknowledged(state: BridgeState, acknowledged: boolean): BridgeState {
+  return { ...state, mobileAppRiskAcknowledged: acknowledged };
+}
+
+/**
+ * Leave the DashPay app recommendation for the in-browser flow. Refused until
+ * the user has acknowledged the risk.
+ */
+export function continueInBrowserFromMobileAppRecommendation(state: BridgeState): BridgeState {
+  if (state.step !== 'mobile_app_recommended' || !state.mobileAppRiskAcknowledged) return state;
+  return { ...state, step: 'configure_keys' };
+}
+
+/**
  * Set bridge mode and transition to appropriate initial step.
  *
  * Note: a few transitions below assign `mode` directly rather than calling this,
@@ -153,13 +176,18 @@ export function setMode(state: BridgeState, mode: BridgeMode): BridgeState {
     const mnemonic = generateNewMnemonic(128);
     return {
       ...clearedState,
-      step: 'configure_keys',
+      step: identityCreationEntryStep(clearedState.network),
+      mobileAppRiskAcknowledged: false,
       mode,
       mnemonic,
       identityKeys: generateDefaultIdentityKeysHD(clearedState.network, mnemonic),
       // Clear any top-up state
       targetIdentityId: undefined,
       isOneTimeKey: undefined,
+      // A standalone creation is not a detour from an earlier username or
+      // contract flow, so Back and completion must not route into one.
+      dpnsFromIdentityCreation: false,
+      contractFromIdentityCreation: false,
     };
   } else if (mode === 'topup') {
     // Top-up mode: no mnemonic, no identity keys
@@ -720,6 +748,7 @@ export function setDepositVerificationFailed(
 export function getStepDescription(step: BridgeStep): string {
   const descriptions: Record<BridgeStep, string> = {
     init: 'Ready to start',
+    mobile_app_recommended: 'Use the DashPay app',
     configure_keys: 'Configure your keys',
     enter_identity: 'Top up identity',
     generating_keys: 'Preparing Dash Platform...',
@@ -779,6 +808,7 @@ export function getStepDescription(step: BridgeStep): string {
 export function getStepProgress(step: BridgeStep): number {
   const progress: Record<BridgeStep, number> = {
     init: 0,
+    mobile_app_recommended: 5,
     configure_keys: 10,
     enter_identity: 10,
     generating_keys: 20,
@@ -897,7 +927,8 @@ export function setDpnsIdentitySource(
     const mnemonic = generateNewMnemonic(128);
     return {
       ...state,
-      step: 'configure_keys',
+      step: identityCreationEntryStep(state.network),
+      mobileAppRiskAcknowledged: false,
       mode: 'create', // Switch to create mode temporarily
       fromManageMenu: undefined,
       mnemonic,

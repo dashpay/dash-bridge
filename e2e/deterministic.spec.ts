@@ -442,3 +442,78 @@ test.describe('Untrusted strings are never rendered as markup (mock mode)', () =
     await expectNoInjection(page);
   });
 });
+
+test.describe('Mainnet DashPay app recommendation (mock mode)', () => {
+  const MAINNET_QUERY = '/?network=mainnet&e2e=mock';
+  const APP_STORE_URL = 'https://apps.apple.com/app/id1206647026';
+  const GOOGLE_PLAY_URL = 'https://play.google.com/store/apps/details?id=hashengineering.darkcoin.wallet';
+  const blockExternal = (page: import('@playwright/test').Page) =>
+    page.route(/^https?:\/\/(?!127\.0\.0\.1|localhost)/, (route) => route.abort());
+
+  test.beforeEach(async ({ page }) => {
+    await blockExternal(page);
+  });
+
+  test('identity creation is gated behind the app recommendation and an explicit acknowledgement', async ({ page }) => {
+    await page.goto(MAINNET_QUERY);
+    await expect(page.locator('#mobile-app-hint')).toContainText('DashPay mobile app');
+    await expect(page.locator('meta[name="apple-itunes-app"]')).toHaveCount(1);
+    await expect(page.locator('meta[name="apple-itunes-app"]')).toHaveAttribute('content', 'app-id=1206647026');
+
+    await page.click('#mode-create-btn');
+    await expect(page.getByRole('heading', { name: /Use the DashPay app/ })).toBeVisible();
+    for (const [id, url] of [['#mobile-app-app-store-btn', APP_STORE_URL], ['#mobile-app-google-play-btn', GOOGLE_PLAY_URL]]) {
+      await expect(page.locator(id)).toHaveAttribute('href', url);
+      await expect(page.locator(id)).toHaveAttribute('target', '_blank');
+      await expect(page.locator(id)).toHaveAttribute('rel', 'noopener noreferrer');
+    }
+    await expect(page.locator('.mobile-app-qr img')).toHaveCount(2);
+
+    const continueBtn = page.locator('#mobile-app-continue-browser-btn');
+    await expect(continueBtn).toBeDisabled();
+    await page.locator('#mobile-app-ack-checkbox').check();
+    await expect(continueBtn).toBeEnabled();
+
+    await continueBtn.click();
+    await expect(page.locator('#continue-btn')).toBeVisible();
+    await expect(page.locator('.keys-reassurance')).toBeVisible();
+  });
+
+  test('Back returns to the landing screen and the gate shows again', async ({ page }) => {
+    await page.goto(MAINNET_QUERY);
+    await page.click('#mode-create-btn');
+    await page.locator('#mobile-app-ack-checkbox').check();
+    await page.click('#back-btn');
+    await expect(page.locator('#mode-create-btn')).toBeVisible();
+
+    await page.click('#mode-create-btn');
+    await expect(page.locator('#mobile-app-continue-browser-btn')).toBeDisabled();
+  });
+
+  test('testnet goes straight to key configuration', async ({ page }) => {
+    await page.goto(MOCK_QUERY);
+    await expect(page.locator('#mobile-app-hint')).toHaveCount(0);
+    await expect(page.locator('meta[name="apple-itunes-app"]')).toHaveCount(0);
+    await page.click('#mode-create-btn');
+    await expect(page.locator('#continue-btn')).toBeVisible();
+  });
+
+  test('on an iPhone the App Store button is the focused primary action', async ({ browser }) => {
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+      viewport: { width: 390, height: 844 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    const page = await context.newPage();
+    await blockExternal(page);
+    await page.goto(MAINNET_QUERY);
+
+    await page.click('#mode-create-btn');
+    const cta = page.locator('#mobile-app-primary-cta');
+    await expect(cta).toHaveAttribute('href', APP_STORE_URL);
+    await expect(cta).toBeFocused();
+    await expect(page.locator('#mobile-app-google-play-btn')).toHaveCount(0);
+    await context.close();
+  });
+});

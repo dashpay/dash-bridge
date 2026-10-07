@@ -3,6 +3,14 @@ import { getStepProgress, getStepDescription, ErrorCodes, ErrorCodeLabels } from
 import { shouldShowContestedWarning, countUsernameStatuses } from '../platform/dpns-utils.js';
 import { MIN_TRANSFER_PROTOCOL_VERSION, isProtocolVersionBlocked } from '../platform/username-transfer-utils.js';
 import { generateQRCodeDataUrl } from './qrcode.js';
+import {
+  DASHPAY_ANDROID_APK_URL,
+  DASHPAY_APP_STORE_URL,
+  DASHPAY_GOOGLE_PLAY_URL,
+  getCurrentMobilePlatform,
+  getStoreUrl,
+  shouldRecommendMobileApp,
+} from './mobile-app.js';
 import { privateKeyToWif } from '../utils/wif.js';
 import { formatCreditsAsDash, formatCredits, MIN_WITHDRAWAL_CREDITS } from '../utils/credits.js';
 import { WithdrawalStatus } from '../platform/withdrawal-status.js';
@@ -223,6 +231,10 @@ export function render(state: BridgeState, container: HTMLElement): void {
       content.appendChild(renderInitStep(state));
       break;
 
+    case 'mobile_app_recommended':
+      content.appendChild(renderMobileAppRecommendedStep(state));
+      break;
+
     case 'configure_keys':
       content.appendChild(renderConfigureKeysStep(state));
       break;
@@ -422,6 +434,10 @@ function renderInitStep(state: BridgeState): HTMLElement {
   `;
   div.appendChild(networkSelector);
 
+  if (shouldRecommendMobileApp(state.network)) {
+    div.appendChild(renderMobileAppHint());
+  }
+
   // Mode selection buttons
   const modeButtons = document.createElement('div');
   modeButtons.className = 'mode-buttons';
@@ -448,6 +464,149 @@ function renderInitStep(state: BridgeState): HTMLElement {
     </button>
   `;
   div.appendChild(modeButtons);
+
+  return div;
+}
+
+/** Attributes for a link that leaves the bridge (it may be embedded in an iframe or popup). */
+const EXTERNAL_LINK_ATTRS = 'target="_blank" rel="noopener noreferrer"';
+
+/** Lightweight, ungated nudge toward the DashPay app on the mainnet landing screen. */
+function renderMobileAppHint(): HTMLElement {
+  const storeUrl = getStoreUrl(getCurrentMobilePlatform());
+  const links = storeUrl
+    ? `<a href="${escapeAttr(storeUrl)}" ${EXTERNAL_LINK_ATTRS}>Get DashPay</a>`
+    : `<a href="${escapeAttr(DASHPAY_APP_STORE_URL)}" ${EXTERNAL_LINK_ATTRS}>App Store</a>
+       · <a href="${escapeAttr(DASHPAY_GOOGLE_PLAY_URL)}" ${EXTERNAL_LINK_ATTRS}>Google Play</a>`;
+  const hint = document.createElement('p');
+  hint.id = 'mobile-app-hint';
+  hint.className = 'mobile-app-hint';
+  hint.innerHTML = `On mainnet we recommend the <strong>DashPay mobile app</strong> for creating your identity and username. It's the more secure option: your keys stay on your phone. ${links}`;
+  return hint;
+}
+
+/**
+ * Store QR codes, cached so the periodic re-renders (network status, the
+ * acknowledgement checkbox) don't regenerate them and flash "Loading...".
+ */
+const storeQrCache = new Map<string, Promise<string>>();
+function getStoreQrDataUrl(url: string): Promise<string> {
+  let dataUrl = storeQrCache.get(url);
+  if (!dataUrl) {
+    dataUrl = generateQRCodeDataUrl(url, 160);
+    dataUrl.catch(() => storeQrCache.delete(url));
+    storeQrCache.set(url, dataUrl);
+  }
+  return dataUrl;
+}
+
+/** A store button, optionally with a QR code of the same link for scanning from a desktop. */
+function renderStoreButton({ id, label, url, qrAlt }: { id?: string; label: string; url: string; qrAlt?: string }): HTMLElement {
+  const item = document.createElement('div');
+  item.className = 'mobile-app-store';
+
+  if (qrAlt) {
+    const qrContainer = document.createElement('div');
+    qrContainer.className = 'mobile-app-qr';
+    qrContainer.innerHTML = '<div class="qr-loading">Loading...</div>';
+    item.appendChild(qrContainer);
+    getStoreQrDataUrl(url).then((dataUrl) => {
+      const img = document.createElement('img');
+      img.src = dataUrl;
+      img.alt = qrAlt;
+      img.width = 160;
+      img.height = 160;
+      qrContainer.replaceChildren(img);
+    }).catch((err) => {
+      console.error('QR code generation failed:', err);
+      qrContainer.innerHTML = '<div class="qr-error">QR failed</div>';
+    });
+  }
+
+  const link = document.createElement('a');
+  if (id) link.id = id;
+  link.className = 'primary-btn store-btn';
+  link.href = url;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.textContent = label;
+  item.appendChild(link);
+
+  return item;
+}
+
+/**
+ * Mainnet interstitial before identity creation: recommend the DashPay app and
+ * only continue in the browser after an explicit risk acknowledgement.
+ */
+function renderMobileAppRecommendedStep(state: BridgeState): HTMLElement {
+  const platform = getCurrentMobilePlatform();
+  const div = document.createElement('div');
+  div.className = 'mobile-app-step';
+
+  const intro = document.createElement('div');
+  intro.className = 'mobile-app-intro';
+  intro.innerHTML = `
+    <p class="mobile-app-eyebrow">Recommended for mainnet</p>
+    <h2 class="mobile-app-headline">Use the DashPay app &mdash; it's the more secure option</h2>
+    <ul class="mobile-app-reasons">
+      <li>DashPay (Dash Wallet) generates your keys on your phone and keeps them there. They never exist in a browser tab.</li>
+      <li>Browser extensions or a compromised computer can read a web page's memory, including keys created on this page.</li>
+      <li>The app also registers your username and backs up your wallet with a recovery phrase.</li>
+    </ul>
+  `;
+  div.appendChild(intro);
+
+  const ctas = document.createElement('div');
+  ctas.className = `mobile-app-ctas ${platform}`;
+  if (platform === 'ios') {
+    ctas.appendChild(renderStoreButton({ id: 'mobile-app-primary-cta', label: 'Get DashPay on the App Store', url: DASHPAY_APP_STORE_URL }));
+  } else if (platform === 'android') {
+    ctas.appendChild(renderStoreButton({ id: 'mobile-app-primary-cta', label: 'Get DashPay on Google Play', url: DASHPAY_GOOGLE_PLAY_URL }));
+  } else {
+    const scan = document.createElement('p');
+    scan.className = 'mobile-app-scan';
+    scan.textContent = 'Scan with your phone to install DashPay';
+    ctas.appendChild(scan);
+    const stores = document.createElement('div');
+    stores.className = 'mobile-app-stores';
+    stores.appendChild(renderStoreButton({ id: 'mobile-app-app-store-btn', label: 'App Store (iPhone)', url: DASHPAY_APP_STORE_URL, qrAlt: 'App Store QR code for DashPay' }));
+    stores.appendChild(renderStoreButton({ id: 'mobile-app-google-play-btn', label: 'Google Play (Android)', url: DASHPAY_GOOGLE_PLAY_URL, qrAlt: 'Google Play QR code for DashPay' }));
+    ctas.appendChild(stores);
+  }
+  if (platform !== 'ios') {
+    const apk = document.createElement('p');
+    apk.className = 'mobile-app-apk';
+    apk.innerHTML = `No Google Play? <a href="${escapeAttr(DASHPAY_ANDROID_APK_URL)}" ${EXTERNAL_LINK_ATTRS}>Download the Android APK from GitHub</a>
+      (pick <code>dashpay-wallet-&lt;version&gt;.apk</code>, not the <code>-testnet</code> one)`;
+    ctas.appendChild(apk);
+  }
+  if (platform !== 'desktop') {
+    const installed = document.createElement('p');
+    installed.className = 'mobile-app-installed';
+    installed.textContent = 'Already have DashPay? The store page has an Open button.';
+    ctas.appendChild(installed);
+  }
+  div.appendChild(ctas);
+
+  const browser = document.createElement('div');
+  browser.className = 'mobile-app-browser-option';
+  browser.innerHTML = `
+    <p class="mobile-app-browser-title">Continue in browser (advanced)</p>
+    <label class="mobile-app-ack">
+      <input type="checkbox" id="mobile-app-ack-checkbox" ${state.mobileAppRiskAcknowledged ? 'checked' : ''} />
+      <span>I understand the browser is less secure and I am responsible for backing up my keys</span>
+    </label>
+  `;
+  div.appendChild(browser);
+
+  const navButtons = document.createElement('div');
+  navButtons.className = 'nav-buttons';
+  navButtons.innerHTML = `
+    <button id="back-btn" class="secondary-btn">Back</button>
+    <button id="mobile-app-continue-browser-btn" class="secondary-btn" ${state.mobileAppRiskAcknowledged ? '' : 'disabled'}>Continue in browser</button>
+  `;
+  div.appendChild(navButtons);
 
   return div;
 }
