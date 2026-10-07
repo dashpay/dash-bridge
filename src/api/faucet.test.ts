@@ -139,7 +139,7 @@ describe('requestTestnetFunds', () => {
     const { requestTestnetFunds } = await import('./faucet.js');
 
     await expect(requestTestnetFunds('https://faucet.example', 'yAddr')).rejects.toThrow(
-      'Faucet returned an invalid transaction ID'
+      'The faucet accepted the request but returned an invalid transaction ID. Funds may already be on the way; wait for the deposit before requesting again.'
     );
   });
 });

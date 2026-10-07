@@ -437,7 +437,7 @@ test.describe('Untrusted strings are never rendered as markup (mock mode)', () =
     await page.click('#continue-btn');
     await page.click('#request-faucet-btn');
 
-    await expect(page.locator('.faucet-error')).toHaveText('Faucet returned an invalid transaction ID');
+    await expect(page.locator('.faucet-error')).toContainText('The faucet accepted the request but returned an invalid transaction ID');
     await expect(page.locator('.faucet-success')).toHaveCount(0);
     await expectNoInjection(page);
   });

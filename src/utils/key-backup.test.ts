@@ -94,6 +94,20 @@ describe('parseKeyBackup', () => {
     expect(parseKeyBackup(backup)?.privateKeyWif).toBe(keys[2].privateKeyWif);
   });
 
+  it('never selects a Base58 string that is not a checksum-valid WIF', () => {
+    const { json, keys } = appBackup();
+    const backup = json as { identityKeys: Record<string, unknown>[] };
+    const good = keys[2].privateKeyWif as string;
+    const badChecksum = good.slice(0, -1) + (good.endsWith('1') ? '2' : '1');
+    for (const bad of ['111', badChecksum]) {
+      backup.identityKeys.unshift({ purpose: 'AUTHENTICATION', securityLevel: 'HIGH', privateKeyWif: bad });
+    }
+    expect(parseKeyBackup(backup)?.privateKeyWif).toBe(good);
+    expect(
+      parseKeyBackup({ identityId: (json as { identityId: string }).identityId, identityKeys: [{ privateKeyWif: '111' }] })
+    ).toBeNull();
+  });
+
   it('falls back to UNKNOWN for non-string purpose / security level', () => {
     const { keys } = appBackup();
     const backup = {

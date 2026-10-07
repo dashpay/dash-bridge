@@ -246,8 +246,11 @@ export async function requestTestnetFunds(
   }
 
   // The txid is rendered into the page, so only accept a real 32-byte hex txid.
+  // The 2xx means funds were most likely sent, so don't invite a second request.
   if (!data || typeof data.txid !== 'string' || !TXID_PATTERN.test(data.txid)) {
-    throw new Error('Faucet returned an invalid transaction ID');
+    throw new Error(
+      'The faucet accepted the request but returned an invalid transaction ID. Funds may already be on the way; wait for the deposit before requesting again.'
+    );
   }
 
   return data as unknown as FaucetResponse;

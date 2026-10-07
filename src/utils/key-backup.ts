@@ -1,4 +1,5 @@
 import { isWellFormedIdentityId } from '../platform/username-transfer-utils.js';
+import { wifToPrivateKey } from './wif.js';
 
 export interface ParsedKeyBackup {
   identityId: string;
@@ -9,6 +10,17 @@ export interface ParsedKeyBackup {
 
 const BASE58_PATTERN = /^[1-9A-HJ-NP-Za-km-z]+$/;
 
+/** A Base58Check-encoded private key with a valid checksum and length. */
+function isWellFormedWif(wif: string): boolean {
+  if (!BASE58_PATTERN.test(wif)) return false;
+  try {
+    wifToPrivateKey(wif);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Parse a key backup JSON file and extract identityId + best private key WIF.
  * Prefers AUTHENTICATION keys with HIGH or CRITICAL security level, since those
@@ -16,7 +28,7 @@ const BASE58_PATTERN = /^[1-9A-HJ-NP-Za-km-z]+$/;
  * because they are rejected by isPurposeAllowedForDpns/isSecurityLevelAllowedForDpns.
  *
  * The file is untrusted input whose fields end up in the rendered page, so only
- * a well-formed identity ID and Base58 WIFs are accepted. Anything else yields
+ * a well-formed identity ID and checksum-valid WIFs are accepted. Anything else yields
  * null (or, for individual keys, is skipped).
  */
 export function parseKeyBackup(json: unknown, preferredPurpose?: string): ParsedKeyBackup | null {
@@ -33,7 +45,7 @@ export function parseKeyBackup(json: unknown, preferredPurpose?: string): Parsed
   const ranked = keys
     .filter((k): k is Record<string, unknown> => !!k && typeof k === 'object' && typeof k.privateKeyWif === 'string')
     .map((k) => ({ purpose: k.purpose, securityLevel: k.securityLevel, privateKeyWif: (k.privateKeyWif as string).trim() }))
-    .filter((k) => BASE58_PATTERN.test(k.privateKeyWif))
+    .filter((k) => isWellFormedWif(k.privateKeyWif))
     .sort((a, b) => {
       // Caller-preferred purpose wins outright (e.g. TRANSFER for withdrawals)
       if (preferredPurpose) {
