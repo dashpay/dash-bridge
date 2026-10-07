@@ -7,6 +7,7 @@ import {
   allowUnverifiedDevnetFallback,
   findMissingIdentityKeys,
   isAlreadyExistsError,
+  isIdentityNotFoundError,
   isIdentityRegistrationUnconfirmedError,
   isTransportUnavailableError,
   pollForIdentity,
@@ -34,6 +35,41 @@ describe('isAlreadyExistsError', () => {
     expect(isAlreadyExistsError(new Error('Identity 4ufjwRfdhMM87uBaGmTvesgLm6k2Q2r7SVyZdTUzFebA already exists'))).toBe(true);
     expect(isAlreadyExistsError(new Error('identity key already exists for user'))).toBe(false);
     expect(isAlreadyExistsError(new Error('Instant lock proof signature is invalid'))).toBe(false);
+  });
+});
+
+describe('isIdentityNotFoundError', () => {
+  it('matches only the SDK "identity not found" answer', () => {
+    expect(isIdentityNotFoundError(new Error('Identity not found'))).toBe(true);
+    expect(
+      isIdentityNotFoundError(new Error('Identity 3NRR2EBDowv4Su6jUtLxZ1sVfZvToYZbvpPMsu2m6ePt not found'))
+    ).toBe(true);
+  });
+
+  it('treats verification and transport "not found" failures as lookup errors', () => {
+    for (const msg of [
+      'Quorum not found in cache for hash 0000abcd',
+      'Quorum not found for type 6 and hash 0000abcd',
+      'checkpoint not found for block height 1234',
+      'path not found: identity tree',
+      'path key not found',
+      'API error: 404 Not Found',
+      'Some requested entity was not found',
+      'Identity nonce not found on platform: abc',
+      'identity public key not found: 3',
+    ]) {
+      expect(isIdentityNotFoundError(new Error(msg)), msg).toBe(false);
+    }
+  });
+
+  it('keeps a quorum cache miss from looking like "consumed elsewhere"', async () => {
+    const summary = await pollForIdentity(
+      async () => { throw new Error('Quorum not found in cache for hash 0000abcd'); },
+      { timeoutMs: 10_000, intervalMs: 5_000, ...fakeClock() }
+    );
+    expect(summary.notFound).toBe(0);
+    expect(summary.errors.length).toBeGreaterThan(0);
+    expect(isAssetLockConsumedElsewhere(new Error('asset lock already completely used'), summary)).toBe(false);
   });
 });
 

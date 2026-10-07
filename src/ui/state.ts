@@ -279,6 +279,9 @@ function clearModeSensitiveFields(state: BridgeState, mode: BridgeMode): BridgeS
     withdrawSigningKeyInfo: undefined,
     withdrawToAddress: undefined,
     withdrawAmountCredits: undefined,
+    // An unconfirmed registration belongs to the flow that raised it; keep it
+    // out of any later flow's key backup.
+    unconfirmedIdentityId: undefined,
   };
 }
 

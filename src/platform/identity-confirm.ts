@@ -122,9 +122,15 @@ export function isTransportUnavailableError(error: unknown): boolean {
   );
 }
 
-/** Some SDK lookups (e.g. fetchUnproved) throw instead of returning undefined. */
+/**
+ * Some SDK lookups (e.g. fetchUnproved) throw "Identity not found" instead of
+ * returning undefined. Match only that answer: many verification/transport
+ * failures also say "not found" (quorum or checkpoint cache misses, proof
+ * paths, "Identity nonce not found"), and counting those as a definitive
+ * miss could wrongly conclude the deposit was used elsewhere.
+ */
 export function isIdentityNotFoundError(error: unknown): boolean {
-  return errorText(error).toLowerCase().includes('not found');
+  return /\bIdentity (?:[1-9A-HJ-NP-Za-km-z]{32,44} )?not found\b/.test(errorText(error));
 }
 
 export interface IdentityLookupSummary<T> {
