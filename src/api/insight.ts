@@ -1,7 +1,13 @@
-import type { UTXO, TxInfo } from '../types.js';
+import type { AuthenticatedUtxo, UTXO, TxInfo } from '../types.js';
 import type { NetworkConfig } from '../config.js';
-import { withRetry, type RetryOptions } from '../utils/retry.js';
+import { withRetry, isRetryableError, type RetryOptions } from '../utils/retry.js';
 import { abortableSleep } from '../utils/sleep.js';
+import { hexToBytes } from '../utils/hex.js';
+import {
+  assertTxid,
+  authenticateUtxo,
+  UtxoAuthenticationError,
+} from '../transaction/utxo-auth.js';
 
 export interface InsightApiResponse<T> {
   success: boolean;
@@ -41,6 +47,52 @@ export class InsightClient {
         confirmations: utxo.confirmations as number,
       }));
     }, retryOptions);
+  }
+
+  /**
+   * Fetch the raw serialized bytes of a transaction via `/rawtx/{txid}`.
+   * The bytes are NOT trusted here; see {@link getAuthenticatedUtxo}.
+   */
+  async getRawTransaction(txid: string, retryOptions?: RetryOptions): Promise<Uint8Array> {
+    assertTxid(txid);
+    const rawtx = await withRetry(async () => {
+      const response = await fetch(`${this.baseUrl}/rawtx/${txid}`);
+
+      if (!response.ok) {
+        throw new Error(`Insight API error: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json().catch(() => {
+        throw new Error('Insight returned a non-JSON raw transaction response');
+      });
+      return data?.rawtx;
+    }, {
+      // A just-seen deposit can be listed by the address index before /rawtx
+      // serves it (e.g. another backend node), so retry 404s briefly too.
+      shouldRetry: (error) =>
+        isRetryableError(error) || (error instanceof Error && error.message.includes(' 404')),
+      ...retryOptions,
+    });
+
+    if (typeof rawtx !== 'string' || !/^(?:[0-9a-f]{2})+$/i.test(rawtx)) {
+      throw new UtxoAuthenticationError('Explorer returned a malformed raw transaction');
+    }
+    return hexToBytes(rawtx);
+  }
+
+  /**
+   * The single trust boundary for funding UTXOs: fetch the raw previous
+   * transaction and return the UTXO with the value and script it actually
+   * commits to. Every flow that builds and signs from an Insight UTXO must
+   * pass it through here first. Throws if Insight's report disagrees.
+   */
+  async getAuthenticatedUtxo(
+    utxo: UTXO,
+    depositPublicKey: Uint8Array,
+    retryOptions?: RetryOptions
+  ): Promise<AuthenticatedUtxo> {
+    const rawTx = await this.getRawTransaction(utxo.txid, retryOptions);
+    return authenticateUtxo(utxo, rawTx, depositPublicKey);
   }
 
   /**

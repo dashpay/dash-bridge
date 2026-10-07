@@ -849,7 +849,15 @@ function renderDepositStep(state: BridgeState): HTMLElement {
     const detectedAmount = state.detectedDepositAmount || 0;
     const detectedDash = (detectedAmount / 100_000_000).toFixed(4);
 
-    if (detectedAmount > 0 && detectedAmount < 300000) {
+    if (state.depositVerificationError) {
+      // Deposit seen but its amount could not be verified; nothing was signed
+      recheckSection.className = 'recheck-section insufficient';
+      recheckSection.innerHTML = `
+        <p class="insufficient-title">Could not verify your deposit</p>
+        <p class="insufficient-msg">${escapeHtml(state.depositVerificationError)}</p>
+        <button id="recheck-deposit-btn" class="secondary-btn">Check Again</button>
+      `;
+    } else if (detectedAmount > 0 && detectedAmount < 300000) {
       // Insufficient deposit detected
       recheckSection.className = 'recheck-section insufficient';
       recheckSection.innerHTML = `

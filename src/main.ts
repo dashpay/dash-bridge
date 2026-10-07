@@ -38,6 +38,7 @@ import {
   toError,
   ErrorCodes,
   setDepositTimedOut,
+  setDepositVerificationFailed,
   setNetwork,
   setNetworkStatus,
   updateIdentityKey,
@@ -185,6 +186,7 @@ import type {
   KeyPurpose,
   SecurityLevel,
   UTXO,
+  AuthenticatedUtxo,
   ManageNewKeyConfig,
   DpnsUsernameEntry,
   DpnsRegistrationResult,
@@ -2320,6 +2322,26 @@ function showValidationError(message: string): void {
 }
 
 /**
+ * Authenticate a detected deposit before anything is built or signed: its
+ * value and script are re-derived from the raw previous transaction (see
+ * InsightClient.getAuthenticatedUtxo). On failure nothing has been signed, so
+ * return to the deposit step with a recheck prompt (keys stay in state) and
+ * resolve null; the caller must stop.
+ */
+async function authenticateDeposit(
+  utxo: UTXO,
+  depositPublicKey: Uint8Array
+): Promise<AuthenticatedUtxo | null> {
+  try {
+    return await insightClient.getAuthenticatedUtxo(utxo, depositPublicKey);
+  } catch (error) {
+    console.error('Deposit verification failed:', error);
+    updateState(setDepositVerificationFailed(state, toError(error).message));
+    return null;
+  }
+}
+
+/**
  * Start the top-up process
  */
 async function startTopUp() {
@@ -2387,7 +2409,8 @@ async function startTopUp() {
       return;
     }
 
-    const utxo = depositResult.utxo;
+    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
+    if (!utxo) return;
 
     updateState(setUtxoDetected(state, utxo));
 
@@ -2511,7 +2534,8 @@ async function startSendToAddress() {
       return;
     }
 
-    const utxo = depositResult.utxo;
+    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
+    if (!utxo) return;
     updateState(setUtxoDetected(state, utxo));
 
     // Step 3: Build transaction
@@ -2726,7 +2750,8 @@ async function startBridge() {
       return;
     }
 
-    const utxo = depositResult.utxo;
+    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
+    if (!utxo) return;
 
     updateState(setUtxoDetected(state, utxo));
 
@@ -2845,12 +2870,13 @@ async function recheckDeposit() {
     return;
   }
 
-  const utxo = depositResult.utxo;
-
   // Continue with the rest of the bridge process
   try {
     const network = getNetwork(state.network);
     const assetLockKeyPair = state.assetLockKeyPair!;
+
+    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
+    if (!utxo) return;
 
     updateState(setUtxoDetected(state, utxo));
 
@@ -3996,7 +4022,10 @@ async function requestFaucetFunds() {
         const utxos = await insightClient.getUTXOs(addressToCheck);
         const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
         const sufficientUtxo = utxos.find(u => u.satoshis >= minAmount);
-        if (sufficientUtxo && state.step === 'detecting_deposit') {
+        // Display-only progress hint: the polling flow authenticates the
+        // deposit before signing. Skip it while the recheck prompt is up,
+        // since no flow is running to move past 'building_transaction'.
+        if (sufficientUtxo && state.step === 'detecting_deposit' && !state.depositTimedOut) {
           updateState(setUtxoDetected(state, sufficientUtxo));
         }
       } catch {
