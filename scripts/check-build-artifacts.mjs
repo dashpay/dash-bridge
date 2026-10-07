@@ -77,6 +77,27 @@ for (const name of ['widget.js', 'widget.mjs']) {
   if (name === 'widget.js' && !/^var DashBridge\b/.test(widget)) {
     fail('dist/widget.js must expose the global DashBridge');
   }
+  // Login verification (secp256k1) belongs in widget-verify.mjs, not the SDK.
+  if (widget.includes('DarkCoin Signed Message')) {
+    fail(`dist/${name} must not bundle the login verifier; it ships as dist/widget-verify.mjs`);
+  }
+}
+
+// "Sign in with Dash" verifier: self-contained ES module that apps import on
+// their server. Check that it loads in Node and rejects a bogus result.
+const VERIFY_MAX_BYTES = 64 * 1024;
+const verifyUrl = new URL('widget-verify.mjs', distDir);
+const verifySource = readBuiltFile(verifyUrl);
+if (Buffer.byteLength(verifySource) > VERIFY_MAX_BYTES) {
+  fail(`dist/widget-verify.mjs must stay under ${VERIFY_MAX_BYTES} bytes`);
+}
+if (/\bimport\s*[\w*{}\s,]*(?:from\s*)?["']|\bimport\s*\(|\brequire\(/.test(verifySource)) {
+  fail('dist/widget-verify.mjs must be self-contained (found an import/require)');
+}
+const { verifyLogin } = await import(verifyUrl.href);
+const bogus = verifyLogin({}, { expectedOrigin: 'https://app.example', expectedNonce: 'x'.repeat(16), network: 'testnet', identityPublicKeys: [] });
+if (typeof verifyLogin !== 'function' || bogus?.ok !== false) {
+  fail('dist/widget-verify.mjs does not export a working verifyLogin');
 }
 
 console.log('Build artifact smoke check passed');

@@ -15,6 +15,7 @@ import type {
   OwnedUsername,
   UsernameTransferCredentialSource,
   UsernameTransferOutcome,
+  LoginKeyInfo,
   NearIntentsState,
   NearIntentsSwap,
 } from '../types.js';
@@ -281,6 +282,16 @@ export function setMode(state: BridgeState, mode: BridgeMode): BridgeState {
       withdrawStatusError: undefined,
       withdrawOutcomeUnknown: undefined,
     };
+  } else if (mode === 'login') {
+    // Sign in with Dash (embed request=login): identity + key entry
+    return {
+      ...clearedState,
+      step: 'login_input',
+      mode,
+      mnemonic: undefined,
+      identityKeys: [],
+      ...CLEARED_LOGIN_FIELDS,
+    };
   } else {
     // Manage mode: choose between key management and username transfer
     return {
@@ -316,6 +327,7 @@ function clearModeSensitiveFields(state: BridgeState, mode: BridgeMode): BridgeS
     recipientPlatformAddress: mode === 'send_to_address' ? state.recipientPlatformAddress : undefined,
     withdrawPrivateKeyWif: undefined,
     withdrawSigningKeyInfo: undefined,
+    loginPrivateKeyWif: undefined,
     withdrawToAddress: undefined,
     withdrawAmountCredits: undefined,
     // An unconfirmed registration belongs to the flow that raised it; keep it
@@ -811,6 +823,12 @@ export function getStepDescription(step: BridgeStep): string {
     withdraw_submitting: 'Submitting withdrawal...',
     withdraw_tracking: 'Processing withdrawal...',
     withdraw_complete: 'Withdrawal complete',
+    // Sign in with Dash steps
+    login_input: 'Sign in with Dash',
+    login_verifying: 'Checking your key...',
+    login_review: 'Approve sign-in',
+    login_complete: 'Signed in',
+    login_cancelled: 'Sign-in cancelled',
   };
   return descriptions[step];
 }
@@ -871,6 +889,12 @@ export function getStepProgress(step: BridgeStep): number {
     withdraw_submitting: 70,
     withdraw_tracking: 85,
     withdraw_complete: 100,
+    // Sign in with Dash steps
+    login_input: 20,
+    login_verifying: 50,
+    login_review: 70,
+    login_complete: 100,
+    login_cancelled: 0,
   };
   return progress[step];
 }
@@ -902,6 +926,7 @@ export function isProcessingStep(step: BridgeStep): boolean {
     // Withdraw processing steps
     'withdraw_submitting',
     'withdraw_tracking',
+    'login_verifying',
   ];
   return processingSteps.includes(step);
 }
@@ -2234,6 +2259,67 @@ export function setWithdrawRetry(state: BridgeState): BridgeState {
     withdrawStatus: undefined,
     withdrawStatusError: undefined,
   };
+}
+
+// ============================================================================
+// Sign in with Dash State Functions
+// ============================================================================
+
+const CLEARED_LOGIN_FIELDS = {
+  loginIdentityId: undefined,
+  loginPrivateKeyWif: undefined,
+  loginShowWif: undefined,
+  loginError: undefined,
+  loginKey: undefined,
+} satisfies Partial<BridgeState>;
+
+/** Login: keep typed values across re-renders; editing clears a stale error. */
+export function setLoginInput(
+  state: BridgeState,
+  input: { identityId?: string; privateKeyWif?: string }
+): BridgeState {
+  return {
+    ...state,
+    loginIdentityId: input.identityId ?? state.loginIdentityId,
+    loginPrivateKeyWif: input.privateKeyWif ?? state.loginPrivateKeyWif,
+    loginError: undefined,
+  };
+}
+
+export function toggleLoginShowWif(state: BridgeState): BridgeState {
+  return { ...state, loginShowWif: !state.loginShowWif };
+}
+
+export function setLoginVerifying(state: BridgeState): BridgeState {
+  return { ...state, step: 'login_verifying', loginError: undefined, loginKey: undefined };
+}
+
+/** Back to the input step with a reason the identity/key can't sign in. */
+export function setLoginError(state: BridgeState, error: string): BridgeState {
+  return { ...state, step: 'login_input', loginError: error, loginKey: undefined };
+}
+
+export function setLoginReview(state: BridgeState, key: LoginKeyInfo): BridgeState {
+  return { ...state, step: 'login_review', loginKey: key, loginError: undefined };
+}
+
+export function setLoginBackToInput(state: BridgeState): BridgeState {
+  return { ...state, step: 'login_input', loginKey: undefined };
+}
+
+/** Drop the WIF (any exit from the login flow). */
+export function clearLoginSecret(state: BridgeState): BridgeState {
+  return { ...state, loginPrivateKeyWif: undefined, loginShowWif: undefined };
+}
+
+/** Signed and delivered: the WIF is dropped here. */
+export function setLoginComplete(state: BridgeState): BridgeState {
+  return { ...clearLoginSecret(state), step: 'login_complete' };
+}
+
+/** Cancelled: terminal, so in-flight work can see the flow is over. */
+export function setLoginCancelled(state: BridgeState): BridgeState {
+  return { ...clearLoginSecret(state), step: 'login_cancelled', loginKey: undefined };
 }
 
 // ============================================================================

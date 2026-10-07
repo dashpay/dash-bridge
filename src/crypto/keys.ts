@@ -2,7 +2,7 @@ import * as secp256k1 from '@noble/secp256k1';
 import { randomBytes } from '@noble/hashes/utils';
 import type { KeyPair, IdentityKeyConfig, KeyType, KeyPurpose, SecurityLevel, IdentityPublicKeyInfo } from '../types.js';
 import { hash160 } from './hash.js';
-import { bytesToHex } from '../utils/hex.js';
+import { bytesEqual, bytesToHex } from '../utils/hex.js';
 import { privateKeyToWif, wifToPrivateKey } from '../utils/wif.js';
 import { getNetwork } from '../config.js';
 import { deriveIdentityKey as deriveIdentityKeyHD } from './hd.js';
@@ -218,17 +218,6 @@ export function generateDefaultIdentityKeysHD(
 }
 
 /**
- * Compare two Uint8Arrays for equality
- */
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
-}
-
-/**
  * Find which identity key matches the given private key WIF.
  * Returns the matching key info including id, securityLevel, and purpose, or null if no match.
  */
@@ -236,7 +225,7 @@ export function findMatchingKeyIndex(
   privateKeyWif: string,
   identityPublicKeys: IdentityPublicKeyInfo[],
   network: string
-): { keyId: number; securityLevel: number; purpose: number; publicKey: Uint8Array } | null {
+): { keyId: number; type: number; securityLevel: number; purpose: number; publicKey: Uint8Array } | null {
   // Decode the WIF to get the private key
   let privateKey: Uint8Array;
   try {
@@ -263,12 +252,12 @@ export function findMatchingKeyIndex(
     if (key.type === 0) {
       // Compare full public key
       if (bytesEqual(publicKey, key.data)) {
-        return { keyId: key.id, securityLevel: key.securityLevel, purpose: key.purpose, publicKey };
+        return { keyId: key.id, type: key.type, securityLevel: key.securityLevel, purpose: key.purpose, publicKey };
       }
     } else if (key.type === 2) {
       // Compare hash160
       if (bytesEqual(publicKeyHash, key.data)) {
-        return { keyId: key.id, securityLevel: key.securityLevel, purpose: key.purpose, publicKey };
+        return { keyId: key.id, type: key.type, securityLevel: key.securityLevel, purpose: key.purpose, publicKey };
       }
     }
   }

@@ -390,6 +390,20 @@ export function render(state: BridgeState, container: HTMLElement): void {
     case 'withdraw_complete':
       content.appendChild(renderWithdrawCompleteStep(state));
       break;
+
+    // Sign in with Dash steps
+    case 'login_input':
+      content.appendChild(renderLoginInputStep(state));
+      break;
+    case 'login_verifying':
+      content.appendChild(renderLoginVerifyingStep());
+      break;
+    case 'login_review':
+      content.appendChild(renderLoginReviewStep(state));
+      break;
+    case 'login_complete':
+      content.appendChild(renderLoginCompleteStep(state));
+      break;
   }
 
   wrapper.appendChild(content);
@@ -400,23 +414,30 @@ export function render(state: BridgeState, container: HTMLElement): void {
 }
 
 /**
- * Embed mode: who the identity is being created for. The origin is shown next
- * to the self-declared app name because only the origin receives the result.
+ * The requesting app, escaped: self-declared name (isolated with <bdi>) next
+ * to the origin, because only the origin receives the result.
  */
+function embedAppHtml(embed: NonNullable<BridgeState['embed']>): string {
+  return embed.appName
+    ? `<strong><bdi>${escapeHtml(embed.appName)}</bdi></strong> <span class="embed-origin">(${escapeHtml(embed.origin)})</span>`
+    : `<strong>${escapeHtml(embed.origin)}</strong>`;
+}
+
+/** Embed mode: who the bridge is working for, and what they will receive. */
 function renderEmbedBanner(state: BridgeState): HTMLElement {
   const embed = state.embed!;
   const banner = document.createElement('div');
   banner.className = 'embed-banner';
-  const who = embed.appName
-    ? `<strong><bdi>${escapeHtml(embed.appName)}</bdi></strong> <span class="embed-origin">(${escapeHtml(embed.origin)})</span>`
-    : `<strong>${escapeHtml(embed.origin)}</strong>`;
   const cancel = !canCancel(state)
     ? ''
     : '<button id="embed-cancel-btn" class="embed-cancel-btn" type="button">Cancel</button>';
+  const [action, hint] = embed.request === 'login'
+    ? ['Sign in to', 'The app receives your identity ID and a signature. Your private key stays in this window.']
+    : ['Creating an identity for', 'Only your identity ID is shared. Your keys stay in this window.'];
   banner.innerHTML = `
     <div class="embed-banner-text">
-      <span>Creating an identity for ${who}</span>
-      <span class="embed-banner-hint">Only your identity ID is shared. Your keys stay in this window.</span>
+      <span>${action} ${embedAppHtml(embed)}</span>
+      <span class="embed-banner-hint">${hint}</span>
     </div>
     ${cancel}
   `;
@@ -4172,5 +4193,133 @@ function renderContractCompleteStep(state: BridgeState): HTMLElement {
   startOverBtn.textContent = 'Start Over';
   div.appendChild(startOverBtn);
 
+  return div;
+}
+
+// ============================================================================
+// Sign in with Dash (embed request=login)
+// ============================================================================
+
+function loginNavButton(id: string, label: string, primary = false, disabled = false): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.id = id;
+  button.type = 'button';
+  button.className = primary ? 'primary-btn' : 'secondary-btn';
+  button.textContent = label;
+  if (disabled) button.disabled = true;
+  return button;
+}
+
+function renderLoginInputStep(state: BridgeState): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'login-step';
+  const showWif = state.loginShowWif === true;
+  const error = state.loginError
+    ? `<p id="login-error" class="key-status error" role="alert">${escapeHtml(state.loginError)}</p>`
+    : '';
+  div.innerHTML = `
+    <h2 class="login-headline">Sign in with your Dash identity</h2>
+    <p class="login-subtitle">Prove that you control an identity by signing with one of its
+      <strong>HIGH</strong> or <strong>CRITICAL</strong> authentication keys. Never use your MASTER key.</p>
+    <div class="manage-identity-form login-form">
+      <div class="input-group">
+        <label class="input-label" for="login-identity-input">Identity ID</label>
+        <input type="text" id="login-identity-input" class="manage-input" autocomplete="off" spellcheck="false"
+          placeholder="Your 44-character identity ID..." value="${escapeAttr(state.loginIdentityId ?? '')}" />
+      </div>
+      <div class="input-group">
+        <label class="input-label" for="login-wif-input">Private key (WIF)</label>
+        <div class="login-wif-row">
+          <input type="${showWif ? 'text' : 'password'}" id="login-wif-input" class="manage-input"
+            autocomplete="off" spellcheck="false" placeholder="Authentication key in WIF format..."
+            value="${escapeAttr(state.loginPrivateKeyWif ?? '')}" />
+          <button type="button" id="login-wif-toggle" class="secondary-btn login-wif-toggle"
+            aria-pressed="${showWif}" aria-controls="login-wif-input">${showWif ? 'Hide' : 'Show'}</button>
+        </div>
+        <p class="input-hint">The key signs in this window and is never sent to the app or the network.</p>
+      </div>
+      ${error}
+    </div>
+  `;
+  const nav = document.createElement('div');
+  nav.className = 'nav-buttons';
+  nav.appendChild(loginNavButton('login-cancel-btn', 'Cancel'));
+  const ready = Boolean(state.loginIdentityId?.trim() && state.loginPrivateKeyWif?.trim());
+  nav.appendChild(loginNavButton('login-continue-btn', 'Continue', true, !ready));
+  div.appendChild(nav);
+  return div;
+}
+
+function renderLoginVerifyingStep(): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'processing-step';
+  div.innerHTML = `
+    <h2 class="processing-headline">Checking your key</h2>
+    <p class="processing-subtitle">Fetching the identity's public keys from Dash Platform.</p>
+    <div class="spinner large"></div>
+  `;
+  return div;
+}
+
+/** The requesting app's host: what the user can trust, unlike its self-declared name. */
+function embedHost(embed: NonNullable<BridgeState['embed']>): string {
+  return escapeHtml(new URL(embed.origin).host);
+}
+
+function renderLoginReviewStep(state: BridgeState): HTMLElement {
+  const embed = state.embed!;
+  const key = state.loginKey!;
+  const statement = embed.statement
+    ? `<div class="xfer-summary-row">
+        <span class="xfer-summary-label">Message from the app</span>
+        <span class="xfer-summary-value login-statement"><bdi>${escapeHtml(embed.statement)}</bdi></span>
+      </div>`
+    : '';
+  const div = document.createElement('div');
+  div.className = 'login-step';
+  div.innerHTML = `
+    <h2 class="login-headline">Approve sign-in</h2>
+    <div class="xfer-summary">
+      <div class="xfer-summary-row">
+        <span class="xfer-summary-label">App</span>
+        <span class="xfer-summary-value">${embedAppHtml(embed)}</span>
+      </div>
+      <div class="xfer-summary-row">
+        <span class="xfer-summary-label">Identity</span>
+        <code class="xfer-summary-value" id="login-review-identity">${escapeHtml(state.loginIdentityId ?? '')}</code>
+      </div>
+      <div class="xfer-summary-row">
+        <span class="xfer-summary-label">Signing key</span>
+        <span class="xfer-summary-value" id="login-review-key">Key #${key.keyId} · AUTHENTICATION · ${escapeHtml(getSecurityLevelName(key.securityLevel))} · ${getKeyTypeName(key.type)}</span>
+      </div>
+      <div class="xfer-summary-row">
+        <span class="xfer-summary-label">Network</span>
+        <span class="xfer-summary-value">${escapeHtml(state.network)}</span>
+      </div>
+      ${statement}
+    </div>
+    <p class="login-note">Signing proves to <strong>${embedHost(embed)}</strong> that you control this identity.
+      It does not move funds or change your identity, and it expires in 10 minutes.</p>
+  `;
+  const nav = document.createElement('div');
+  nav.className = 'nav-buttons';
+  nav.appendChild(loginNavButton('login-back-btn', 'Back'));
+  nav.appendChild(loginNavButton('login-cancel-btn', 'Cancel'));
+  nav.appendChild(loginNavButton('login-sign-btn', 'Sign in', true));
+  div.appendChild(nav);
+  return div;
+}
+
+function renderLoginCompleteStep(state: BridgeState): HTMLElement {
+  const host = embedHost(state.embed!);
+  const div = document.createElement('div');
+  div.className = 'login-step login-complete';
+  div.innerHTML = `
+    <h2 class="login-headline">Signed in</h2>
+    <p class="login-note">${host} received your identity ID and signature. You can close this window.</p>
+    <div class="embed-return">
+      <button id="embed-return-btn" class="secondary-btn" type="button">Return to ${host}</button>
+    </div>
+  `;
   return div;
 }

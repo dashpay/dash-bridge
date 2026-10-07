@@ -8,6 +8,7 @@ import {
 import { loadSdkModule } from './sdkModule.js';
 import {
   convertToHomographSafe,
+  identityKeyFromRecord,
   isContestedUsername,
 } from './dpns-utils.js';
 
@@ -34,62 +35,7 @@ export async function getIdentityPublicKeys(
 
   console.log('Keys response:', keysArray);
 
-  // Convert the keys to our format
-  const result: IdentityPublicKeyInfo[] = [];
-
-  for (const key of keysArray) {
-    console.log('Processing key:', key);
-
-    // SDK v3 response format: keyId, keyType, publicKeyData, purpose, securityLevel
-    const id = key.keyId;
-
-    // Convert keyType string to number
-    const typeStr = key.keyType ?? 'ECDSA_SECP256K1';
-    const type = typeStr === 'ECDSA_SECP256K1' ? 0 : typeStr === 'ECDSA_HASH160' ? 2 : 0;
-
-    // Convert purpose string to number
-    const purposeStr = key.purpose ?? 'AUTHENTICATION';
-    const purposeMap: Record<string, number> = {
-      'AUTHENTICATION': 0, 'ENCRYPTION': 1, 'DECRYPTION': 2,
-      'TRANSFER': 3, 'OWNER': 4, 'VOTING': 5
-    };
-    const purpose = purposeMap[purposeStr] ?? 0;
-
-    // Convert securityLevel string to number
-    const levelStr = key.securityLevel ?? 'MASTER';
-    const levelMap: Record<string, number> = {
-      'MASTER': 0, 'CRITICAL': 1, 'HIGH': 2, 'MEDIUM': 3
-    };
-    const securityLevel = levelMap[levelStr] ?? 0;
-
-    // SDK v3.0.1 returns key data as `data` (hex string)
-    const rawData = key.data;
-
-    // Convert hex string to Uint8Array
-    let data: Uint8Array;
-    if (typeof rawData === 'string' && /^[0-9a-fA-F]+$/.test(rawData)) {
-      data = new Uint8Array(rawData.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
-    } else if (typeof rawData === 'string') {
-      // Try base64
-      data = new Uint8Array(atob(rawData).split('').map(c => c.charCodeAt(0)));
-    } else {
-      console.warn('Unexpected key data format:', rawData);
-      data = new Uint8Array(0);
-    }
-
-    // SDK v3.0.1 uses disabledAt timestamp instead of disabled boolean
-    const isDisabled = key.disabledAt !== undefined;
-
-    result.push({
-      id,
-      type,
-      purpose,
-      securityLevel,
-      data,
-      isDisabled,
-    });
-  }
-
+  const result = keysArray.map(identityKeyFromRecord);
   console.log('Parsed keys:', result);
   return result;
 }

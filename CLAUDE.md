@@ -43,11 +43,14 @@ src/
 │   ├── insight.ts       # Insight API client (UTXO fetching, broadcast)
 │   └── dapi.ts          # DAPI client (Platform operations, InstantSend)
 ├── platform/            # Dash Platform operations
-│   └── identity.ts      # Identity registration and top-up
+│   ├── identity.ts      # Identity registration and top-up
+│   └── login.ts         # Sign in with Dash: key checks and signing
 ├── embed/               # Embed mode for third-party apps (docs/widget.md)
 │   ├── protocol.ts      # Shared postMessage protocol + URL param validation
-│   └── bridge.ts        # Bridge side: framing guard, EmbedSession messaging
+│   ├── bridge.ts        # Bridge side: framing guard, EmbedSession messaging
+│   └── login.ts         # Sign in with Dash: message format, redirect fragments
 ├── widget/              # widget.js SDK (separate lib build: vite.widget.config.ts)
+│   └── verify.ts        # verifyLogin -> dist/widget-verify.mjs (vite.verify.config.ts)
 └── ui/                  # UI layer
     ├── state.ts         # State machine and state transitions
     ├── components.ts    # UI rendering

@@ -1,4 +1,4 @@
-import type { EmbedKind } from './embed/protocol.js';
+import type { EmbedKind, EmbedRequestType } from './embed/protocol.js';
 import type { NearIntentsQuote, NearIntentsToken, NearSwapStatus } from './api/near-intents.js';
 
 export interface KeyPair {
@@ -80,7 +80,7 @@ export interface IdentityKeyConfig {
 /**
  * Bridge operation mode
  */
-export type BridgeMode = 'create' | 'topup' | 'send_to_address' | 'dpns' | 'manage' | 'contract' | 'withdraw';
+export type BridgeMode = 'create' | 'topup' | 'send_to_address' | 'dpns' | 'manage' | 'contract' | 'withdraw' | 'login';
 
 /**
  * DPNS identity source for standalone mode
@@ -134,6 +134,10 @@ export interface IdentityPublicKeyInfo {
   data: Uint8Array;
   /** Whether the key is disabled */
   isDisabled?: boolean;
+  /** Whether the key is restricted to a single contract (contractBounds set) */
+  isContractBound?: boolean;
+  /** The SDK reported a key type, purpose or security level we don't know */
+  unrecognized?: boolean;
 }
 
 /**
@@ -246,7 +250,13 @@ export type BridgeStep =
   | 'withdraw_configure'        // Enter TRANSFER key WIF, destination address, amount
   | 'withdraw_submitting'       // Credit withdrawal transition in flight
   | 'withdraw_tracking'         // Polling withdrawal document status
-  | 'withdraw_complete';        // Withdrawal done (or failed)
+  | 'withdraw_complete'         // Withdrawal done (or failed)
+  // Sign in with Dash (embed request=login)
+  | 'login_input'               // Enter identity ID + AUTHENTICATION key WIF
+  | 'login_verifying'           // Fetching the identity's keys, checking the WIF
+  | 'login_review'              // Approve: which app, identity and key
+  | 'login_complete'            // Signed; result delivered to the app
+  | 'login_cancelled';          // User cancelled; terminal
 
 /**
  * Status of network retry attempts
@@ -325,6 +335,18 @@ export interface EmbedDisplay {
   origin: string;
   /** Self-declared app name; display only. */
   appName?: string;
+  /** What the app asked for (drives the banner wording). */
+  request: EmbedRequestType;
+  /** `login`: app-supplied statement, sanitized; part of the signed message. */
+  statement?: string;
+}
+
+/** Login: the identity key the user's WIF matched (no private material). */
+export interface LoginKeyInfo {
+  keyId: number;
+  securityLevel: number;
+  /** 0 = ECDSA_SECP256K1, 2 = ECDSA_HASH160 */
+  type: number;
 }
 
 /** Embed mode: message shown instead of the app when it must not run. */
@@ -602,6 +624,18 @@ export interface BridgeState {
    * `sinceMs` is the lower bound used to match the withdrawal document.
    */
   withdrawOutcomeUnknown?: { sinceMs: number; checking: boolean };
+
+  // Sign in with Dash fields
+  /** Login: identity ID as typed */
+  loginIdentityId?: string;
+  /** Login: WIF as typed. Cleared as soon as the login is signed or cancelled. */
+  loginPrivateKeyWif?: string;
+  /** Login: show the WIF in clear text */
+  loginShowWif?: boolean;
+  /** Login: why the identity/key can't be used */
+  loginError?: string;
+  /** Login: the key that will sign (set on the review step) */
+  loginKey?: LoginKeyInfo;
 
   // Faucet request state
   /** Current status of faucet request */

@@ -2,30 +2,42 @@
  * Dash Bridge widget SDK.
  *
  * Lets a web app send the user to the Dash Bridge (popup or iframe) to create
- * a Platform identity and get the identity ID back. The bridge keeps the
- * mnemonic and keys; the app only ever receives the result fields.
+ * a Platform identity and get the identity ID back, or to sign in with an
+ * existing identity ("Sign in with Dash"). The bridge keeps the mnemonic and
+ * keys; the app only ever receives the result fields.
  *
  * Built as `dist/widget.js` (IIFE, global `DashBridge`) and `dist/widget.mjs`.
  * Must stay dependency-free apart from the shared protocol module.
  */
 import {
   PROTOCOL_VERSION,
-  EMBED_KINDS,
+  WINDOW_KINDS,
   EMBED_NETWORKS,
   isAllowedWebUrl,
   isOneOf,
   parseRequestOrigin,
   sanitizeAppName,
   type BridgeMessage,
-  type EmbedKind,
   type EmbedNetwork,
   type EmbedRequestType,
+  type LoginParams,
   type ProgressStep,
+  type WindowKind,
 } from '../embed/protocol.js';
-import { acceptBridgeEvent, buildBridgeUrl, generateRequestId } from './helpers.js';
+import {
+  isValidNonce,
+  parseLoginFragment,
+  parseReturnUrl,
+  pickLoginResult,
+  sanitizeStatement,
+  type LoginResult,
+} from '../embed/login.js';
+import { acceptBridgeEvent, buildBridgeUrl, generateNonce, generateRequestId } from './helpers.js';
 
-export { PROTOCOL_VERSION };
-export type { ProgressStep, EmbedNetwork, EmbedKind };
+export { PROTOCOL_VERSION, generateNonce };
+export type { ProgressStep, EmbedNetwork, LoginResult };
+/** `'popup'` or `'iframe'`. */
+export type EmbedKind = WindowKind;
 
 export const DEFAULT_BRIDGE_URL = 'https://bridge.thepasta.org/';
 
@@ -80,7 +92,7 @@ export interface BridgeRequestOptions {
   /** Defaults to `'testnet'`. */
   network?: EmbedNetwork;
   /** `'popup'` (default, recommended) or `'iframe'`. */
-  mode?: EmbedKind;
+  mode?: WindowKind;
   /** iframe mode: element the iframe is appended to. */
   container?: HTMLElement;
   /** Name shown to the user in the bridge (max 64 characters). */
@@ -111,6 +123,113 @@ export function createIdentity(options: CreateIdentityOptions = {}): Promise<Cre
   );
 }
 
+export interface LoginOptions extends Omit<BridgeRequestOptions, 'onProgress' | 'onError' | 'mode' | 'container'> {
+  /**
+   * Only `'popup'` (the default). Sign-in never runs in an iframe: users
+   * should only paste a key where they can see the bridge's address bar. For
+   * a full-page flow use `loginRedirectUrl`.
+   */
+  mode?: 'popup';
+  /**
+   * Single-use challenge your server generated and remembers (16-128 chars of
+   * `[A-Za-z0-9_-]`). `generateNonce()` makes one, but the server must issue
+   * and check it, or a captured login can be replayed.
+   */
+  nonce: string;
+  /** Short text shown to the user and signed (max 140 characters). */
+  statement?: string;
+}
+
+export interface LoginRedirectOptions {
+  nonce: string;
+  /** Where the bridge sends the user back. Must be on this page's origin. */
+  returnUrl: string;
+  network?: EmbedNetwork;
+  appName?: string;
+  statement?: string;
+  bridgeUrl?: string;
+}
+
+const NONCE_HINT = 'nonce must be 16-128 characters of [A-Za-z0-9_-], issued by your server';
+
+/**
+ * Ask the user to sign in with a Dash Platform identity, in a popup. Resolves
+ * with a signed proof; check it on your server with `verifyLogin` from
+ * `widget-verify.mjs` before trusting `identityId`. Call this synchronously
+ * from a user gesture (click).
+ */
+export function login(options: LoginOptions): Promise<LoginResult> {
+  if (!options || !isValidNonce(options.nonce)) {
+    return Promise.reject(new DashBridgeError('invalid_options', NONCE_HINT));
+  }
+  if ((options.mode ?? 'popup') !== 'popup') {
+    return Promise.reject(
+      new DashBridgeError('invalid_options', 'login runs only in a popup; use loginRedirectUrl for a full-page flow'),
+    );
+  }
+  const params: LoginParams = { nonce: options.nonce, statement: sanitizeStatement(options.statement) };
+  return runBridgeRequest(
+    'login',
+    { ...options, mode: 'popup' },
+    (msg) => (msg.type === 'login' ? pickLoginResult(msg) ?? undefined : undefined),
+    params,
+  );
+}
+
+/**
+ * Bridge URL for a full-page sign-in. Navigate to it; the bridge comes back to
+ * `returnUrl` with the result in the fragment (read it with
+ * `parseLoginRedirect`). Throws `DashBridgeError('invalid_options')`.
+ */
+export function loginRedirectUrl(options: LoginRedirectOptions): string {
+  const invalid = (message: string) => new DashBridgeError('invalid_options', message);
+  if (!options || !isValidNonce(options.nonce)) throw invalid(NONCE_HINT);
+  const network = options.network ?? 'testnet';
+  if (!isOneOf(EMBED_NETWORKS, network)) throw invalid('network must be "mainnet" or "testnet"');
+  const origin = parseRequestOrigin(window.location.origin);
+  if (!origin) throw invalid('the app must be served over https (http only on localhost)');
+  let returnUrl: string | null = null;
+  try {
+    returnUrl = parseReturnUrl(new URL(options.returnUrl, window.location.href).href, origin);
+  } catch {
+    // reported below
+  }
+  if (!returnUrl) throw invalid("returnUrl must be an http(s) URL on this page's origin, without a query string");
+  return buildBridgeUrl({
+    bridgeUrl: resolveBridgeUrl(options.bridgeUrl).href,
+    kind: 'redirect',
+    origin,
+    request: 'login',
+    network,
+    appName: sanitizeAppName(options.appName),
+    login: { nonce: options.nonce, statement: sanitizeStatement(options.statement), returnUrl },
+  }).href;
+}
+
+/**
+ * Read the outcome of a redirect sign-in from `location.hash` (or `hash`).
+ * Returns the result, `{ error }` (e.g. `'cancelled'`), or null when the
+ * fragment has no sign-in outcome. Remove the fragment afterwards, e.g. with
+ * `history.replaceState`.
+ */
+export function parseLoginRedirect(hash: string = window.location.hash): LoginResult | { error: string } | null {
+  return parseLoginFragment(hash);
+}
+
+/** Throws DashBridgeError('invalid_options'). */
+function resolveBridgeUrl(value: string | undefined): URL {
+  let url: URL;
+  try {
+    url = new URL(value ?? DEFAULT_BRIDGE_URL, window.location.href);
+  } catch {
+    throw new DashBridgeError('invalid_options', 'bridgeUrl is not a valid URL');
+  }
+  if (!isAllowedWebUrl(url)) {
+    throw new DashBridgeError('invalid_options', 'bridgeUrl must be https (http only on localhost)');
+  }
+  return url;
+}
+
 function safeCall<A>(fn: ((arg: A) => void) | undefined, arg: A): void {
   if (!fn) return;
   try {
@@ -123,19 +242,21 @@ function safeCall<A>(fn: ((arg: A) => void) | undefined, arg: A): void {
 /**
  * Shared lifecycle for every request type: open the bridge, route messages,
  * and clean up. `extractResult` turns the request's result message into the
- * resolved value.
+ * resolved value. A login has nothing left to do in the bridge after its
+ * result, so its popup is closed right away.
  */
 function runBridgeRequest<R>(
   request: EmbedRequestType,
   options: BridgeRequestOptions,
   extractResult: (msg: BridgeMessage) => R | undefined,
+  login?: LoginParams,
 ): Promise<R> {
   return new Promise<R>((resolve, reject) => {
     const mode = options.mode ?? 'popup';
     const network = options.network ?? 'testnet';
     const invalid = (message: string) => reject(new DashBridgeError('invalid_options', message));
 
-    if (!isOneOf(EMBED_KINDS, mode)) return invalid('mode must be "popup" or "iframe"');
+    if (!isOneOf(WINDOW_KINDS, mode)) return invalid('mode must be "popup" or "iframe"');
     if (!isOneOf(EMBED_NETWORKS, network)) return invalid('network must be "mainnet" or "testnet"');
     if (mode === 'iframe' && !(options.container instanceof HTMLElement)) {
       return invalid('iframe mode needs a container element');
@@ -146,11 +267,10 @@ function runBridgeRequest<R>(
 
     let bridgeUrl: URL;
     try {
-      bridgeUrl = new URL(options.bridgeUrl ?? DEFAULT_BRIDGE_URL, window.location.href);
-    } catch {
-      return invalid('bridgeUrl is not a valid URL');
+      bridgeUrl = resolveBridgeUrl(options.bridgeUrl);
+    } catch (err) {
+      return reject(err);
     }
-    if (!isAllowedWebUrl(bridgeUrl)) return invalid('bridgeUrl must be https (http only on localhost)');
     if (options.signal?.aborted) {
       return reject(new DashBridgeError('aborted', 'The request was aborted.'));
     }
@@ -164,6 +284,7 @@ function runBridgeRequest<R>(
       network,
       requestId,
       appName: sanitizeAppName(options.appName),
+      login,
     });
     const bridgeOrigin = bridgeUrl.origin;
 
@@ -224,6 +345,11 @@ function runBridgeRequest<R>(
       if (settled) return;
       settled = true;
       resolve(result);
+      if (request === 'login') {
+        teardown();
+        if (popup && !popup.closed) popup.close();
+        return;
+      }
       // The user still has to save their keys. The popup stays open and we're
       // done with it; the iframe stays until the bridge asks to close, the
       // host removes it, or the signal aborts.

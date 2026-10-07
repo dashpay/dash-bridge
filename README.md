@@ -27,6 +27,10 @@ never leave the bridge window.
 </script>
 ```
 
+Apps can also offer **Sign in with Dash**: the user signs a short message in
+the bridge with one of their identity's authentication keys, and the app's
+server checks it with `verifyLogin` from `widget-verify.mjs`.
+
 See [docs/widget.md](docs/widget.md) for the integration guide, the message
 protocol and the security model. Try it at `/widget-demo.html`.
 

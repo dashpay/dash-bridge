@@ -8,19 +8,34 @@
  *
  * This module must stay dependency-free: the SDK bundles it.
  */
+import {
+  LOGIN_RESULT_FIELDS,
+  isValidNonce,
+  parseReturnUrl,
+  pickLoginResult,
+  sanitizeStatement,
+  type LoginResult,
+} from './login.js';
 
 export const PROTOCOL_SOURCE = 'dash-bridge';
 export const PROTOCOL_VERSION = 1;
 
-/** How the requesting app hosts the bridge. */
-export const EMBED_KINDS = ['popup', 'iframe'] as const;
+/** How the SDK hosts the bridge: windows it can exchange messages with. */
+export const WINDOW_KINDS = ['popup', 'iframe'] as const;
+export type WindowKind = (typeof WINDOW_KINDS)[number];
+
+/**
+ * How the requesting app hosts the bridge. `redirect` is a full-page
+ * navigation (login only): the result comes back in the return URL fragment.
+ */
+export const EMBED_KINDS = [...WINDOW_KINDS, 'redirect'] as const;
 export type EmbedKind = (typeof EMBED_KINDS)[number];
 
 /**
  * What the app asked the bridge to do. Each request type has its own result
  * message; the envelope, origin handling and lifecycle messages are shared.
  */
-export const EMBED_REQUEST_TYPES = ['create-identity'] as const;
+export const EMBED_REQUEST_TYPES = ['create-identity', 'login'] as const;
 export type EmbedRequestType = (typeof EMBED_REQUEST_TYPES)[number];
 export const DEFAULT_REQUEST_TYPE: EmbedRequestType = 'create-identity';
 
@@ -56,6 +71,8 @@ export interface MessagePayloads {
   progress: { step: ProgressStep };
   /** `create-identity` result: the identity is registered on Platform. */
   'identity-created': { identityId: string; network: string };
+  /** `login` result: a signed proof that the user controls an identity key. */
+  login: LoginResult;
   /**
    * Something went wrong. `fatal: true` means the request cannot proceed
    * (e.g. unsupported network); otherwise the user can still retry or recover
@@ -74,6 +91,7 @@ const PAYLOAD_FIELDS: { [T in MessageType]: readonly (keyof MessagePayloads[T])[
   ready: [],
   progress: ['step'],
   'identity-created': ['identityId', 'network'],
+  login: LOGIN_RESULT_FIELDS,
   error: ['code', 'message', 'fatal'],
   cancelled: [],
   close: [],
@@ -139,6 +157,9 @@ export function parseBridgeMessage(
     case 'identity-created':
       if (typeof msg.identityId !== 'string' || typeof msg.network !== 'string') return null;
       break;
+    case 'login':
+      if (!pickLoginResult(msg)) return null;
+      break;
     case 'error':
       if (typeof msg.code !== 'string' || typeof msg.message !== 'string' || typeof msg.fatal !== 'boolean') {
         return null;
@@ -195,6 +216,17 @@ export interface EmbedParams {
   network: EmbedNetwork;
   appName?: string;
   requestId?: string;
+  /** `login`: what the user signs in with. */
+  login?: LoginParams;
+}
+
+export interface LoginParams {
+  /** App-issued, single-use challenge (16-128 chars of `[A-Za-z0-9_-]`). */
+  nonce: string;
+  /** Short text shown to the user and included in the signed message. */
+  statement?: string;
+  /** Redirect mode: where to send the user back, on the declared origin. */
+  returnUrl?: string;
 }
 
 /** Enough of a request to reply to the app with a fatal error. */
@@ -205,6 +237,8 @@ export interface UnsupportedEmbedParams {
   request: string;
   appName?: string;
   requestId?: string;
+  /** Redirect-mode logins: where to send the error back to. */
+  login?: LoginParams;
 }
 
 export type EmbedParamsResult =
@@ -235,19 +269,40 @@ export function parseEmbedParams(search: string | URLSearchParams): EmbedParamsR
     appName: sanitizeAppName(q.get('app')),
     requestId: rawRequestId ?? undefined,
   };
+  let login: LoginParams | undefined;
   const unsupported = (code: string, reason: string): EmbedParamsResult => ({
     status: 'unsupported',
-    params: { ...base, request },
+    params: { ...base, request, login },
     code,
     reason,
   });
 
+  // Redirect mode can only answer by navigating to returnUrl, so that and the
+  // nonce are validated before anything is reported back.
+  let returnUrl: string | undefined;
+  if (embed === 'redirect') {
+    if (request !== 'login') return invalid('Redirect mode is only available for sign-in requests.');
+    returnUrl = parseReturnUrl(q.get('returnUrl'), origin) ?? undefined;
+    if (!returnUrl) {
+      return invalid("The app's return URL is missing, not on its origin, or has a query string.");
+    }
+  }
   if (!isOneOf(EMBED_REQUEST_TYPES, request)) {
     return unsupported('unsupported_request', 'This bridge does not support the requested operation.');
+  }
+  if (request === 'login') {
+    const nonce = q.get('nonce');
+    if (!isValidNonce(nonce)) return invalid('The sign-in request has no valid nonce.');
+    login = { nonce, statement: sanitizeStatement(q.get('statement')), returnUrl };
+    // Never ask users to paste keys into a frame on someone else's page:
+    // sign-in runs where they can see the bridge's address bar.
+    if (embed === 'iframe') {
+      return unsupported('unsupported_mode', 'Sign-in opens in a popup or a full-page redirect, not in an embedded frame.');
+    }
   }
   const network = q.get('network') ?? 'testnet';
   if (!isOneOf(EMBED_NETWORKS, network)) {
     return unsupported('unsupported_network', 'Only mainnet and testnet are supported in embedded mode.');
   }
-  return { status: 'ok', params: { ...base, request, network } };
+  return { status: 'ok', params: { ...base, request, network, login } };
 }
