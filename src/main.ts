@@ -9,7 +9,7 @@ import {
 import { extractErrorMessage } from './utils/errors.js';
 import { deriveAssetLockKeyPair } from './crypto/hd.js';
 import { createAssetLockTransaction, serializeTransaction, calculateTxId } from './transaction/index.js';
-import { InsightClient } from './api/insight.js';
+import { InsightClient, isAmbiguousBroadcastError } from './api/insight.js';
 import type { IslockService } from './api/islock.js';
 import { fetchNetworkStatus } from './api/network-status.js';
 import { DAPIClient } from './api/dapi.js';
@@ -2322,6 +2322,26 @@ function showValidationError(message: string): void {
 /**
  * Start the top-up process
  */
+/**
+ * Broadcast a signed asset lock transaction.
+ *
+ * A broadcast that timed out may still have reached the node, so it is not a
+ * failure: continue with the locally computed txid and let the IS lock wait
+ * (and its chain-lock fallback, which needs `state.txid`) settle the outcome.
+ * Definite rejections still throw.
+ */
+async function broadcastAssetLock(signedTxHex: string, txid: string): Promise<void> {
+  try {
+    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
+    if (broadcastedTxid !== txid) {
+      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
+    }
+  } catch (error) {
+    if (!isAmbiguousBroadcastError(error)) throw error;
+    console.warn(`Broadcast outcome unknown for ${txid}; waiting for its lock instead:`, error);
+  }
+}
+
 async function startTopUp() {
   try {
     if (isE2EMockMode()) {
@@ -2428,10 +2448,7 @@ async function startTopUp() {
     );
 
     // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
+    await broadcastAssetLock(signedTxHex, txid);
 
     updateState(setTransactionBroadcast(state, txid));
 
@@ -2548,10 +2565,7 @@ async function startSendToAddress() {
     );
 
     // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
+    await broadcastAssetLock(signedTxHex, txid);
     updateState(setTransactionBroadcast(state, txid));
 
     const islockBytes = await islockSub.wait();
@@ -2765,10 +2779,7 @@ async function startBridge() {
     );
 
     // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
+    await broadcastAssetLock(signedTxHex, txid);
     updateState(setTransactionBroadcast(state, txid));
 
     console.log('Waiting for InstantSend lock...');
@@ -2889,10 +2900,7 @@ async function recheckDeposit() {
     );
 
     // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
+    await broadcastAssetLock(signedTxHex, txid);
     updateState(setTransactionBroadcast(state, txid));
 
     console.log('Waiting for InstantSend lock...');

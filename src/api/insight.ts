@@ -3,13 +3,25 @@ import type { NetworkConfig } from '../config.js';
 import { withRetry, isRetryableError, type RetryOptions } from '../utils/retry.js';
 import { abortableSleep } from '../utils/sleep.js';
 import { fetchJson } from '../utils/fetch-json.js';
-import { fetchWithDeadline } from '../utils/fetch-with-deadline.js';
+import { fetchWithDeadline, RequestTimeoutError } from '../utils/fetch-with-deadline.js';
 
 /**
  * Broadcast POSTs get a longer deadline than reads. A timed-out broadcast may
- * be retried by withRetry; re-sending the same signed tx is idempotent.
+ * be retried by withRetry; re-sending the same signed tx is harmless while it
+ * is unconfirmed, but a retry after it was mined is rejected with
+ * "already in block chain" (see isAmbiguousBroadcastError).
  */
 const BROADCAST_TIMEOUT_MS = 20000;
+
+/**
+ * Whether a broadcast error leaves the outcome unknown rather than failed:
+ * a timeout may have reached the node, and "already in block chain" means an
+ * earlier timed-out attempt of the same signed tx was mined.
+ */
+export function isAmbiguousBroadcastError(error: unknown): boolean {
+  if (error instanceof RequestTimeoutError) return true;
+  return error instanceof Error && error.message.includes('already in block chain');
+}
 
 export interface InsightApiResponse<T> {
   success: boolean;

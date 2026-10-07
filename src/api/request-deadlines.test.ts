@@ -5,7 +5,8 @@ vi.mock('./dapi-subscription.js', () => ({
   DAPISubscriptionClient: vi.fn().mockImplementation(() => ({})),
 }));
 
-import { InsightClient } from './insight.js';
+import { InsightClient, isAmbiguousBroadcastError } from './insight.js';
+import { RequestTimeoutError } from '../utils/fetch-with-deadline.js';
 import { DAPIClient } from './dapi.js';
 import { IslockService } from './islock.js';
 import { getFaucetStatus, requestTestnetFunds } from './faucet.js';
@@ -186,5 +187,20 @@ describe('per-request deadlines', () => {
     await expectation;
     await vi.runAllTimersAsync();
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+});
+
+describe('isAmbiguousBroadcastError', () => {
+  it('treats a timed-out or already-mined broadcast as unknown, not failed', () => {
+    expect(isAmbiguousBroadcastError(new RequestTimeoutError(20000))).toBe(true);
+    expect(
+      isAmbiguousBroadcastError(new Error('Broadcast failed: 400 - transaction already in block chain'))
+    ).toBe(true);
+  });
+
+  it('keeps definite rejections as failures', () => {
+    expect(isAmbiguousBroadcastError(new Error('Broadcast failed: 400 - 16: bad-txns-inputs-spent'))).toBe(false);
+    expect(isAmbiguousBroadcastError(new Error('API error: 500 Internal Server Error'))).toBe(false);
+    expect(isAmbiguousBroadcastError('nope')).toBe(false);
   });
 });
