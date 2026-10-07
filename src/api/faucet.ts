@@ -2,6 +2,8 @@
  * Faucet API client with CAP (proof-of-work) support
  */
 
+import { fetchWithDeadline, RequestTimeoutError } from '../utils/fetch-with-deadline.js';
+
 // Declare the global Cap class from @cap.js/widget
 declare const Cap: {
   new (options: { apiEndpoint: string }): {
@@ -28,29 +30,23 @@ export interface FaucetResponse {
 }
 
 /**
- * Create a fetch request with timeout support
+ * Fetch with one timeout covering both the response headers and the body
+ * read performed by `read`. Never retried automatically, so a timed-out
+ * faucet POST cannot be re-sent without the user asking again.
  */
-async function fetchWithTimeout(
+async function fetchWithTimeout<T>(
   url: string,
-  options: RequestInit = {},
+  options: RequestInit,
+  read: (response: Response) => Promise<T>,
   timeoutMs: number = REQUEST_TIMEOUT_MS
-): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
+): Promise<T> {
   try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-    return response;
+    return await fetchWithDeadline(url, options, timeoutMs, read);
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
+    if (error instanceof RequestTimeoutError) {
       throw new Error('Request timed out. Please try again.');
     }
     throw error;
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 
@@ -90,13 +86,13 @@ function extractErrorMessage(errorData: unknown, fallbackStatus: number): string
  * Fetch faucet status to check if CAP is required
  */
 export async function getFaucetStatus(baseUrl: string): Promise<FaucetStatus> {
-  const response = await fetchWithTimeout(`${baseUrl}/api/status`);
+  return fetchWithTimeout(`${baseUrl}/api/status`, {}, async (response) => {
+    if (!response.ok) {
+      throw new Error(`Failed to fetch faucet status: ${response.status}`);
+    }
 
-  if (!response.ok) {
-    throw new Error(`Failed to fetch faucet status: ${response.status}`);
-  }
-
-  return response.json();
+    return response.json();
+  });
 }
 
 /**
@@ -205,29 +201,44 @@ export async function requestTestnetFunds(
     body.capToken = capToken;
   }
 
-  const response = await fetchWithTimeout(`${baseUrl}/api/core-faucet`, {
+  const init: RequestInit = {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
-  });
+  };
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
+  // Once the faucet answers 2xx it has most likely sent funds, so a failed
+  // body read must not invite the user to request again.
+  let accepted = false;
+  try {
+    return await fetchWithTimeout(`${baseUrl}/api/core-faucet`, init, async (response) => {
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
 
-    if (response.status === 429) {
-      const data = errorData as Record<string, unknown>;
-      const retryAfter = typeof data.retryAfter === 'number' ? data.retryAfter : undefined;
-      if (retryAfter) {
-        const minutes = Math.ceil(retryAfter / 60);
-        throw new Error(`Rate limit exceeded. Try again in ${minutes} minute${minutes !== 1 ? 's' : ''}.`);
+        if (response.status === 429) {
+          const data = errorData as Record<string, unknown>;
+          const retryAfter = typeof data.retryAfter === 'number' ? data.retryAfter : undefined;
+          if (retryAfter) {
+            const minutes = Math.ceil(retryAfter / 60);
+            throw new Error(`Rate limit exceeded. Try again in ${minutes} minute${minutes !== 1 ? 's' : ''}.`);
+          }
+          throw new Error('Rate limit exceeded. Please try again later.');
+        }
+
+        throw new Error(extractErrorMessage(errorData, response.status));
       }
-      throw new Error('Rate limit exceeded. Please try again later.');
+
+      accepted = true;
+      return response.json();
+    });
+  } catch (error) {
+    if (accepted) {
+      throw new Error(
+        'The faucet accepted the request but its reply did not complete. Funds may already be on the way; wait for the deposit before requesting again.'
+      );
     }
-
-    throw new Error(extractErrorMessage(errorData, response.status));
+    throw error;
   }
-
-  return response.json();
 }

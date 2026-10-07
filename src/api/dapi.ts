@@ -2,9 +2,10 @@
  * Client for InstantSend lock retrieval via JSON-RPC API
  */
 
-import { withRetry, type RetryOptions } from '../utils/retry.js';
+import { withRetry, isRetryableError, type RetryOptions } from '../utils/retry.js';
 import { describeIslock } from '../utils/islock-debug.js';
 import { abortableSleep } from '../utils/sleep.js';
+import { fetchJson } from '../utils/fetch-json.js';
 
 const API_URLS: Record<string, string> = {
   testnet: 'https://trpc.digitalcash.dev',
@@ -80,29 +81,60 @@ export class DAPIClient {
     onRetry?: (attempt: number, maxAttempts: number, error: unknown) => void,
     signal?: AbortSignal
   ): Promise<Uint8Array> {
-    const startTime = Date.now();
     const pollInterval = 2000; // Poll every 2 seconds
 
-    while (Date.now() - startTime < timeoutMs) {
-      if (signal?.aborted) {
-        throw new Error(`InstantSend lock polling aborted for ${txid}`);
-      }
-      try {
-        const islock = await this.getIslock(txid, { onRetry });
-        if (islock) {
-          return islock;
+    // `stop` fires on the overall deadline or a caller abort. It cancels the
+    // in-flight request and the poll sleep, and `stopped` settles the wait at
+    // that moment (even mid-backoff inside withRetry), so a stalled RPC server
+    // cannot hold the wait past `timeoutMs` and keep the chain-lock fallback
+    // unreachable.
+    const stop = new AbortController();
+    const abort = () => stop.abort();
+    if (signal?.aborted) abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    const deadlineTimer = setTimeout(abort, timeoutMs);
+    const stopped = new Promise<never>((_, reject) => {
+      const fail = () =>
+        reject(
+          new Error(
+            signal?.aborted
+              ? `InstantSend lock polling aborted for ${txid}`
+              : `Timeout waiting for InstantSend lock for ${txid} after ${timeoutMs}ms`
+          )
+        );
+      if (stop.signal.aborted) fail();
+      else stop.signal.addEventListener('abort', fail, { once: true });
+    });
+    const retryOptions: RetryOptions = {
+      onRetry,
+      shouldRetry: (error) => !stop.signal.aborted && isRetryableError(error),
+    };
+
+    const poll = async (): Promise<Uint8Array> => {
+      while (!stop.signal.aborted) {
+        try {
+          const islock = await this.getIslock(txid, retryOptions, stop.signal);
+          if (islock) {
+            return islock;
+          }
+        } catch (error) {
+          if (!stop.signal.aborted) {
+            console.warn('Error polling for islock:', error);
+          }
         }
-      } catch (error) {
-        console.warn('Error polling for islock:', error);
+
+        // Wait before next poll, but bail out immediately on deadline/abort
+        await abortableSleep(pollInterval, stop.signal);
       }
+      return stopped;
+    };
 
-      // Wait before next poll, but bail out immediately if aborted
-      await abortableSleep(pollInterval, signal);
+    try {
+      return await Promise.race([poll(), stopped]);
+    } finally {
+      clearTimeout(deadlineTimer);
+      signal?.removeEventListener('abort', abort);
     }
-
-    throw new Error(
-      `Timeout waiting for InstantSend lock for ${txid} after ${timeoutMs}ms`
-    );
   }
 
   /**
@@ -120,17 +152,11 @@ export class DAPIClient {
         return null;
       }
 
-      const response = await fetch(baseUrl, {
+      const data: BestChainLockResponse = await fetchJson(baseUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ method: 'getbestchainlock', params: [] }),
       });
-
-      if (!response.ok) {
-        throw new Error(`RPC API error: ${response.status} ${response.statusText}`);
-      }
-
-      const data: BestChainLockResponse = await response.json();
       if (!data.result || typeof data.result.height !== 'number') {
         return null;
       }
@@ -141,14 +167,18 @@ export class DAPIClient {
   /**
    * Fetch islock from JSON-RPC API
    */
-  private async getIslock(txid: string, retryOptions?: RetryOptions): Promise<Uint8Array | null> {
+  private async getIslock(
+    txid: string,
+    retryOptions?: RetryOptions,
+    signal?: AbortSignal
+  ): Promise<Uint8Array | null> {
     return withRetry(async () => {
       const baseUrl = this.rpcUrl ?? API_URLS[this.network];
       if (!baseUrl) {
         throw new Error(`No RPC URL configured for network ${this.network}`);
       }
 
-      const response = await fetch(baseUrl, {
+      const data: IslockResponse = await fetchJson(baseUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -157,13 +187,8 @@ export class DAPIClient {
           method: 'getislocks',
           params: [[txid]],
         }),
+        signal,
       });
-
-      if (!response.ok) {
-        throw new Error(`RPC API error: ${response.status} ${response.statusText}`);
-      }
-
-      const data: IslockResponse = await response.json();
 
       // Check if we got a result
       if (data.result && data.result.length > 0) {
