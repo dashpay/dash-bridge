@@ -16,6 +16,29 @@ export interface InsightApiResponse<T> {
 }
 
 /**
+ * `/rawtx` returned 404. The address index can list a fresh deposit before
+ * `/rawtx` serves it (e.g. another backend node), so this is retried longer
+ * than other errors, and its message is what the user sees if it persists.
+ */
+class RawTxNotIndexedError extends Error {
+  constructor() {
+    super('The explorer has not indexed your deposit transaction yet. Wait a moment and use Check Again.');
+    this.name = 'RawTxNotIndexedError';
+  }
+}
+
+/**
+ * Retry schedule for `/rawtx`: 6 attempts with 1s, 2s, then 4s backoff
+ * (plus up to 50% jitter) gives roughly 15-22s for the explorer to catch up.
+ */
+const RAWTX_RETRY: RetryOptions = {
+  maxAttempts: 6,
+  baseDelayMs: 1000,
+  maxDelayMs: 4000,
+  shouldRetry: (error) => error instanceof RawTxNotIndexedError || isRetryableError(error),
+};
+
+/**
  * Insight API client for UTXO lookup and transaction broadcast
  */
 export class InsightClient {
@@ -58,6 +81,9 @@ export class InsightClient {
     const rawtx = await withRetry(async () => {
       const response = await fetch(`${this.baseUrl}/rawtx/${txid}`);
 
+      if (response.status === 404) {
+        throw new RawTxNotIndexedError();
+      }
       if (!response.ok) {
         throw new Error(`Insight API error: ${response.status} ${response.statusText}`);
       }
@@ -66,13 +92,7 @@ export class InsightClient {
         throw new Error('Insight returned a non-JSON raw transaction response');
       });
       return data?.rawtx;
-    }, {
-      // A just-seen deposit can be listed by the address index before /rawtx
-      // serves it (e.g. another backend node), so retry 404s briefly too.
-      shouldRetry: (error) =>
-        isRetryableError(error) || (error instanceof Error && error.message.includes(' 404')),
-      ...retryOptions,
-    });
+    }, { ...RAWTX_RETRY, ...retryOptions });
 
     if (typeof rawtx !== 'string' || !/^(?:[0-9a-f]{2})+$/i.test(rawtx)) {
       throw new UtxoAuthenticationError('Explorer returned a malformed raw transaction');

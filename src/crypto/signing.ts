@@ -6,7 +6,7 @@ import {
   MAX_ASSET_LOCK_FEE,
 } from '../transaction/builder.js';
 import { signatureHash, getScriptCodeFromUtxo, SIGHASH_ALL } from '../transaction/sighash.js';
-import type { UTXO } from '../types.js';
+import type { AuthenticatedUtxo, UTXO } from '../types.js';
 
 /**
  * Encode a big integer as a DER integer
@@ -120,7 +120,7 @@ export async function signTransactionInput(
  */
 export async function signTransaction(
   tx: AssetLockTransaction,
-  utxos: UTXO[],
+  utxos: AuthenticatedUtxo[],
   privateKey: Uint8Array,
   publicKey: Uint8Array
 ): Promise<AssetLockTransaction> {

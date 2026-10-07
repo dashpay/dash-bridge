@@ -105,6 +105,32 @@ describe('parseTransaction / txidOfRawTransaction on real testnet transactions',
     expect(parsed.outputs).toEqual(tx.vout);
   });
 
+  it('parses 253+ inputs and outputs across the 0xfd compact-size boundary', () => {
+    const count = 300;
+    const tx: AssetLockTransaction = {
+      version: 2,
+      txType: 0,
+      vin: Array.from({ length: count }, (_, i) => ({
+        prevout: { txid: new Uint8Array(32).fill(i & 0xff), n: i },
+        scriptSig: new Uint8Array([0x51]),
+        sequence: 0xffffffff,
+      })),
+      vout: Array.from({ length: count }, (_, i) => ({
+        value: BigInt(i + 1),
+        scriptPubKey: new Uint8Array(i).fill(0x61), // up to 299 bytes: 0xfd-prefixed scripts too
+      })),
+      lockTime: 0,
+      extraPayload: new Uint8Array(0),
+    };
+    const raw = serializeTransaction(tx);
+    expect(raw[4]).toBe(0xfd); // input count uses the 3-byte form
+
+    const parsed = parseTransaction(raw);
+    expect(parsed.inputCount).toBe(count);
+    expect(parsed.outputs).toEqual(tx.vout);
+    expect(txidOfRawTransaction(raw)).toBe(calculateTxId(tx));
+  });
+
   it('rejects truncated and trailing-byte input', () => {
     const raw = hexToBytes(FIXTURES.normal.hex);
     expect(() => parseTransaction(raw.slice(0, raw.length - 1))).toThrow(/truncated/);
@@ -219,13 +245,34 @@ describe('InsightClient.getAuthenticatedUtxo', () => {
     await expect(client.getAuthenticatedUtxo(reported, publicKey)).rejects.toThrow(/malformed raw transaction/);
   });
 
-  it('retries a 404 briefly, then surfaces it', async () => {
+  it('retries a 404 across the longer window, then explains it to the user', async () => {
     const fetchMock = stubRawTx('Not found', 404);
     const client = new InsightClient(TESTNET);
     await expect(
       client.getAuthenticatedUtxo(reported, publicKey, { baseDelayMs: 1, maxDelayMs: 1 })
-    ).rejects.toThrow(/404/);
+    ).rejects.toThrow('The explorer has not indexed your deposit transaction yet. Wait a moment and use Check Again.');
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it('returns once a 404 clears', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('Not found', { status: 404 }))
+      .mockResolvedValueOnce(new Response('Not found', { status: 404 }))
+      .mockResolvedValue(new Response(JSON.stringify({ rawtx: bytesToHex(raw) })));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new InsightClient(TESTNET);
+    await expect(
+      client.getAuthenticatedUtxo(reported, publicKey, { baseDelayMs: 1, maxDelayMs: 1 })
+    ).resolves.toEqual(reported);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry a non-retryable HTTP error', async () => {
+    const fetchMock = stubRawTx('Bad request', 400);
+    const client = new InsightClient(TESTNET);
+    await expect(client.getAuthenticatedUtxo(reported, publicKey)).rejects.toThrow(/400/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('does not retry an authentication failure', async () => {
