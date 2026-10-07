@@ -196,6 +196,7 @@ export interface ManageNewKeyConfig {
 
 export type BridgeStep =
   | 'init'
+  | 'mobile_app_recommended' // Mainnet: recommend the DashPay app before creating an identity here
   | 'configure_keys'
   | 'enter_identity'      // Top-up: user enters identity ID
   | 'generating_keys'
@@ -368,6 +369,8 @@ export interface BridgeState {
   retryStatus?: RetryStatus;
   /** Latest network-health snapshot for the header indicator */
   networkStatus?: NetworkStatus;
+  /** Mainnet: user acknowledged the browser is less secure than the DashPay app */
+  mobileAppRiskAcknowledged?: boolean;
   /** BIP39 mnemonic (12 words) for HD key derivation */
   mnemonic?: string;
   assetLockKeyPair?: KeyPair;

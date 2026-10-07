@@ -3,6 +3,8 @@ export {
   setStep,
   setKeyPairs,
   setMode,
+  setMobileAppRiskAcknowledged,
+  continueInBrowserFromMobileAppRecommendation,
   setTargetIdentityId,
   setOneTimeKeyPair,
   setTopUpComplete,
@@ -149,6 +151,11 @@ export {
   clearNearIntentsSwap,
   shouldRecheckAfterNearSwap,
 } from './state.js';
+
+export {
+  getCurrentMobilePlatform,
+  syncSmartAppBanner,
+} from './mobile-app.js';
 
 export { generateQRCodeDataUrl, createQRCodeElement, renderQRCodeToCanvas } from './qrcode.js';
 
