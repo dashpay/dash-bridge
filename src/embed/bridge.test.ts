@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { resolveEmbed, toProgressStep, EmbedSession, EXPIRED_NOTICE } from './bridge.js';
+import { resolveEmbed, toProgressStep, canCancel, EmbedSession, EXPIRED_NOTICE } from './bridge.js';
 import { createInitialState, setMode, setIdentityRegistered, setError, setStep } from '../ui/state.js';
 import type { BridgeState } from '../types.js';
 import { parseLoginFragment, type LoginResult } from './login.js';
@@ -54,6 +54,20 @@ describe('toProgressStep', () => {
     expect(toProgressStep('registering_identity')).toBe('registering');
     expect(toProgressStep('complete')).toBe('complete');
     expect(toProgressStep('dpns_enter_usernames')).toBeUndefined();
+  });
+});
+
+describe('canCancel', () => {
+  it('allows cancelling before registration', () => {
+    expect(canCancel({ step: 'awaiting_deposit' })).toBe(true);
+    expect(canCancel({ step: 'error', errorStep: 'detecting_deposit' })).toBe(true);
+  });
+
+  it('refuses once the identity may be on its way to Platform', () => {
+    expect(canCancel({ step: 'registering_identity' })).toBe(false);
+    expect(canCancel({ step: 'complete' })).toBe(false);
+    expect(canCancel({ step: 'error', errorStep: 'registering_identity' })).toBe(false);
+    expect(canCancel({ step: 'error', unconfirmedIdentityId: 'abc' })).toBe(false);
   });
 });
 

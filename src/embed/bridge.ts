@@ -48,8 +48,13 @@ const NON_CANCELLABLE_STEPS: readonly BridgeStep[] = [
   'login_cancelled',
 ];
 
-export function canCancel(step: BridgeStep): boolean {
-  return !NON_CANCELLABLE_STEPS.includes(step);
+/**
+ * A registration that was submitted but not confirmed may still land, so its
+ * error screen (Retry Registration) can't be cancelled either.
+ */
+export function canCancel(state: Pick<BridgeState, 'step' | 'unconfirmedIdentityId' | 'errorStep'>): boolean {
+  if (NON_CANCELLABLE_STEPS.includes(state.step)) return false;
+  return !state.unconfirmedIdentityId && state.errorStep !== 'registering_identity';
 }
 
 /** Map internal UI steps of the create flow to the coarse public progress steps. */
@@ -323,7 +328,7 @@ export class EmbedSession {
    * Returns false if nothing was cancelled.
    */
   cancel(state: BridgeState, confirm: (message: string) => boolean = (m) => this.win.confirm(m)): boolean {
-    if (this.finished || !canCancel(state.step)) return false;
+    if (this.finished || !canCancel(state)) return false;
     if (state.assetLockKeyPair && !confirm(CANCEL_AFTER_DEPOSIT_PROMPT)) return false;
     if (this.params.kind === 'redirect') {
       if (!this.redirectBack({ error: 'cancelled' })) return false;
