@@ -22,6 +22,10 @@ import {
   setStep,
   setKeyPairs,
   setMode,
+  setMobileAppRiskAcknowledged,
+  continueInBrowserFromMobileAppRecommendation,
+  getCurrentMobilePlatform,
+  syncSmartAppBanner,
   setTargetIdentityId,
   setOneTimeKeyPair,
   setTopUpComplete,
@@ -320,6 +324,7 @@ function switchNetwork(network: string): void {
     islockService.disconnect().catch((err) => console.warn('Error disconnecting IslockService:', err));
   }
   updateState(setNetwork(state, network));
+  syncSmartAppBanner(document, network);
   clientInitPromise = undefined;
   warmupScheduled = false;
   warmupStarted = false;
@@ -540,6 +545,7 @@ function init() {
 
   // Initialize state
   state = createInitialState(network);
+  syncSmartAppBanner(document, network);
 
   // Deep-link: ?address=<bech32m> opens send-to-address mode with address pre-filled
   if (addressParam && validatePlatformAddress(addressParam, network)) {
@@ -602,6 +608,7 @@ async function parseAndEstimateContract(json: unknown) {
  * Update state and re-render
  */
 function updateState(newState: BridgeState) {
+  const previousStep = state?.step;
   state = newState;
   const container = document.getElementById('app');
   if (container) {
@@ -644,6 +651,15 @@ function updateState(newState: BridgeState) {
         ) {
           elementToFocus.setSelectionRange(focusInfo.selectionStart, focusInfo.selectionEnd);
         }
+      }
+    }
+
+    // On a phone, land on the store button when the DashPay recommendation first appears.
+    if (state.step === 'mobile_app_recommended' && previousStep !== 'mobile_app_recommended') {
+      window.scrollTo(0, 0);
+      if (getCurrentMobilePlatform() !== 'desktop') {
+        // preventScroll keeps the "more secure" explanation in view on short screens.
+        document.getElementById('mobile-app-primary-cta')?.focus({ preventScroll: true });
       }
     }
   }
@@ -700,6 +716,21 @@ function setupEventListeners(container: HTMLElement) {
   if (modeCreateBtn) {
     modeCreateBtn.addEventListener('click', () => {
       updateState(setMode(state, 'create'));
+    });
+  }
+
+  // Mainnet DashPay app recommendation: risk acknowledgement + continue in browser
+  const mobileAppAckCheckbox = container.querySelector('#mobile-app-ack-checkbox') as HTMLInputElement | null;
+  if (mobileAppAckCheckbox) {
+    mobileAppAckCheckbox.addEventListener('change', () => {
+      updateState(setMobileAppRiskAcknowledged(state, mobileAppAckCheckbox.checked));
+    });
+  }
+
+  const mobileAppContinueBtn = container.querySelector('#mobile-app-continue-browser-btn');
+  if (mobileAppContinueBtn) {
+    mobileAppContinueBtn.addEventListener('click', () => {
+      updateState(continueInBrowserFromMobileAppRecommendation(state));
     });
   }
 
