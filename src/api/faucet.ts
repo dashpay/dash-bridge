@@ -14,6 +14,8 @@ let capWidgetPromise: Promise<void> | null = null;
 /** Default timeout for faucet API requests (30 seconds) */
 const REQUEST_TIMEOUT_MS = 30000;
 const CAP_WIDGET_SRC = 'https://cdn.jsdelivr.net/npm/@cap.js/widget@0.1.54';
+/** A Dash transaction ID: 32 bytes as hex. */
+const TXID_PATTERN = /^[0-9a-f]{64}$/i;
 
 export interface FaucetStatus {
   status: string;
@@ -229,5 +231,11 @@ export async function requestTestnetFunds(
     throw new Error(extractErrorMessage(errorData, response.status));
   }
 
-  return response.json();
+  const data = (await response.json()) as Record<string, unknown> | null;
+  // The txid is rendered into the page, so only accept a real 32-byte hex txid.
+  if (!data || typeof data.txid !== 'string' || !TXID_PATTERN.test(data.txid)) {
+    throw new Error('Faucet returned an invalid transaction ID');
+  }
+
+  return data as unknown as FaucetResponse;
 }

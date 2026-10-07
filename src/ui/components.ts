@@ -76,8 +76,8 @@ function renderNetworkStatusBanner(state: BridgeState): HTMLElement | null {
  * Build a Platform Explorer URL for a given entity.
  */
 function explorerUrl(network: string, type: 'identity' | 'dataContract', id: string): string | undefined {
-  if (network === 'mainnet') return `https://platform-explorer.com/${type}/${id}`;
-  if (network === 'testnet') return `https://testnet.platform-explorer.com/${type}/${id}`;
+  if (network === 'mainnet') return `https://platform-explorer.com/${type}/${encodeURIComponent(id)}`;
+  if (network === 'testnet') return `https://testnet.platform-explorer.com/${type}/${encodeURIComponent(id)}`;
   return undefined;
 }
 
@@ -99,7 +99,7 @@ function renderIdSection(
       <code class="identity-id">${escapeHtml(id)}</code>
       <button id="${copyId}" class="tertiary-btn copy-btn" title="Copy">Copy</button>
     </div>
-    ${options?.explorerHref ? `<a href="${options.explorerHref}" target="_blank" rel="noopener" class="explorer-link">View on Platform Explorer &rarr;</a>` : ''}
+    ${options?.explorerHref ? `<a href="${escapeAttr(options.explorerHref)}" target="_blank" rel="noopener" class="explorer-link">View on Platform Explorer &rarr;</a>` : ''}
   `;
   // Wire copy on next tick (after DOM attach)
   setTimeout(() => {
@@ -478,7 +478,7 @@ function renderConfigureKeysStep(state: BridgeState): HTMLElement {
 
     const allowedSecurityLevels = getAllowedSecurityLevels(key.purpose, true);
     keyRow.innerHTML = `
-      <div class="key-name">${key.name}</div>
+      <div class="key-name">${escapeHtml(key.name)}</div>
       <div class="key-config">
         <select class="key-type-select" data-key-id="${key.id}">
           ${KEY_TYPES.map((t) => `<option value="${t}" ${t === key.keyType ? 'selected' : ''}>${t.replace('ECDSA_', '')}</option>`).join('')}
@@ -542,7 +542,7 @@ function renderEnterIdentityStep(state: BridgeState): HTMLElement {
       id="identity-id-input"
       class="identity-id-input"
       placeholder="Paste your identity ID here..."
-      value="${state.targetIdentityId || ''}"
+      value="${escapeAttr(state.targetIdentityId || '')}"
     />
     <p class="input-hint">The 44-character Base58 identifier for your existing identity</p>
   `;
@@ -663,7 +663,7 @@ function renderDepositStep(state: BridgeState): HTMLElement {
     const truncatedId = state.targetIdentityId.length > 12
       ? `${state.targetIdentityId.slice(0, 8)}...${state.targetIdentityId.slice(-4)}`
       : state.targetIdentityId;
-    headline.innerHTML = `Top up <code class="inline-id">${truncatedId}</code>`;
+    headline.innerHTML = `Top up <code class="inline-id">${escapeHtml(truncatedId)}</code>`;
   } else {
     const minDash = state.minimumDeposit
       ? (state.minimumDeposit / 100_000_000).toFixed(4)
@@ -707,7 +707,7 @@ function renderDepositStep(state: BridgeState): HTMLElement {
         <div class="faucet-success">
           <span class="faucet-checkmark">&#10003;</span>
           <span>1 tDASH sent!</span>
-          <code class="faucet-txid" title="${state.faucetTxid}">${truncatedTxid}</code>
+          <code class="faucet-txid" title="${escapeAttr(state.faucetTxid)}">${escapeHtml(truncatedTxid)}</code>
         </div>
       `;
     } else if (faucetStatus === 'solving_pow') {
@@ -807,7 +807,7 @@ function renderDepositStep(state: BridgeState): HTMLElement {
     const mnemonicWords = document.createElement('div');
     mnemonicWords.className = 'mnemonic-words';
     mnemonicWords.innerHTML = words.map((word, i) =>
-      `<span class="mnemonic-word"><span class="word-num">${i + 1}.</span> ${word}</span>`
+      `<span class="mnemonic-word"><span class="word-num">${i + 1}.</span> ${escapeHtml(word)}</span>`
     ).join('');
     mnemonicSection.appendChild(mnemonicWords);
 
@@ -832,8 +832,8 @@ function renderDepositStep(state: BridgeState): HTMLElement {
   const addressDisplay = document.createElement('div');
   addressDisplay.className = 'address-display';
   addressDisplay.innerHTML = `
-    <code class="address">${address}</code>
-    <button class="copy-btn" data-copy="${address}">Copy</button>
+    <code class="address">${escapeHtml(address)}</code>
+    <button class="copy-btn" data-copy="${escapeAttr(address)}">Copy</button>
   `;
   addressSection.appendChild(addressDisplay);
 
@@ -987,7 +987,7 @@ function renderProcessingStep(state: BridgeState): HTMLElement {
     txRow.className = 'detail-row';
     txRow.innerHTML = `
       <label>Transaction ID</label>
-      <code class="txid">${state.txid}</code>
+      <code class="txid">${escapeHtml(state.txid)}</code>
     `;
     detailsCard.appendChild(txRow);
   }
@@ -1464,7 +1464,7 @@ function renderDpnsEnterIdentityStep(state: BridgeState): HTMLElement {
         id="dpns-identity-id-input"
         class="dpns-input"
         placeholder="Your 44-character identity ID..."
-        value="${state.targetIdentityId || ''}"
+        value="${escapeAttr(state.targetIdentityId || '')}"
         ${isFetching ? 'disabled' : ''}
       />
       <p class="input-hint">The Base58 identifier for your identity</p>
@@ -1478,7 +1478,7 @@ function renderDpnsEnterIdentityStep(state: BridgeState): HTMLElement {
         id="dpns-private-key-input"
         class="dpns-input"
         placeholder="Your private key in WIF format..."
-        value="${state.dpnsPrivateKeyWif || ''}"
+        value="${escapeAttr(state.dpnsPrivateKeyWif || '')}"
       />
       <p class="input-hint">An AUTHENTICATION key with CRITICAL or HIGH security level</p>
       ${keyValidationHtml}
@@ -1686,7 +1686,7 @@ function renderDpnsReviewStep(state: BridgeState): HTMLElement {
 
     const name = document.createElement('div');
     name.className = 'dpns-result-name';
-    name.innerHTML = `<code>${entry.label}.dash</code>`;
+    name.innerHTML = `<code>${escapeHtml(entry.label)}.dash</code>`;
     row.appendChild(name);
 
     const status = document.createElement('div');
@@ -1794,7 +1794,7 @@ function renderDpnsRegisteringStep(state: BridgeState): HTMLElement {
   const currentName = document.createElement('p');
   currentName.className = 'dpns-current-name';
   if (progress < available.length) {
-    currentName.innerHTML = `<code>${available[progress]?.label}.dash</code>`;
+    currentName.innerHTML = `<code>${escapeHtml(available[progress]?.label ?? '')}.dash</code>`;
   }
   div.appendChild(currentName);
 
@@ -1825,7 +1825,7 @@ function renderDpnsCompleteStep(state: BridgeState): HTMLElement {
 
     const name = document.createElement('div');
     name.className = 'dpns-complete-name';
-    name.innerHTML = `<code>${result.label}.dash</code>`;
+    name.innerHTML = `<code>${escapeHtml(result.label)}.dash</code>`;
     row.appendChild(name);
 
     const status = document.createElement('div');
@@ -1839,7 +1839,7 @@ function renderDpnsCompleteStep(state: BridgeState): HTMLElement {
         status.className += ' registered';
       }
     } else {
-      status.innerHTML = `<span class="status-icon">&#10007;</span> Failed: ${result.error || 'Unknown error'}`;
+      status.innerHTML = `<span class="status-icon">&#10007;</span> Failed: ${escapeHtml(result.error || 'Unknown error')}`;
       status.className += ' failed';
     }
     row.appendChild(status);
@@ -1962,7 +1962,7 @@ function renderManageEnterIdentityStep(state: BridgeState): HTMLElement {
         id="manage-identity-id-input"
         class="manage-input"
         placeholder="Your 44-character identity ID..."
-        value="${state.targetIdentityId || ''}"
+        value="${escapeAttr(state.targetIdentityId || '')}"
         ${isFetching ? 'disabled' : ''}
       />
       <p class="input-hint">The Base58 identifier for your identity</p>
@@ -1976,7 +1976,7 @@ function renderManageEnterIdentityStep(state: BridgeState): HTMLElement {
         id="manage-private-key-input"
         class="manage-input"
         placeholder="Your private key in WIF format..."
-        value="${state.managePrivateKeyWif || ''}"
+        value="${escapeAttr(state.managePrivateKeyWif || '')}"
       />
       <p class="input-hint">Only MASTER level keys can modify identity keys</p>
       ${keyValidationHtml}
@@ -2039,7 +2039,7 @@ function renderManageViewKeysStep(state: BridgeState): HTMLElement {
     const errorDiv = document.createElement('div');
     errorDiv.className = 'manage-error';
     errorDiv.innerHTML = `
-      <p class="error-message">${state.manageIdentityFetchError}</p>
+      <p class="error-message">${escapeHtml(state.manageIdentityFetchError)}</p>
       <button id="manage-back-btn" class="secondary-btn">Go Back</button>
     `;
     div.appendChild(errorDiv);
@@ -2127,22 +2127,22 @@ function renderManageViewKeysStep(state: BridgeState): HTMLElement {
     const allowedSecurityLevels = getAllowedSecurityLevels(key.purpose, false);
     row.innerHTML = `
       <div class="add-key-config">
-        <select class="manage-key-type-select" data-temp-id="${key.tempId}">
+        <select class="manage-key-type-select" data-temp-id="${escapeAttr(key.tempId)}">
           ${KEY_TYPES.map((t) => `<option value="${t}" ${t === key.keyType ? 'selected' : ''}>${t.replace('ECDSA_', '')}</option>`).join('')}
         </select>
-        <select class="manage-key-purpose-select" data-temp-id="${key.tempId}">
+        <select class="manage-key-purpose-select" data-temp-id="${escapeAttr(key.tempId)}">
           ${KEY_PURPOSES.map((p) => `<option value="${p}" ${p === key.purpose ? 'selected' : ''}>${p}</option>`).join('')}
         </select>
-        <select class="manage-key-security-select" data-temp-id="${key.tempId}">
+        <select class="manage-key-security-select" data-temp-id="${escapeAttr(key.tempId)}">
           ${allowedSecurityLevels.map((s) => `<option value="${s}" ${s === key.securityLevel ? 'selected' : ''}>${s}</option>`).join('')}
         </select>
-        <button class="remove-manage-new-key-btn" data-temp-id="${key.tempId}">&times;</button>
+        <button class="remove-manage-new-key-btn" data-temp-id="${escapeAttr(key.tempId)}">&times;</button>
       </div>
       ${key.source === 'generate' && key.generatedKey ? `
         <div class="add-key-backup">
           <p class="backup-warning">Save this private key (WIF):</p>
-          <code class="key-wif">${key.generatedKey.privateKeyWif}</code>
-          <button class="copy-btn small" data-copy="${key.generatedKey.privateKeyWif}">Copy</button>
+          <code class="key-wif">${escapeHtml(key.generatedKey.privateKeyWif)}</code>
+          <button class="copy-btn small" data-copy="${escapeAttr(key.generatedKey.privateKeyWif)}">Copy</button>
         </div>
       ` : ''}
     `;
@@ -3271,7 +3271,7 @@ function renderContractEnterIdentityStep(state: BridgeState): HTMLElement {
         id="contract-identity-id-input"
         class="dpns-input"
         placeholder="Your 44-character identity ID..."
-        value="${state.targetIdentityId || ''}"
+        value="${escapeAttr(state.targetIdentityId || '')}"
         ${isFetching ? 'disabled' : ''}
       />
       <p class="input-hint">The Base58 identifier for your identity</p>
@@ -3285,7 +3285,7 @@ function renderContractEnterIdentityStep(state: BridgeState): HTMLElement {
         id="contract-private-key-input"
         class="dpns-input"
         placeholder="Your private key in WIF format..."
-        value="${state.contractPrivateKeyWif || ''}"
+        value="${escapeAttr(state.contractPrivateKeyWif || '')}"
       />
       <p class="input-hint">An AUTHENTICATION key with CRITICAL or HIGH security level</p>
       ${keyValidationHtml}
