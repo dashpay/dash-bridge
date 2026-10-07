@@ -1,11 +1,10 @@
 import * as secp256k1 from '@noble/secp256k1';
-import { concatBytes } from '../utils/hex.js';
+import { bytesToHex, concatBytes, reverseBytes } from '../utils/hex.js';
 import {
   type AssetLockTransaction,
   implicitFee,
   MAX_ASSET_LOCK_FEE,
 } from '../transaction/builder.js';
-import { bytesToHex, reverseBytes } from '../utils/hex.js';
 import { signatureHash, getScriptCodeFromUtxo, SIGHASH_ALL } from '../transaction/sighash.js';
 import type { UTXO } from '../types.js';
 

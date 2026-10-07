@@ -1,5 +1,6 @@
 import { concatBytes, hexToBytes, reverseBytes } from '../utils/hex.js';
-import { hash160, hash256 } from '../crypto/hash.js';
+import { hash160 } from '../crypto/hash.js';
+import { txidOfRawTransaction } from './parse.js';
 import {
   serCompactSize,
   serString,
@@ -75,11 +76,7 @@ export function serializeTransaction(tx: AssetLockTransaction): Uint8Array {
  * Calculate transaction ID (reversed hash256 of serialized tx)
  */
 export function calculateTxId(tx: AssetLockTransaction): string {
-  const serialized = serializeTransaction(tx);
-  const hash = hash256(serialized);
-  return Array.from(reverseBytes(hash))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
+  return txidOfRawTransaction(serializeTransaction(tx));
 }
 
 /**

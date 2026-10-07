@@ -1,6 +1,6 @@
 import { bytesToHex } from '../utils/hex.js';
 import { hash160 } from '../crypto/hash.js';
-import { createP2PKHScript } from './structures.js';
+import { type CTxOut, createP2PKHScript } from './structures.js';
 import { parseTransaction, txidOfRawTransaction } from './parse.js';
 import type { AuthenticatedUtxo, UTXO } from '../types.js';
 
@@ -56,7 +56,7 @@ export function authenticateUtxo(
     );
   }
 
-  let outputs;
+  let outputs: CTxOut[];
   try {
     outputs = parseTransaction(rawTx).outputs;
   } catch (error) {
