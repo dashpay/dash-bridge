@@ -8,8 +8,13 @@
     // tag while the page loads, so it is added here, before the app bundle runs.
     // Mirrors shouldRecommendMobileApp / syncSmartAppBanner in src/ui/mobile-app.ts.
     (function () {
+      // A valid ?address= overrides ?network= in init(), and that can't be
+      // validated here, so only trust an explicit ?network=mainnet that no
+      // testnet address contradicts. Missing the banner is harmless; showing
+      // it on testnet is not.
       var params = new URLSearchParams(location.search);
-      var isMainnet = params.get('network') === 'mainnet' || /^dash1/i.test(params.get('address') || '');
+      var address = (params.get('address') || '').trim();
+      var isMainnet = params.get('network') === 'mainnet' && !/^tdash1/i.test(address);
       if (!isMainnet) return;
       var meta = document.createElement('meta');
       meta.name = 'apple-itunes-app';
