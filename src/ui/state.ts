@@ -682,8 +682,32 @@ export function setDepositTimedOut(
 ): BridgeState {
   return {
     ...state,
+    // The faucet quick-check may have advanced the display step; a timeout
+    // must land back on the deposit screen so Check Again is visible.
+    ...(timedOut ? { step: 'detecting_deposit' as const } : {}),
     depositTimedOut: timedOut,
     detectedDepositAmount: detectedAmount,
+    depositVerificationError: undefined,
+  };
+}
+
+/**
+ * A deposit was detected but could not be authenticated against its raw
+ * transaction. Nothing was signed, so return to the deposit step (keys kept)
+ * and offer the recheck button with the reason.
+ */
+export function setDepositVerificationFailed(
+  state: BridgeState,
+  message: string
+): BridgeState {
+  return {
+    ...state,
+    step: 'detecting_deposit',
+    detectedUtxo: undefined,
+    depositAmount: undefined,
+    depositTimedOut: true,
+    detectedDepositAmount: undefined,
+    depositVerificationError: message,
   };
 }
 

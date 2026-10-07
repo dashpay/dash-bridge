@@ -9,7 +9,7 @@ import {
 import { extractErrorMessage } from './utils/errors.js';
 import { deriveAssetLockKeyPair } from './crypto/hd.js';
 import { createAssetLockTransaction, serializeTransaction, calculateTxId } from './transaction/index.js';
-import { InsightClient } from './api/insight.js';
+import { InsightClient, isAmbiguousBroadcastError } from './api/insight.js';
 import type { IslockService } from './api/islock.js';
 import { fetchNetworkStatus } from './api/network-status.js';
 import { DAPIClient } from './api/dapi.js';
@@ -39,6 +39,7 @@ import {
   toError,
   ErrorCodes,
   setDepositTimedOut,
+  setDepositVerificationFailed,
   setNetwork,
   setNetworkStatus,
   updateIdentityKey,
@@ -193,6 +194,7 @@ import type {
   KeyPurpose,
   SecurityLevel,
   UTXO,
+  AuthenticatedUtxo,
   ManageNewKeyConfig,
   DpnsUsernameEntry,
   DpnsRegistrationResult,
@@ -2345,8 +2347,48 @@ function showValidationError(message: string): void {
 }
 
 /**
+ * Authenticate a detected deposit before anything is built or signed: its
+ * value and script are re-derived from the raw previous transaction (see
+ * InsightClient.getAuthenticatedUtxo). On failure nothing has been signed, so
+ * return to the deposit step with a recheck prompt (keys stay in state) and
+ * resolve null; the caller must stop.
+ */
+async function authenticateDeposit(
+  utxo: UTXO,
+  depositPublicKey: Uint8Array
+): Promise<AuthenticatedUtxo | null> {
+  try {
+    return await insightClient.getAuthenticatedUtxo(utxo, depositPublicKey);
+  } catch (error) {
+    console.error('Deposit verification failed:', error);
+    updateState(setDepositVerificationFailed(state, toError(error).message));
+    return null;
+  }
+}
+
+/**
  * Start the top-up process
  */
+/**
+ * Broadcast a signed asset lock transaction.
+ *
+ * A broadcast that timed out may still have reached the node, so it is not a
+ * failure: continue with the locally computed txid and let the IS lock wait
+ * (and its chain-lock fallback, which needs `state.txid`) settle the outcome.
+ * Definite rejections still throw.
+ */
+async function broadcastAssetLock(signedTxHex: string, txid: string): Promise<void> {
+  try {
+    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
+    if (broadcastedTxid !== txid) {
+      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
+    }
+  } catch (error) {
+    if (!isAmbiguousBroadcastError(error)) throw error;
+    console.warn(`Broadcast outcome unknown for ${txid}; waiting for its lock instead:`, error);
+  }
+}
+
 async function startTopUp() {
   try {
     if (isE2EMockMode()) {
@@ -2412,7 +2454,8 @@ async function startTopUp() {
       return;
     }
 
-    const utxo = depositResult.utxo;
+    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
+    if (!utxo) return;
 
     updateState(setUtxoDetected(state, utxo));
 
@@ -2453,10 +2496,7 @@ async function startTopUp() {
     );
 
     // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
+    await broadcastAssetLock(signedTxHex, txid);
 
     updateState(setTransactionBroadcast(state, txid));
 
@@ -2536,7 +2576,8 @@ async function startSendToAddress() {
       return;
     }
 
-    const utxo = depositResult.utxo;
+    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
+    if (!utxo) return;
     updateState(setUtxoDetected(state, utxo));
 
     // Step 3: Build transaction
@@ -2573,10 +2614,7 @@ async function startSendToAddress() {
     );
 
     // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
+    await broadcastAssetLock(signedTxHex, txid);
     updateState(setTransactionBroadcast(state, txid));
 
     const islockBytes = await islockSub.wait();
@@ -2710,7 +2748,8 @@ async function startBridge() {
       return;
     }
 
-    const utxo = depositResult.utxo;
+    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
+    if (!utxo) return;
 
     updateState(setUtxoDetected(state, utxo));
 
@@ -2749,10 +2788,7 @@ async function startBridge() {
     );
 
     // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
+    await broadcastAssetLock(signedTxHex, txid);
     updateState(setTransactionBroadcast(state, txid));
 
     console.log('Waiting for InstantSend lock...');
@@ -2830,12 +2866,13 @@ async function recheckDeposit() {
     return;
   }
 
-  const utxo = depositResult.utxo;
-
   // Continue with the rest of the bridge process
   try {
     const network = getNetwork(state.network);
     const assetLockKeyPair = state.assetLockKeyPair!;
+
+    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
+    if (!utxo) return;
 
     updateState(setUtxoDetected(state, utxo));
 
@@ -2874,10 +2911,7 @@ async function recheckDeposit() {
     );
 
     // Step 6: Broadcast transaction
-    const broadcastedTxid = await insightClient.broadcastTransaction(signedTxHex);
-    if (broadcastedTxid !== txid) {
-      console.warn(`Broadcast txid ${broadcastedTxid} differs from local ${txid}`);
-    }
+    await broadcastAssetLock(signedTxHex, txid);
     updateState(setTransactionBroadcast(state, txid));
 
     console.log('Waiting for InstantSend lock...');
@@ -4063,7 +4097,10 @@ async function requestFaucetFunds() {
         const utxos = await insightClient.getUTXOs(addressToCheck);
         const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
         const sufficientUtxo = utxos.find(u => u.satoshis >= minAmount);
-        if (sufficientUtxo && state.step === 'detecting_deposit') {
+        // Display-only progress hint: the polling flow authenticates the
+        // deposit before signing. Skip it while the recheck prompt is up,
+        // since no flow is running to move past 'building_transaction'.
+        if (sufficientUtxo && state.step === 'detecting_deposit' && !state.depositTimedOut) {
           updateState(setUtxoDetected(state, sufficientUtxo));
         }
       } catch {

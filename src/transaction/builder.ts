@@ -1,5 +1,6 @@
 import { concatBytes, hexToBytes, reverseBytes } from '../utils/hex.js';
-import { hash160, hash256 } from '../crypto/hash.js';
+import { hash160 } from '../crypto/hash.js';
+import { txidOfRawTransaction } from './parse.js';
 import {
   serCompactSize,
   serString,
@@ -17,10 +18,17 @@ import {
   createP2PKHScript,
   createOpReturnScript,
 } from './structures.js';
-import type { UTXO } from '../types.js';
+import type { AuthenticatedUtxo, UTXO } from '../types.js';
 
 const TX_VERSION = 3;
 const TX_TYPE_ASSET_LOCK = 8;
+
+/**
+ * Hard ceiling on the implicit fee (inputs minus outputs) of any asset lock
+ * we build or sign. The configured fee is 1000 duffs; anything above this
+ * means a bug or a misreported input value, never a legitimate fee.
+ */
+export const MAX_ASSET_LOCK_FEE = 10_000n;
 
 export interface AssetLockTransaction {
   version: number;
@@ -68,21 +76,24 @@ export function serializeTransaction(tx: AssetLockTransaction): Uint8Array {
  * Calculate transaction ID (reversed hash256 of serialized tx)
  */
 export function calculateTxId(tx: AssetLockTransaction): string {
-  const serialized = serializeTransaction(tx);
-  const hash = hash256(serialized);
-  return Array.from(reverseBytes(hash))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
+  return txidOfRawTransaction(serializeTransaction(tx));
 }
 
 /**
  * Create an unsigned asset lock transaction
  */
 export function createAssetLockTransaction(
-  utxo: UTXO,
+  utxo: AuthenticatedUtxo,
   assetLockPubKey: Uint8Array,
   fee: bigint = 1000n
 ): AssetLockTransaction {
+  if (fee <= 0n || fee > MAX_ASSET_LOCK_FEE) {
+    throw new Error(`Asset lock fee ${fee} is outside (0, ${MAX_ASSET_LOCK_FEE}] duffs`);
+  }
+  if (!Number.isSafeInteger(utxo.satoshis) || utxo.satoshis <= 0) {
+    throw new Error('Invalid UTXO amount for asset lock');
+  }
+
   // Calculate values
   const utxoAmount = BigInt(utxo.satoshis);
   const lockAmount = utxoAmount - fee;
@@ -126,7 +137,7 @@ export function createAssetLockTransaction(
     creditOutputs: [creditOutput],
   };
 
-  return {
+  const tx: AssetLockTransaction = {
     version: TX_VERSION,
     txType: TX_TYPE_ASSET_LOCK,
     vin,
@@ -134,6 +145,22 @@ export function createAssetLockTransaction(
     lockTime: 0,
     extraPayload: serializeAssetLockPayload(payload),
   };
+
+  const actualFee = implicitFee(tx, [utxo]);
+  if (actualFee !== fee) {
+    throw new Error(`Asset lock fee mismatch: built ${actualFee}, expected ${fee} duffs`);
+  }
+
+  return tx;
+}
+
+/**
+ * Implicit fee of a transaction: the spent UTXOs' values minus its outputs.
+ */
+export function implicitFee(tx: AssetLockTransaction, utxos: UTXO[]): bigint {
+  const inputs = utxos.reduce((sum, u) => sum + BigInt(u.satoshis), 0n);
+  const outputs = tx.vout.reduce((sum, o) => sum + o.value, 0n);
+  return inputs - outputs;
 }
 
 /**

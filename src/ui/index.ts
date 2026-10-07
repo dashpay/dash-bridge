@@ -22,6 +22,7 @@ export {
   ErrorCodes,
   ErrorCodeLabels,
   setDepositTimedOut,
+  setDepositVerificationFailed,
   setNetwork,
   setNetworkStatus,
   getStepDescription,

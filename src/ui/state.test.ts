@@ -7,6 +7,8 @@ import {
   setError,
   setIdentityRegistered,
   isChainlockFallbackCancelled,
+  setDepositTimedOut,
+  setDepositVerificationFailed,
   setMode,
   setWithdrawIdentityFetching,
   setWithdrawIdentityFetched,
@@ -284,5 +286,35 @@ describe('withdraw mode state transitions', () => {
     const goodAddress = setWithdrawAddress(badAddress, 'yGoodAddr');
     expect(goodAddress.withdrawToAddress).toBe('yGoodAddr');
     expect(goodAddress.withdrawAddressError).toBeUndefined();
+  });
+});
+
+describe('deposit verification failure', () => {
+  it('returns to the deposit step with a recheck prompt and keeps keys', () => {
+    const keyPair = { privateKey: new Uint8Array(32).fill(1), publicKey: new Uint8Array(33).fill(2) };
+    const state: BridgeState = {
+      ...baseState(),
+      step: 'building_transaction',
+      assetLockKeyPair: keyPair,
+      depositAddress: 'yAddr',
+      detectedUtxo: { txid: 'a'.repeat(64), vout: 0, satoshis: 1, scriptPubKey: '', confirmations: 0 },
+      depositAmount: 1n,
+    };
+    const failed = setDepositVerificationFailed(state, 'explorer disagrees');
+    expect(failed.step).toBe('detecting_deposit');
+    expect(failed.depositTimedOut).toBe(true);
+    expect(failed.depositVerificationError).toBe('explorer disagrees');
+    expect(failed.detectedUtxo).toBeUndefined();
+    expect(failed.depositAmount).toBeUndefined();
+    expect(failed.assetLockKeyPair).toBe(keyPair);
+    expect(failed.depositAddress).toBe('yAddr');
+
+    // Starting a recheck clears the message
+    expect(setDepositTimedOut(failed, false, 0).depositVerificationError).toBeUndefined();
+  });
+
+  it('a deposit timeout always lands on the deposit step', () => {
+    const state: BridgeState = { ...baseState(), step: 'building_transaction' };
+    expect(setDepositTimedOut(state, true, 5).step).toBe('detecting_deposit');
   });
 });
