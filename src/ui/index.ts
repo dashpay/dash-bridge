@@ -161,6 +161,7 @@ export { generateQRCodeDataUrl, createQRCodeElement, renderQRCodeToCanvas } from
 
 export {
   render,
+  renderEmbedNotice,
   createKeyBackup,
   downloadKeyBackup,
 } from './components.js';

@@ -3067,6 +3067,18 @@
       margin-bottom: 8px;
     }
 
+    .mobile-app-embed-note {
+      max-width: 520px;
+      margin: -8px auto 24px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: rgba(255, 152, 0, 0.1);
+      border: 1px solid rgba(255, 152, 0, 0.35);
+      color: #ffcc80;
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }
+
     .mobile-app-ctas {
       margin-bottom: 24px;
     }
@@ -3622,6 +3634,71 @@
       width: 100%;
       margin-bottom: 12px;
     }
+
+    /* Embed mode (third-party app widget) */
+    .embed-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: rgba(0, 141, 228, 0.12);
+      border: 1px solid rgba(0, 141, 228, 0.4);
+      border-radius: 8px;
+      padding: 10px 14px;
+      margin-bottom: 16px;
+    }
+
+    .embed-banner-text {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 0.9rem;
+      color: #e0e0e0;
+      min-width: 0;
+      word-break: break-word;
+    }
+
+    .embed-banner-text strong { color: #fff; }
+    .embed-origin { color: #8ec9f0; font-family: monospace; font-size: 0.85rem; }
+    .embed-banner-hint { color: #9aa4b2; font-size: 0.8rem; }
+
+    .embed-cancel-btn {
+      flex-shrink: 0;
+      background: transparent;
+      color: #e0e0e0;
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 0.85rem;
+      cursor: pointer;
+    }
+
+    .embed-cancel-btn:hover { background: rgba(255, 255, 255, 0.1); }
+
+    .embed-return {
+      margin-top: 20px;
+      text-align: center;
+    }
+
+    .embed-return-hint {
+      color: #b0b0b0;
+      font-size: 0.85rem;
+      margin-bottom: 12px;
+      word-break: break-word;
+    }
+
+    .embed-return .secondary-btn { width: 100%; }
+
+    .embed-notice .content {
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .embed-notice .content p { color: #b0b0b0; }
+    .embed-notice-link { text-decoration: none; display: inline-block; }
   </style>
 </head>
 <body>

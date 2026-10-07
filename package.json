@@ -5,13 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc && vite build && vite build --config vite.widget.config.ts",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:build-artifacts": "npm run build && node scripts/check-build-artifacts.mjs",
-    "test:e2e": "playwright test e2e/deterministic.spec.ts",
-    "test:e2e:headed": "playwright test e2e/deterministic.spec.ts --headed",
+    "test:e2e": "playwright test e2e/deterministic.spec.ts e2e/widget.spec.ts",
+    "test:e2e:headed": "playwright test e2e/deterministic.spec.ts e2e/widget.spec.ts --headed",
     "test:e2e:live": "PW_E2E_LIVE=1 playwright test e2e/live.testnet.spec.ts",
     "test:e2e:live:transfer": "PW_LIVE_XFER=1 playwright test e2e/live.transfer.spec.ts",
     "test:e2e:install": "playwright install --with-deps chromium"

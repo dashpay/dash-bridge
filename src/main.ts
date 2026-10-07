@@ -51,6 +51,7 @@ import {
   addIdentityKey,
   removeIdentityKey,
   render,
+  renderEmbedNotice,
   downloadKeyBackup,
   // DPNS state functions
   setModeDpnsFromIdentity,
@@ -244,9 +245,12 @@ import {
   E2E_MOCK_XFER_MNEMONIC,
   E2E_MOCK_XFER_RECIPIENT_ID,
 } from './e2e-mock-constants.js';
+import { resolveEmbed, type EmbedSession } from './embed/bridge.js';
 
 // Global state
 let state: BridgeState;
+/** Set when a third-party app opened the bridge to create an identity. */
+let embedSession: EmbedSession | undefined;
 let insightClient: InsightClient;
 let islockService: IslockService | undefined;
 let clientInitPromise: Promise<void> | undefined;
@@ -554,6 +558,41 @@ function init() {
     if (menu) menu.style.display = 'none';
   });
 
+  const container = document.getElementById('app');
+
+  // Embed mode / framing guard: may refuse to run at all.
+  const embed = resolveEmbed(window);
+  if (embed.action === 'block') {
+    if (container) renderEmbedNotice(container, embed.notice);
+    return;
+  }
+  embedSession = embed.session;
+  if (embedSession) {
+    const session = embedSession;
+    window.addEventListener('pagehide', () => session.handlePageHide());
+    window.addEventListener('pageshow', (event) => {
+      if (!event.persisted) return;
+      session.expire();
+      updateState(state);
+    });
+  }
+
+  // Embed mode goes straight to create; deep links are for standalone use.
+  state = embedSession ? applyEmbed(createInitialState(embedSession.network)) : stateFromUrl();
+  syncSmartAppBanner(document, state.network);
+
+  // Render UI
+  if (container) {
+    render(state, container);
+    setupEventListeners(container);
+  }
+
+  embedSession?.start(state);
+  scheduleDashWarmup();
+}
+
+/** Initial standalone state, honoring ?network=, ?address= and ?mode= deep links. */
+function stateFromUrl(): BridgeState {
   const urlParams = new URLSearchParams(window.location.search);
 
   // Infer network from ?address= param prefix, falling back to ?network= param
@@ -569,37 +608,38 @@ function init() {
     }
   }
 
-  // Initialize state
-  state = createInitialState(network);
-  syncSmartAppBanner(document, network);
+  let initial = createInitialState(network);
 
   // Deep-link: ?address=<bech32m> opens send-to-address mode with address pre-filled
   if (addressParam && validatePlatformAddress(addressParam, network)) {
-    state = setMode(state, 'send_to_address');
-    state = setRecipientPlatformAddress(state, addressParam);
+    initial = setMode(initial, 'send_to_address');
+    initial = setRecipientPlatformAddress(initial, addressParam);
   }
 
   // Deep-link: ?mode=contract opens contract registration mode
   const modeParam = urlParams.get('mode');
   if (modeParam === 'contract') {
-    state = setMode(state, 'contract');
+    initial = setMode(initial, 'contract');
     const contractParam = urlParams.get('contract');
     if (contractParam) {
       void hydrateContractDeepLink(contractParam);
     }
   } else if (modeParam === 'withdraw') {
     // Deep-link: ?mode=withdraw opens credit withdrawal mode
-    state = setMode(state, 'withdraw');
+    initial = setMode(initial, 'withdraw');
   }
 
-  // Render UI
-  const container = document.getElementById('app');
-  if (container) {
-    render(state, container);
-    setupEventListeners(container);
-  }
+  return initial;
+}
 
-  scheduleDashWarmup();
+/**
+ * In embed mode, keep the embed context on every state and send any return
+ * to the landing screen (Start Over, Try Again) back into the create flow.
+ */
+function applyEmbed(next: BridgeState): BridgeState {
+  if (!embedSession) return next;
+  const withEmbed = next.embed ? next : { ...next, embed: embedSession.display };
+  return withEmbed.step === 'init' ? setMode(withEmbed, 'create') : withEmbed;
 }
 
 async function hydrateContractDeepLink(contractParam: string): Promise<void> {
@@ -634,9 +674,15 @@ async function parseAndEstimateContract(json: unknown) {
  * Update state and re-render
  */
 function updateState(newState: BridgeState) {
-  const previousStep = state?.step;
-  state = newState;
+  const prevState = state;
+  const previousStep = prevState?.step;
+  state = applyEmbed(newState);
   const container = document.getElementById('app');
+  // Embed request cancelled or expired: the flow UI stays replaced.
+  if (embedSession?.notice) {
+    if (container) renderEmbedNotice(container, embedSession.notice);
+    return;
+  }
   if (container) {
     // Save focus state before re-render
     const activeElement = document.activeElement as HTMLInputElement | null;
@@ -689,6 +735,10 @@ function updateState(newState: BridgeState) {
       }
     }
   }
+
+  // Single hook for embed progress/result messages (all setIdentityRegistered
+  // call sites land here).
+  embedSession?.onStateChange(prevState, state);
 }
 
 /**
@@ -734,6 +784,14 @@ function setupEventListeners(container: HTMLElement) {
         switchNetwork(network);
       }
     });
+  });
+
+  // Embed mode: Cancel (banner) and Return to app (complete screen)
+  container.querySelector('#embed-cancel-btn')?.addEventListener('click', () => {
+    if (embedSession?.cancel(state)) updateState(state);
+  });
+  container.querySelector('#embed-return-btn')?.addEventListener('click', () => {
+    embedSession?.returnToApp();
   });
 
   // Mode selection buttons (init page)

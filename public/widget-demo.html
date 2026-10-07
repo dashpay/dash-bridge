@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <title>Dash Bridge widget demo</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0;
+      padding: 32px 20px;
+      background: #f5f7fa;
+      color: #1a1a2e;
+    }
+    main { max-width: 760px; margin: 0 auto; }
+    h1 { margin: 0 0 8px; font-size: 1.6rem; }
+    p { line-height: 1.5; color: #4a5568; }
+    code { background: #e2e8f0; padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
+    .card {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 20px;
+      margin: 20px 0;
+    }
+    label { display: inline-flex; flex-direction: column; gap: 4px; margin: 0 16px 12px 0; font-size: 0.9rem; }
+    select, input { padding: 6px 8px; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 0.95rem; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; }
+    button {
+      background: #008de4;
+      color: #fff;
+      border: 0;
+      border-radius: 8px;
+      padding: 12px 18px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.secondary { background: #4a5568; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    #result { font-family: monospace; word-break: break-all; }
+    #result.ok { color: #1f8a4c; }
+    #result.err { color: #c53030; }
+    #log {
+      background: #1a1a2e;
+      color: #c3e6ff;
+      font-family: monospace;
+      font-size: 0.8rem;
+      padding: 12px;
+      border-radius: 8px;
+      min-height: 80px;
+      max-height: 220px;
+      overflow: auto;
+      white-space: pre-wrap;
+      margin: 0;
+    }
+    #iframe-container:not(:empty) { margin-top: 16px; border: 1px solid #cbd5e0; border-radius: 10px; overflow: hidden; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Dash Bridge widget demo</h1>
+    <p>
+      This page plays the part of a third-party app. It loads the widget SDK
+      (<code>widget.js</code>) and asks the bridge to create a Dash Platform
+      identity. Only the identity ID comes back; keys stay in the bridge window.
+      See <a href="https://github.com/dashpay/dash-bridge/blob/main/docs/widget.md">docs/widget.md</a>.
+    </p>
+
+    <div class="card">
+      <label>Network
+        <select id="network">
+          <option value="testnet" selected>testnet</option>
+          <option value="mainnet">mainnet</option>
+        </select>
+      </label>
+      <label>App name
+        <input id="app-name" value="Widget Demo" maxlength="64">
+      </label>
+      <div class="actions">
+        <button id="popup-btn" disabled>Create Dash identity (popup)</button>
+        <button id="iframe-btn" class="secondary" disabled>Create Dash identity (iframe)</button>
+      </div>
+      <div id="iframe-container"></div>
+    </div>
+
+    <div class="card">
+      <p><strong>Result:</strong> <span id="result">none yet</span></p>
+      <pre id="log"></pre>
+    </div>
+  </main>
+
+  <script type="module">
+    // Production serves the built SDK at /widget.mjs; the Vite dev server only
+    // has the source.
+    async function loadSdk() {
+      try {
+        return await import('/widget.mjs');
+      } catch {
+        return await import('/src/widget/index.ts');
+      }
+    }
+
+    // Same-origin bridge. Pass ?e2e=mock through for local mock runs (ignored
+    // by production builds).
+    const bridgeUrl = new URL('/', location.origin);
+    const pageParams = new URLSearchParams(location.search);
+    if (pageParams.get('e2e')) bridgeUrl.searchParams.set('e2e', pageParams.get('e2e'));
+
+    const $ = (id) => document.getElementById(id);
+    const log = (line) => {
+      $('log').textContent += `${new Date().toLocaleTimeString()}  ${line}\n`;
+      $('log').scrollTop = $('log').scrollHeight;
+    };
+    const setResult = (text, cls) => {
+      $('result').textContent = text;
+      $('result').className = cls;
+    };
+
+    function run(mode) {
+      setResult('waiting…', '');
+      log(`createIdentity({ mode: '${mode}' })`);
+      // Called synchronously from the click handler so the popup isn't blocked.
+      DashBridge.createIdentity({
+        mode,
+        network: $('network').value,
+        appName: $('app-name').value,
+        bridgeUrl: bridgeUrl.href,
+        container: mode === 'iframe' ? $('iframe-container') : undefined,
+        onProgress: (step) => log(`progress: ${step}`),
+        onError: (err) => log(`recoverable error: ${err.code} ${err.message}`),
+      }).then(
+        (result) => {
+          log(`identity created: ${result.identityId} (${result.network})`);
+          setResult(`${result.identityId} (${result.network})`, 'ok');
+        },
+        (err) => {
+          log(`rejected: ${err.code ?? ''} ${err.message}`);
+          setResult(`${err.code ?? 'error'}: ${err.message}`, 'err');
+        },
+      );
+    }
+
+    let DashBridge;
+    loadSdk().then((sdk) => {
+      DashBridge = sdk;
+      $('popup-btn').addEventListener('click', () => run('popup'));
+      $('iframe-btn').addEventListener('click', () => run('iframe'));
+      $('popup-btn').disabled = false;
+      $('iframe-btn').disabled = false;
+    }, (err) => log(`could not load the SDK: ${err.message}`));
+  </script>
+</body>
+</html>

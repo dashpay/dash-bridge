@@ -1,3 +1,4 @@
+import type { EmbedKind } from './embed/protocol.js';
 import type { NearIntentsQuote, NearIntentsToken, NearSwapStatus } from './api/near-intents.js';
 
 export interface KeyPair {
@@ -317,6 +318,23 @@ export interface NetworkStatus {
   checkedAtMs: number;
 }
 
+/** Embed mode: who asked the bridge to run (shown in the UI banner). */
+export interface EmbedDisplay {
+  kind: EmbedKind;
+  /** Verified-by-delivery origin that receives the result. */
+  origin: string;
+  /** Self-declared app name; display only. */
+  appName?: string;
+}
+
+/** Embed mode: message shown instead of the app when it must not run. */
+export interface EmbedNotice {
+  title: string;
+  message: string;
+  /** Offer a link that opens the standalone bridge in a new tab. */
+  openHref?: string;
+}
+
 /** A NEAR Intents swap whose deposit address has been handed to the user. */
 export interface NearIntentsSwap {
   /** Where the user sends the source asset (origin chain). */
@@ -363,6 +381,8 @@ export interface NearIntentsState {
 export interface BridgeState {
   step: BridgeStep;
   network: string;
+  /** Set when a third-party app opened the bridge (see src/embed). */
+  embed?: EmbedDisplay;
   /** Bridge operation mode */
   mode: BridgeMode;
   /** Current network retry status (for displaying retry indicator) */
