@@ -502,7 +502,7 @@ app.post('/auth/dash/verify', async (req, res) => {
 | `expectedNonce` | The nonce you issued for this attempt. |
 | `network` | `'mainnet'` or `'testnet'`: where you fetched the identity. |
 | `identityPublicKeys` | The identity's keys. Accepts `identity.toJSON().publicKeys` (base64 data), `identity.publicKeys` or `sdk.identities.getKeys(...)` objects (`keyId`, `keyType`, string enums, hex data), `toObject()` output, or plain `{ id, type, purpose, securityLevel, data, disabledAt?, contractBounds? }` objects with `data` as `Uint8Array`, `number[]`, hex or base64. |
-| `expectedReturnUrl` | Redirect-mode apps only: your callback URL, absolute (the `returnUrl` you send users back to). A redirect proof is accepted only when its `Redirect URI:` matches. A popup proof is refused when this is set. Popup-only apps must not pass it. |
+| `expectedReturnUrl` | Redirect-mode apps only: your callback URL, absolute (the `returnUrl` you send users back to). A redirect proof is accepted only when its `Redirect URI:` matches. A popup proof is refused when this is set. Popup-only apps must not pass it. If you support both modes, store the mode with the nonce on your server and pass your constant callback only for redirect attempts. |
 | `expectedStatement` | Optional. Require this statement, compared after the same sanitizing the bridge applies. |
 | `now` | Optional `Date` or milliseconds, for tests. A value that isn't a valid time fails with `invalid_options`. |
 
