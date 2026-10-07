@@ -26,7 +26,20 @@ export {
   calculateTxId,
   createAssetLockTransaction,
   cloneTransaction,
+  implicitFee,
+  MAX_ASSET_LOCK_FEE,
 } from './builder.js';
+
+export {
+  type ParsedTransaction,
+  parseTransaction,
+  txidOfRawTransaction,
+} from './parse.js';
+
+export {
+  UtxoAuthenticationError,
+  authenticateUtxo,
+} from './utxo-auth.js';
 
 export {
   signatureHash,

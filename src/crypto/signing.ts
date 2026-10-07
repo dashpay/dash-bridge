@@ -1,8 +1,12 @@
 import * as secp256k1 from '@noble/secp256k1';
-import { concatBytes } from '../utils/hex.js';
-import type { AssetLockTransaction } from '../transaction/builder.js';
+import { bytesToHex, concatBytes, reverseBytes } from '../utils/hex.js';
+import {
+  type AssetLockTransaction,
+  implicitFee,
+  MAX_ASSET_LOCK_FEE,
+} from '../transaction/builder.js';
 import { signatureHash, getScriptCodeFromUtxo, SIGHASH_ALL } from '../transaction/sighash.js';
-import type { UTXO } from '../types.js';
+import type { AuthenticatedUtxo, UTXO } from '../types.js';
 
 /**
  * Encode a big integer as a DER integer
@@ -116,10 +120,27 @@ export async function signTransactionInput(
  */
 export async function signTransaction(
   tx: AssetLockTransaction,
-  utxos: UTXO[],
+  utxos: AuthenticatedUtxo[],
   privateKey: Uint8Array,
   publicKey: Uint8Array
 ): Promise<AssetLockTransaction> {
+  // Legacy sighash does not commit to input values. Amount authenticity comes
+  // from authenticateUtxo; this is a backstop that requires one matching UTXO
+  // per input and a bounded implicit fee.
+  if (utxos.length !== tx.vin.length) {
+    throw new Error(`Expected ${tx.vin.length} UTXOs to sign, got ${utxos.length}`);
+  }
+  tx.vin.forEach((vin, i) => {
+    const prevTxid = bytesToHex(reverseBytes(vin.prevout.txid));
+    if (prevTxid !== utxos[i].txid.toLowerCase() || vin.prevout.n !== utxos[i].vout) {
+      throw new Error(`UTXO ${i} does not match the input it would sign`);
+    }
+  });
+  const fee = implicitFee(tx, utxos);
+  if (fee <= 0n || fee > MAX_ASSET_LOCK_FEE) {
+    throw new Error(`Refusing to sign: implicit fee ${fee} duffs is outside (0, ${MAX_ASSET_LOCK_FEE}]`);
+  }
+
   let signedTx = tx;
 
   for (let i = 0; i < tx.vin.length; i++) {

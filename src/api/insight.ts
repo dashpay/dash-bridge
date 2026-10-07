@@ -1,7 +1,13 @@
-import type { UTXO, TxInfo } from '../types.js';
+import type { AuthenticatedUtxo, UTXO, TxInfo } from '../types.js';
 import type { NetworkConfig } from '../config.js';
 import { withRetry, isRetryableError, type RetryOptions } from '../utils/retry.js';
 import { abortableSleep } from '../utils/sleep.js';
+import { hexToBytes } from '../utils/hex.js';
+import {
+  assertTxid,
+  authenticateUtxo,
+  UtxoAuthenticationError,
+} from '../transaction/utxo-auth.js';
 import { fetchJson } from '../utils/fetch-json.js';
 import { fetchWithDeadline, RequestTimeoutError } from '../utils/fetch-with-deadline.js';
 
@@ -12,6 +18,9 @@ import { fetchWithDeadline, RequestTimeoutError } from '../utils/fetch-with-dead
  * "already in block chain" (see isAmbiguousBroadcastError).
  */
 const BROADCAST_TIMEOUT_MS = 20000;
+
+/** Same read deadline as fetchJson's default; bounds headers and body. */
+const RAWTX_TIMEOUT_MS = 8000;
 
 /**
  * Whether a broadcast error leaves the outcome unknown rather than failed:
@@ -28,6 +37,29 @@ export interface InsightApiResponse<T> {
   data?: T;
   error?: string;
 }
+
+/**
+ * `/rawtx` returned 404. The address index can list a fresh deposit before
+ * `/rawtx` serves it (e.g. another backend node), so this is retried longer
+ * than other errors, and its message is what the user sees if it persists.
+ */
+class RawTxNotIndexedError extends Error {
+  constructor() {
+    super('The explorer has not indexed your deposit transaction yet. Wait a moment and use Check Again.');
+    this.name = 'RawTxNotIndexedError';
+  }
+}
+
+/**
+ * Retry schedule for `/rawtx`: 6 attempts with 1s, 2s, then 4s backoff
+ * (plus up to 50% jitter) gives roughly 15-22s for the explorer to catch up.
+ */
+const RAWTX_RETRY: RetryOptions = {
+  maxAttempts: 6,
+  baseDelayMs: 1000,
+  maxDelayMs: 4000,
+  shouldRetry: (error) => error instanceof RawTxNotIndexedError || isRetryableError(error),
+};
 
 /**
  * Insight API client for UTXO lookup and transaction broadcast
@@ -55,6 +87,51 @@ export class InsightClient {
         confirmations: utxo.confirmations as number,
       }));
     }, retryOptions);
+  }
+
+  /**
+   * Fetch the raw serialized bytes of a transaction via `/rawtx/{txid}`.
+   * The bytes are NOT trusted here; see {@link getAuthenticatedUtxo}.
+   */
+  async getRawTransaction(txid: string, retryOptions?: RetryOptions): Promise<Uint8Array> {
+    assertTxid(txid);
+    const rawtx = await withRetry(
+      () =>
+        fetchWithDeadline(`${this.baseUrl}/rawtx/${txid}`, {}, RAWTX_TIMEOUT_MS, async (response) => {
+          if (response.status === 404) {
+            throw new RawTxNotIndexedError();
+          }
+          if (!response.ok) {
+            throw new Error(`Insight API error: ${response.status} ${response.statusText}`);
+          }
+
+          const data = await response.json().catch(() => {
+            throw new Error('Insight returned a non-JSON raw transaction response');
+          });
+          return data?.rawtx;
+        }),
+      { ...RAWTX_RETRY, ...retryOptions }
+    );
+
+    if (typeof rawtx !== 'string' || !/^(?:[0-9a-f]{2})+$/i.test(rawtx)) {
+      throw new UtxoAuthenticationError('Explorer returned a malformed raw transaction');
+    }
+    return hexToBytes(rawtx);
+  }
+
+  /**
+   * The single trust boundary for funding UTXOs: fetch the raw previous
+   * transaction and return the UTXO with the value and script it actually
+   * commits to. Every flow that builds and signs from an Insight UTXO must
+   * pass it through here first. Throws if Insight's report disagrees.
+   */
+  async getAuthenticatedUtxo(
+    utxo: UTXO,
+    depositPublicKey: Uint8Array,
+    retryOptions?: RetryOptions
+  ): Promise<AuthenticatedUtxo> {
+    const rawTx = await this.getRawTransaction(utxo.txid, retryOptions);
+    return authenticateUtxo(utxo, rawTx, depositPublicKey);
   }
 
   /**

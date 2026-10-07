@@ -13,6 +13,15 @@ export interface UTXO {
   confirmations: number;
 }
 
+declare const authenticatedUtxoBrand: unique symbol;
+
+/**
+ * A UTXO whose value and script were verified against the raw transaction
+ * that created it (see `authenticateUtxo`). Only these can fund an asset lock,
+ * so skipping authentication is a compile error.
+ */
+export type AuthenticatedUtxo = UTXO & { readonly [authenticatedUtxoBrand]: true };
+
 export interface TxInfo {
   txid: string;
   confirmations: number;
@@ -344,6 +353,8 @@ export interface BridgeState {
   depositTimedOut?: boolean;
   /** Current detected deposit amount (may be below minimum) */
   detectedDepositAmount?: number;
+  /** Why a detected deposit could not be verified (shown with the recheck button) */
+  depositVerificationError?: string;
   /** Target identity ID for top-up (user-provided) */
   targetIdentityId?: string;
   /** Whether asset lock key is a one-time random key (for top-up/send_to_address) vs HD-derived */
