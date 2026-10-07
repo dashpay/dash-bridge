@@ -19,6 +19,9 @@ import { fetchWithDeadline, RequestTimeoutError } from '../utils/fetch-with-dead
  */
 const BROADCAST_TIMEOUT_MS = 20000;
 
+/** Same read deadline as fetchJson's default; bounds headers and body. */
+const RAWTX_TIMEOUT_MS = 8000;
+
 /**
  * Whether a broadcast error leaves the outcome unknown rather than failed:
  * a timeout may have reached the node, and "already in block chain" means an
@@ -92,21 +95,23 @@ export class InsightClient {
    */
   async getRawTransaction(txid: string, retryOptions?: RetryOptions): Promise<Uint8Array> {
     assertTxid(txid);
-    const rawtx = await withRetry(async () => {
-      const response = await fetch(`${this.baseUrl}/rawtx/${txid}`);
+    const rawtx = await withRetry(
+      () =>
+        fetchWithDeadline(`${this.baseUrl}/rawtx/${txid}`, {}, RAWTX_TIMEOUT_MS, async (response) => {
+          if (response.status === 404) {
+            throw new RawTxNotIndexedError();
+          }
+          if (!response.ok) {
+            throw new Error(`Insight API error: ${response.status} ${response.statusText}`);
+          }
 
-      if (response.status === 404) {
-        throw new RawTxNotIndexedError();
-      }
-      if (!response.ok) {
-        throw new Error(`Insight API error: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json().catch(() => {
-        throw new Error('Insight returned a non-JSON raw transaction response');
-      });
-      return data?.rawtx;
-    }, { ...RAWTX_RETRY, ...retryOptions });
+          const data = await response.json().catch(() => {
+            throw new Error('Insight returned a non-JSON raw transaction response');
+          });
+          return data?.rawtx;
+        }),
+      { ...RAWTX_RETRY, ...retryOptions }
+    );
 
     if (typeof rawtx !== 'string' || !/^(?:[0-9a-f]{2})+$/i.test(rawtx)) {
       throw new UtxoAuthenticationError('Explorer returned a malformed raw transaction');

@@ -228,7 +228,10 @@ describe('InsightClient.getAuthenticatedUtxo', () => {
     const fetchMock = stubRawTx({ rawtx: bytesToHex(raw) });
     const client = new InsightClient(TESTNET);
     await expect(client.getAuthenticatedUtxo(reported, publicKey)).resolves.toEqual(reported);
-    expect(fetchMock).toHaveBeenCalledWith(`${TESTNET.insightApiUrl}/rawtx/${txid}`);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${TESTNET.insightApiUrl}/rawtx/${txid}`,
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
   });
 
   it('refuses when Insight understates the UTXO', async () => {
