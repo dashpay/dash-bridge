@@ -501,24 +501,22 @@ function getStoreQrDataUrl(url: string): Promise<string> {
 }
 
 /** A store button, optionally with a QR code of the same link for scanning from a desktop. */
-function renderStoreButton(opts: { id?: string; label: string; url: string; qrAlt?: string }): HTMLElement {
+function renderStoreButton({ id, label, url, qrAlt }: { id?: string; label: string; url: string; qrAlt?: string }): HTMLElement {
   const item = document.createElement('div');
   item.className = 'mobile-app-store';
 
-  if (opts.qrAlt) {
+  if (qrAlt) {
     const qrContainer = document.createElement('div');
     qrContainer.className = 'mobile-app-qr';
     qrContainer.innerHTML = '<div class="qr-loading">Loading...</div>';
     item.appendChild(qrContainer);
-    const qrAlt = opts.qrAlt;
-    getStoreQrDataUrl(opts.url).then((dataUrl) => {
+    getStoreQrDataUrl(url).then((dataUrl) => {
       const img = document.createElement('img');
       img.src = dataUrl;
       img.alt = qrAlt;
       img.width = 160;
       img.height = 160;
-      qrContainer.innerHTML = '';
-      qrContainer.appendChild(img);
+      qrContainer.replaceChildren(img);
     }).catch((err) => {
       console.error('QR code generation failed:', err);
       qrContainer.innerHTML = '<div class="qr-error">QR failed</div>';
@@ -526,12 +524,12 @@ function renderStoreButton(opts: { id?: string; label: string; url: string; qrAl
   }
 
   const link = document.createElement('a');
-  if (opts.id) link.id = opts.id;
+  if (id) link.id = id;
   link.className = 'primary-btn store-btn';
-  link.href = opts.url;
+  link.href = url;
   link.target = '_blank';
   link.rel = 'noopener noreferrer';
-  link.textContent = opts.label;
+  link.textContent = label;
   item.appendChild(link);
 
   return item;
