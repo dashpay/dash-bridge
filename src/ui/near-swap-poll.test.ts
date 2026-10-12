@@ -15,6 +15,7 @@ const SWAP: NearIntentsSwap = {
   symbol: 'USDC',
   blockchain: 'eth',
   decimals: 6,
+  swapType: 'EXACT_OUTPUT',
   amountIn: '2680000',
   amountOut: '5000000',
   deadline: '2026-10-07T18:00:00.000Z',

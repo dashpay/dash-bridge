@@ -1,5 +1,5 @@
 import type { EmbedKind, EmbedRequestType } from './embed/protocol.js';
-import type { NearIntentsQuote, NearIntentsToken, NearSwapStatus } from './api/near-intents.js';
+import type { NearIntentsQuote, NearIntentsToken, NearSwapStatus, NearSwapType } from './api/near-intents.js';
 
 export interface KeyPair {
   privateKey: Uint8Array;
@@ -370,10 +370,14 @@ export interface NearIntentsSwap {
   symbol: string;
   blockchain: string;
   decimals: number;
+  /** EXACT_INPUT quotes an estimated amountOut; EXACT_OUTPUT delivers amountOut exactly. */
+  swapType: NearSwapType;
   /** Amount to send, in the source asset's smallest units. */
   amountIn: string;
-  /** DASH delivered, in duffs. */
+  /** DASH delivered (estimated for EXACT_INPUT), in duffs. */
   amountOut: string;
+  /** Least DASH delivered, in duffs (EXACT_INPUT). */
+  minAmountOut?: string;
   /** ISO time after which an unfunded swap is refunded. */
   deadline: string;
   correlationId?: string;
@@ -382,22 +386,31 @@ export interface NearIntentsSwap {
   statusError?: string;
 }
 
-/** "Pay with other crypto" panel on the mainnet deposit screen. */
+/** "Pay with other crypto" tab on the mainnet deposit screen. */
 export interface NearIntentsState {
+  /** The "Pay with other crypto" tab is selected (otherwise "Send DASH"). */
   open: boolean;
   tokens?: NearIntentsToken[];
+  /** The asset picker is open. */
+  pickerOpen: boolean;
   /** Search text narrowing the asset list. */
   assetFilter: string;
   originAssetId?: string;
-  /** DASH to deliver, as typed. */
+  /** Which amount the user typed: what they pay ('in') or the DASH to receive ('out'). */
+  amountSide: 'in' | 'out';
+  /** The typed amount, in the source asset ('in') or DASH ('out'). */
   amountInput: string;
   refundAddress: string;
+  /** Why the refund address was not accepted. */
+  refundError?: string;
   /** Request in flight: loading tokens, pricing a quote, or opening a swap. */
   busy?: 'tokens' | 'quote' | 'confirm';
-  /** Dry quote awaiting the user's confirmation. */
+  /** Live (dry) quote for the current inputs, priced before the user confirms. */
   quote?: NearIntentsQuote;
   swap?: NearIntentsSwap;
   error?: string;
+  /** With a "too small" error: the smallest amount accepted, formatted for the typed side. */
+  minimumInput?: string;
 }
 
 export interface BridgeState {

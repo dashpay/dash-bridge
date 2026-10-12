@@ -161,22 +161,54 @@ describe('rendering untrusted strings', () => {
       depositAddress: 'XanAvE5GMB8CsPH78B9moJq9viEVKvCS4f',
       nearIntents: {
         open: true,
+        pickerOpen: false,
         tokens: [hostileToken],
         originAssetId: ATTR_PAYLOAD,
         assetFilter: ATTR_PAYLOAD,
+        amountSide: 'in',
         amountInput: ATTR_PAYLOAD,
         refundAddress: ATTR_PAYLOAD,
+        refundError: TEXT_PAYLOAD,
         error: TEXT_PAYLOAD,
+        minimumInput: TEXT_PAYLOAD,
         quote: { originAssetId: ATTR_PAYLOAD, amountIn: '1', amountOut: '5000000', deadline: ATTR_PAYLOAD },
       },
     });
     expectNoInjection(form);
     expect(form.querySelector('.near-intents-error')!.textContent).toBe(TEXT_PAYLOAD);
-    expect(form.querySelector<HTMLSelectElement>('#near-asset-select')!.value).toBe(ATTR_PAYLOAD);
+    expect(form.querySelector('#near-asset-btn')!.textContent).toContain(TEXT_PAYLOAD);
+    expect(form.querySelector('#near-use-min-btn')!.textContent).toContain(TEXT_PAYLOAD);
+    expect(form.querySelector('.near-refund-error')!.textContent).toBe(TEXT_PAYLOAD);
     expect(inputValue(form, 'near-refund-input')).toBe(ATTR_PAYLOAD);
-    expect(inputValue(form, 'near-amount-input')).toBe(ATTR_PAYLOAD);
-    expect(inputValue(form, 'near-asset-filter')).toBe(ATTR_PAYLOAD);
+    expect(inputValue(form, 'near-amount-in')).toBe(ATTR_PAYLOAD);
     expect(form.querySelector('#near-intents-quote')!.textContent).toContain(TEXT_PAYLOAD);
+
+    const picker = renderState({
+      step: 'detecting_deposit',
+      network: 'mainnet',
+      depositAddress: 'XanAvE5GMB8CsPH78B9moJq9viEVKvCS4f',
+      nearIntents: {
+        open: true,
+        pickerOpen: true,
+        tokens: [hostileToken],
+        originAssetId: ATTR_PAYLOAD,
+        assetFilter: '',
+        amountSide: 'out',
+        amountInput: '0.05',
+        refundAddress: '',
+      },
+    });
+    expectNoInjection(picker);
+    expect(picker.querySelector<HTMLElement>('.near-token-option')!.dataset.assetId).toBe(ATTR_PAYLOAD);
+    expect(picker.querySelector('.near-token-option-symbol')!.textContent).toBe(TEXT_PAYLOAD);
+    const searching = renderState({
+      step: 'detecting_deposit',
+      network: 'mainnet',
+      depositAddress: 'XanAvE5GMB8CsPH78B9moJq9viEVKvCS4f',
+      nearIntents: { open: true, pickerOpen: true, tokens: [hostileToken], assetFilter: ATTR_PAYLOAD, amountSide: 'out', amountInput: '0.05', refundAddress: '' },
+    });
+    expectNoInjection(searching);
+    expect(inputValue(searching, 'near-asset-filter')).toBe(ATTR_PAYLOAD);
 
     const swap = renderState({
       step: 'detecting_deposit',
@@ -184,7 +216,9 @@ describe('rendering untrusted strings', () => {
       depositAddress: 'XanAvE5GMB8CsPH78B9moJq9viEVKvCS4f',
       nearIntents: {
         open: true,
+        pickerOpen: false,
         assetFilter: '',
+        amountSide: 'out',
         amountInput: '0.05',
         refundAddress: '',
         swap: {
@@ -196,6 +230,7 @@ describe('rendering untrusted strings', () => {
           symbol: TEXT_PAYLOAD,
           blockchain: ATTR_PAYLOAD,
           decimals: 6,
+          swapType: 'EXACT_OUTPUT',
           amountIn: '1',
           amountOut: '5000000',
           // A valid future deadline, so the payment details are on screen.

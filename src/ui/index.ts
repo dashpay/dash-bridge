@@ -135,15 +135,18 @@ export {
   resetFaucetState,
   // NEAR Intents state functions
   depositMinimumDuffs,
-  toggleNearIntentsPanel,
+  setNearIntentsTabOpen,
   setNearIntentsTokensLoading,
   setNearIntentsTokens,
   setNearIntentsError,
+  setNearIntentsPickerOpen,
   setNearIntentsAssetFilter,
   setNearIntentsOriginAsset,
-  setNearIntentsAmountInput,
+  setNearIntentsAmount,
   setNearIntentsRefundAddress,
+  setNearIntentsRefundError,
   setNearIntentsQuoting,
+  clearNearIntentsQuote,
   setNearIntentsQuote,
   setNearIntentsConfirming,
   setNearIntentsSwap,
@@ -162,6 +165,7 @@ export { generateQRCodeDataUrl, createQRCodeElement, renderQRCodeToCanvas } from
 export {
   render,
   renderEmbedNotice,
+  nearChainName,
   createKeyBackup,
   downloadKeyBackup,
 } from './components.js';

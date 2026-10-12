@@ -22,6 +22,8 @@ export const NEAR_INTENTS_APP_URL = 'https://near-intents.org/';
 export const NEAR_SWAP_DEADLINE_MS = 60 * 60 * 1000;
 /** Slippage tolerance in basis points (1%). */
 const SLIPPAGE_BPS = 100;
+/** Rounding allowance when checking a quote's floor against its slippage, in basis points. */
+const SLIPPAGE_ROUNDING_BPS = 10;
 const REQUEST_TIMEOUT_MS = 20_000;
 
 export interface NearIntentsToken {
@@ -86,19 +88,47 @@ export function isNearPriceIncreaseTooLarge(approvedAmountIn: string, amountIn: 
   return BigInt(amountIn) * 10_000n > BigInt(approvedAmountIn) * (10_000n + maxIncreaseBps);
 }
 
-export interface NearQuoteRequest {
+/**
+ * Whether a confirmed quote delivers more than `maxDecreaseBps` less DASH
+ * than the one the user approved (amounts in duffs).
+ */
+export function isNearOutputDropTooLarge(approvedAmountOut: string, amountOut: string, maxDecreaseBps: bigint): boolean {
+  return BigInt(amountOut) * 10_000n < BigInt(approvedAmountOut) * (10_000n - maxDecreaseBps);
+}
+
+/**
+ * `EXACT_INPUT`: the user names what they pay and DASH out is quoted.
+ * `EXACT_OUTPUT`: the user names the DASH to deliver and the payment is quoted.
+ */
+export type NearSwapType = 'EXACT_INPUT' | 'EXACT_OUTPUT';
+
+/**
+ * Refund target for dry quotes. Pricing needs a refund address, but a dry
+ * quote never takes funds, so a chain-agnostic Intents account stands in until
+ * the user enters their own address for the real quote.
+ */
+export const NEAR_DRY_QUOTE_REFUND_ACCOUNT = 'intents.near';
+
+interface NearQuoteRequestBase {
   originAsset: NearIntentsToken;
-  /** DASH to deliver, in duffs (EXACT_OUTPUT). */
-  amountOutDuffs: number;
+  swapType: NearSwapType;
+  /**
+   * Integer amount in smallest units: the origin asset to send
+   * (`EXACT_INPUT`) or the DASH to deliver, in duffs (`EXACT_OUTPUT`).
+   */
+  amount: string;
+  /** Least DASH the deposit must receive, in duffs; a quote that may deliver less is rejected. */
+  minAmountOutDuffs: number;
   /** Bridge deposit address that receives the DASH. */
   recipient: string;
-  /** User's address on the origin chain for refunds. */
-  refundTo: string;
-  /** Dry quotes only price the swap; a real quote opens a deposit address. */
-  dry: boolean;
   /** Defaults to now. */
   now?: number;
 }
+
+/** Dry quotes only price the swap; a real quote opens a deposit address and needs the user's refund address. */
+export type NearQuoteRequest =
+  | (NearQuoteRequestBase & { dry: true })
+  | (NearQuoteRequestBase & { dry: false; refundTo: string });
 
 export interface NearIntentsQuote {
   originAssetId: string;
@@ -108,6 +138,8 @@ export interface NearIntentsQuote {
   minAmountIn?: string;
   /** DASH delivered, in duffs. */
   amountOut: string;
+  /** Least DASH delivered after slippage, in duffs, if the API gave it. */
+  minAmountOut?: string;
   amountInUsd?: number;
   amountOutUsd?: number;
   /** Estimated completion time after the deposit, in seconds. */
@@ -120,10 +152,15 @@ export interface NearIntentsQuote {
   correlationId?: string;
 }
 
-export type NearIntentsErrorKind = 'no_liquidity' | 'rejected' | 'unavailable' | 'invalid_response';
+export type NearIntentsErrorKind = 'no_liquidity' | 'too_low' | 'rejected' | 'unavailable' | 'invalid_response';
 
 export class NearIntentsError extends Error {
-  constructor(public readonly kind: NearIntentsErrorKind, message: string) {
+  constructor(
+    public readonly kind: NearIntentsErrorKind,
+    message: string,
+    /** `too_low`: the smallest accepted `amount`, in the request's smallest units. */
+    public readonly minAmount?: string
+  ) {
     super(message);
     this.name = 'NearIntentsError';
   }
@@ -191,6 +228,10 @@ function errorFromResponse(status: number, body: unknown): NearIntentsError {
       "NEAR Intents can't route this asset to DASH right now. Try again later or pick another asset, or fund with DASH directly."
     );
   }
+  const tooLow = message ? /too low.*?at least (\d{1,78})\b/i.exec(message) : null;
+  if (status >= 400 && status < 500 && tooLow) {
+    return new NearIntentsError('too_low', 'That amount is too small for NEAR Intents.', tooLow[1]);
+  }
   if (status >= 400 && status < 500 && status !== 429 && message) {
     return new NearIntentsError('rejected', `NEAR Intents rejected the request: ${message}`);
   }
@@ -245,6 +286,17 @@ export function selectableSourceTokens(tokens: NearIntentsToken[]): NearIntentsT
 }
 
 /**
+ * Whether `echoed` names the asset we asked for. 1Click echoes some native
+ * coins in its newer id scheme (`nep141:btc.omft.near` comes back as
+ * `1cs_v1:btc:native:coin`); both name the same chain's native coin.
+ */
+export function isSameNearAsset(requested: string, echoed: unknown): boolean {
+  if (echoed === requested) return true;
+  const native = /^nep141:([a-z0-9]+)\.omft\.near$/.exec(requested);
+  return native !== null && echoed === `1cs_v1:${native[1]}:native:coin`;
+}
+
+/**
  * The server's deadline, if it is a sane time between now and the deadline
  * we asked for; otherwise ours.
  */
@@ -254,10 +306,11 @@ function isoDeadline(value: unknown, now: number, requested: string): string {
 }
 
 /**
- * Request a swap quote that delivers exactly `amountOutDuffs` DASH to
- * `recipient`. Rejects any reply that doesn't echo back our recipient, DASH
- * as the destination, the origin asset and the amount, since showing its
- * deposit address would then send the user's funds somewhere else.
+ * Request a swap quote that delivers DASH to `recipient`. Rejects any reply
+ * that doesn't echo back our recipient, DASH as the destination, the origin
+ * asset, swap type, amount and refund target, since showing its deposit
+ * address would then send the user's funds somewhere else. A quote that may
+ * deliver less than `minAmountOutDuffs` is rejected too.
  */
 export async function requestNearIntentsQuote(
   params: NearQuoteRequest,
@@ -265,17 +318,22 @@ export async function requestNearIntentsQuote(
 ): Promise<NearIntentsQuote> {
   const now = params.now ?? Date.now();
   const deadline = new Date(now + nearSwapWindowMs(params.originAsset.blockchain)).toISOString();
-  const amount = String(Math.trunc(params.amountOutDuffs));
+  const { swapType, amount } = params;
+  if (!UNSIGNED_INT_PATTERN.test(amount) || BigInt(amount) === 0n) {
+    throw new NearIntentsError('rejected', 'Enter an amount greater than zero.');
+  }
+  const refund = params.dry
+    ? { refundTo: NEAR_DRY_QUOTE_REFUND_ACCOUNT, refundType: 'INTENTS' }
+    : { refundTo: params.refundTo, refundType: 'ORIGIN_CHAIN' };
   const payload = {
     dry: params.dry,
-    swapType: 'EXACT_OUTPUT',
+    swapType,
     slippageTolerance: SLIPPAGE_BPS,
     originAsset: params.originAsset.assetId,
     depositType: 'ORIGIN_CHAIN',
     destinationAsset: NEAR_INTENTS_DASH_ASSET_ID,
     amount,
-    refundTo: params.refundTo,
-    refundType: 'ORIGIN_CHAIN',
+    ...refund,
     recipient: params.recipient,
     recipientType: 'DESTINATION_CHAIN',
     deadline,
@@ -288,7 +346,14 @@ export async function requestNearIntentsQuote(
     body: JSON.stringify(payload),
     signal,
   });
-  if (status < 200 || status >= 300) throw errorFromResponse(status, body);
+  if (status < 200 || status >= 300) {
+    const error = errorFromResponse(status, body);
+    if (error.kind === 'too_low' && error.minAmount !== undefined) {
+      const [decimals, symbol] = swapType === 'EXACT_INPUT' ? [params.originAsset.decimals, params.originAsset.symbol] : [8, 'DASH'];
+      throw new NearIntentsError('too_low', `That amount is too small to swap. The minimum is ${formatUnits(error.minAmount, decimals)} ${symbol}.`, error.minAmount);
+    }
+    throw error;
+  }
   if (!isRecord(body) || !isRecord(body.quote) || !isRecord(body.quoteRequest)) {
     throw new NearIntentsError('invalid_response', 'NEAR Intents returned an invalid quote.');
   }
@@ -297,12 +362,13 @@ export async function requestNearIntentsQuote(
   if (
     echoed.recipient !== params.recipient ||
     echoed.destinationAsset !== NEAR_INTENTS_DASH_ASSET_ID ||
-    echoed.originAsset !== params.originAsset.assetId ||
-    echoed.swapType !== 'EXACT_OUTPUT' ||
+    !isSameNearAsset(params.originAsset.assetId, echoed.originAsset) ||
+    echoed.swapType !== swapType ||
+    echoed.slippageTolerance !== SLIPPAGE_BPS ||
     echoed.amount !== amount ||
     echoed.recipientType !== 'DESTINATION_CHAIN' ||
-    echoed.refundTo !== params.refundTo ||
-    echoed.refundType !== 'ORIGIN_CHAIN' ||
+    echoed.refundTo !== refund.refundTo ||
+    echoed.refundType !== refund.refundType ||
     echoed.depositType !== 'ORIGIN_CHAIN'
   ) {
     throw new NearIntentsError(
@@ -314,11 +380,35 @@ export async function requestNearIntentsQuote(
   const q = body.quote;
   const amountIn = unsignedIntString(q.amountIn, 'input amount');
   const amountOut = unsignedIntString(q.amountOut, 'output amount');
-  if (BigInt(amountIn) === 0n || BigInt(amountOut) < BigInt(amount)) {
-    throw new NearIntentsError('invalid_response', 'NEAR Intents returned a quote for less DASH than requested.');
+  const minAmountOut = q.minAmountOut !== undefined ? unsignedIntString(q.minAmountOut, 'minimum output') : undefined;
+  if (BigInt(amountIn) === 0n) {
+    throw new NearIntentsError('invalid_response', 'NEAR Intents returned an invalid input amount.');
   }
-  if (q.minAmountOut !== undefined && BigInt(unsignedIntString(q.minAmountOut, 'minimum output')) < BigInt(amount)) {
-    throw new NearIntentsError('invalid_response', 'NEAR Intents could deliver less DASH than requested; the quote was not used.');
+  if (swapType === 'EXACT_OUTPUT') {
+    if (BigInt(amountOut) < BigInt(amount)) {
+      throw new NearIntentsError('invalid_response', 'NEAR Intents returned a quote for less DASH than requested.');
+    }
+    if (minAmountOut !== undefined && BigInt(minAmountOut) < BigInt(amount)) {
+      throw new NearIntentsError('invalid_response', 'NEAR Intents could deliver less DASH than requested; the quote was not used.');
+    }
+  } else {
+    // We tell the user to send `amount`; a quote priced for another input is not for this payment.
+    if (amountIn !== amount) {
+      throw new NearIntentsError('invalid_response', 'NEAR Intents returned a quote for a different amount; it was not used.');
+    }
+    // Without a floor, a bad fill could deliver less than the bridge needs;
+    // a floor further below the estimate than our slippage isn't the quote we priced.
+    if (
+      minAmountOut === undefined ||
+      BigInt(minAmountOut) > BigInt(amountOut) ||
+      BigInt(minAmountOut) * 10_000n < BigInt(amountOut) * BigInt(10_000 - SLIPPAGE_BPS - SLIPPAGE_ROUNDING_BPS)
+    ) {
+      throw new NearIntentsError('invalid_response', 'NEAR Intents did not guarantee a minimum DASH amount; the quote was not used.');
+    }
+  }
+  const neededOut = String(Math.trunc(params.minAmountOutDuffs));
+  if (BigInt(minAmountOut ?? amountOut) < BigInt(neededOut)) {
+    throw new NearIntentsError('too_low', `You would receive less than the ${formatUnits(neededOut, 8)} DASH this deposit needs. Pay a little more.`);
   }
   const minAmountIn = q.minAmountIn !== undefined ? unsignedIntString(q.minAmountIn, 'minimum input') : undefined;
   if (minAmountIn !== undefined && BigInt(minAmountIn) > BigInt(amountIn)) {
@@ -340,6 +430,7 @@ export async function requestNearIntentsQuote(
     deadline: isoDeadline(q.deadline, now, deadline),
   };
   if (minAmountIn !== undefined) quote.minAmountIn = minAmountIn;
+  if (minAmountOut !== undefined) quote.minAmountOut = minAmountOut;
   const amountInUsd = optionalNumber(q.amountInUsd);
   const amountOutUsd = optionalNumber(q.amountOutUsd);
   const timeEstimateSec = optionalNumber(q.timeEstimate);
@@ -406,13 +497,28 @@ function normalizeDecimal(value: unknown): string | undefined {
   return fraction ? `${whole}.${fraction}` : whole;
 }
 
-/** Parse a user-entered DASH amount (up to 8 decimals) into duffs. */
-export function parseDashToDuffs(input: string): number | null {
-  const match = /^(\d{1,8})(?:\.(\d{0,8}))?$/.exec(input.trim());
-  // Cap at the DASH supply so the result stays an exact integer.
-  if (!match || Number(match[1]) > 21_000_000) return null;
-  const duffs = BigInt(match[1]) * 100_000_000n + BigInt((match[2] ?? '').padEnd(8, '0') || '0');
-  return Number(duffs);
+/**
+ * Parse a user-entered amount of an asset with `decimals` places into an
+ * integer string of its smallest units, or null if it isn't a plain decimal
+ * with at most that many places. ("1." and ".5" are accepted.)
+ */
+export function parseUnits(input: string, decimals: number): string | null {
+  const match = /^(\d{0,30})(?:\.(\d*))?$/.exec(input.trim());
+  if (!match || (match[1] === '' && !match[2]) || (match[2] ?? '').length > decimals) return null;
+  const units = BigInt(match[1] || '0') * 10n ** BigInt(decimals) + BigInt((match[2] ?? '').padEnd(decimals, '0') || '0');
+  return units.toString();
+}
+
+/**
+ * A smallest-units amount for display: at most `maxFraction` decimals,
+ * rounded up when `roundUp` (amounts the user must pay never look smaller).
+ */
+export function formatUnitsShort(amount: string, decimals: number, maxFraction = 6, roundUp = false): string {
+  if (decimals <= maxFraction) return formatUnits(amount, decimals);
+  const step = 10n ** BigInt(decimals - maxFraction);
+  const value = BigInt(amount);
+  const rounded = roundUp ? ((value + step - 1n) / step) * step : (value / step) * step;
+  return formatUnits(rounded.toString(), decimals);
 }
 
 /** Basic shape check for a refund address; the API validates it per chain. */

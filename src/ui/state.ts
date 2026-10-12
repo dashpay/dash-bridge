@@ -2336,11 +2336,21 @@ export function depositMinimumDuffs(state: BridgeState): number {
   return state.minimumDeposit || 300000;
 }
 
+/** DASH to receive before the user types anything: 0.05, or the deposit minimum if higher. */
+function defaultNearAmountInput(state: BridgeState): string {
+  return formatUnits(String(Math.max(depositMinimumDuffs(state), NEAR_DEFAULT_AMOUNT_DUFFS)), 8);
+}
+
+/** Clears the error shown under the form, and the minimum it may offer. */
+const NEAR_NO_ERROR = { error: undefined, minimumInput: undefined };
+
 function nearIntentsOf(state: BridgeState): NearIntentsState {
   return state.nearIntents ?? {
     open: false,
+    pickerOpen: false,
     assetFilter: '',
-    amountInput: formatUnits(String(Math.max(depositMinimumDuffs(state), NEAR_DEFAULT_AMOUNT_DUFFS)), 8),
+    amountSide: 'out',
+    amountInput: defaultNearAmountInput(state),
     refundAddress: '',
   };
 }
@@ -2349,8 +2359,9 @@ function patchNearIntents(state: BridgeState, patch: Partial<NearIntentsState>):
   return { ...state, nearIntents: { ...nearIntentsOf(state), ...patch } };
 }
 
-export function toggleNearIntentsPanel(state: BridgeState): BridgeState {
-  return patchNearIntents(state, { open: !nearIntentsOf(state).open });
+/** Select the "Pay with other crypto" tab (true) or the "Send DASH" tab (false). */
+export function setNearIntentsTabOpen(state: BridgeState, open: boolean): BridgeState {
+  return patchNearIntents(state, { open, pickerOpen: false });
 }
 
 export function setNearIntentsTokensLoading(state: BridgeState): BridgeState {
@@ -2369,41 +2380,72 @@ export function setNearIntentsTokens(state: BridgeState, tokens: NearIntentsToke
   });
 }
 
-export function setNearIntentsError(state: BridgeState, error: string): BridgeState {
-  return patchNearIntents(state, { busy: undefined, error });
+export function setNearIntentsError(state: BridgeState, error: string, minimumInput?: string): BridgeState {
+  return patchNearIntents(state, { busy: undefined, error, minimumInput });
+}
+
+export function setNearIntentsPickerOpen(state: BridgeState, pickerOpen: boolean): BridgeState {
+  return patchNearIntents(state, { pickerOpen, assetFilter: '' });
 }
 
 export function setNearIntentsAssetFilter(state: BridgeState, assetFilter: string): BridgeState {
   return patchNearIntents(state, { assetFilter });
 }
 
-/** Changing any quote input invalidates a quote priced for the old one. */
+/**
+ * Changing any quote input invalidates a quote priced for the old one. An
+ * amount typed in the old asset means nothing in the new one, so the DASH
+ * side is kept instead: the last quoted DASH amount, or the typed one.
+ */
 export function setNearIntentsOriginAsset(state: BridgeState, originAssetId: string): BridgeState {
-  return patchNearIntents(state, { originAssetId, quote: undefined, error: undefined });
+  const near = nearIntentsOf(state);
+  const keepDash = near.amountSide === 'in' && near.originAssetId !== originAssetId;
+  return patchNearIntents(state, {
+    originAssetId,
+    pickerOpen: false,
+    assetFilter: '',
+    ...(keepDash ? {
+      amountSide: 'out' as const,
+      amountInput: near.quote ? formatUnits(near.quote.amountOut, 8) : defaultNearAmountInput(state),
+    } : {}),
+    quote: undefined,
+    ...NEAR_NO_ERROR,
+  });
 }
 
-export function setNearIntentsAmountInput(state: BridgeState, amountInput: string): BridgeState {
-  return patchNearIntents(state, { amountInput, quote: undefined, error: undefined });
+/** The user typed into the "You pay" ('in') or "You get" ('out') amount. */
+export function setNearIntentsAmount(state: BridgeState, amountSide: 'in' | 'out', amountInput: string): BridgeState {
+  return patchNearIntents(state, { amountSide, amountInput, quote: undefined, ...NEAR_NO_ERROR });
 }
 
+/** The refund address only matters for the real quote, so the live quote stays. */
 export function setNearIntentsRefundAddress(state: BridgeState, refundAddress: string): BridgeState {
-  return patchNearIntents(state, { refundAddress, quote: undefined, error: undefined });
+  return patchNearIntents(state, { refundAddress, refundError: undefined });
+}
+
+export function setNearIntentsRefundError(state: BridgeState, refundError: string): BridgeState {
+  return patchNearIntents(state, { busy: undefined, refundError });
 }
 
 export function setNearIntentsQuoting(state: BridgeState): BridgeState {
-  return patchNearIntents(state, { busy: 'quote', quote: undefined, error: undefined });
+  return patchNearIntents(state, { busy: 'quote', quote: undefined, ...NEAR_NO_ERROR });
+}
+
+/** No quote to show (e.g. the amount was cleared): drop any stale one. */
+export function clearNearIntentsQuote(state: BridgeState): BridgeState {
+  return patchNearIntents(state, { busy: undefined, quote: undefined, ...NEAR_NO_ERROR });
 }
 
 export function setNearIntentsQuote(state: BridgeState, quote: NearIntentsQuote): BridgeState {
-  return patchNearIntents(state, { busy: undefined, quote, error: undefined });
+  return patchNearIntents(state, { busy: undefined, quote, ...NEAR_NO_ERROR });
 }
 
 export function setNearIntentsConfirming(state: BridgeState): BridgeState {
-  return patchNearIntents(state, { busy: 'confirm', error: undefined });
+  return patchNearIntents(state, { busy: 'confirm', ...NEAR_NO_ERROR });
 }
 
 export function setNearIntentsSwap(state: BridgeState, swap: NearIntentsSwap): BridgeState {
-  return patchNearIntents(state, { busy: undefined, quote: undefined, error: undefined, swap });
+  return patchNearIntents(state, { busy: undefined, quote: undefined, ...NEAR_NO_ERROR, swap });
 }
 
 /** Record a status poll result; ignored if that swap was discarded meanwhile. */
@@ -2419,7 +2461,7 @@ export function setNearSwapStatus(
 
 /** Back to the asset form, dropping any quote and swap. */
 export function clearNearIntentsSwap(state: BridgeState): BridgeState {
-  return patchNearIntents(state, { swap: undefined, quote: undefined, error: undefined, busy: undefined });
+  return patchNearIntents(state, { swap: undefined, quote: undefined, ...NEAR_NO_ERROR, busy: undefined });
 }
 
 /**
