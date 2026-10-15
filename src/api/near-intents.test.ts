@@ -6,12 +6,16 @@ import {
   fetchNearIntentsTokens,
   formatUnits,
   getNearSwapStatus,
+  formatUnitsShort,
+  isNearOutputDropTooLarge,
   isNearPriceIncreaseTooLarge,
   isNearSwapExpired,
+  isSameNearAsset,
+  NEAR_DRY_QUOTE_REFUND_ACCOUNT,
   nearIntentsAppUrl,
   nearSwapPaymentCutoff,
   nearSwapWindowMs,
-  parseDashToDuffs,
+  parseUnits,
   requestNearIntentsQuote,
   selectableSourceTokens,
   validateRefundAddress,
@@ -56,6 +60,7 @@ function quoteResponse(overrides: { quote?: Record<string, unknown>; quoteReques
     },
     quoteRequest: {
       swapType: 'EXACT_OUTPUT',
+      slippageTolerance: 100,
       originAsset: USDC.assetId,
       destinationAsset: NEAR_INTENTS_DASH_ASSET_ID,
       amount: '5000000',
@@ -71,13 +76,24 @@ function quoteResponse(overrides: { quote?: Record<string, unknown>; quoteReques
   };
 }
 
-const quoteParams = (dry: boolean) => ({
+const QUOTE_BASE = {
   originAsset: USDC,
-  amountOutDuffs: 5_000_000,
+  swapType: 'EXACT_OUTPUT' as const,
+  amount: '5000000',
+  minAmountOutDuffs: 300_000,
   recipient: RECIPIENT,
-  refundTo: REFUND,
-  dry,
   now: NOW,
+};
+const quoteParams = (dry: boolean) => (dry
+  ? { ...QUOTE_BASE, dry: true as const }
+  : { ...QUOTE_BASE, dry: false as const, refundTo: REFUND });
+/** What 1Click echoes for a dry quote: our placeholder refund target. */
+const DRY_ECHO = { refundTo: NEAR_DRY_QUOTE_REFUND_ACCOUNT, refundType: 'INTENTS' };
+/** A pay-side (EXACT_INPUT) quote for 20 USDC. */
+const exactInput = { ...QUOTE_BASE, swapType: 'EXACT_INPUT' as const, amount: '20000000', dry: false as const, refundTo: REFUND };
+const exactInputResponse = (quote: Record<string, unknown> = {}) => quoteResponse({
+  quote: { amountIn: '20000000', minAmountIn: '20000000', amountOut: '39400815', minAmountOut: '39006806', ...quote },
+  quoteRequest: { swapType: 'EXACT_INPUT', amount: '20000000' },
 });
 
 afterEach(() => {
@@ -125,13 +141,28 @@ describe('fetchNearIntentsTokens', () => {
 });
 
 describe('requestNearIntentsQuote', () => {
+  it('prices a dry quote with a placeholder refund target, not the user\'s address', async () => {
+    const fetchMock = mockFetch(201, quoteResponse({ quoteRequest: DRY_ECHO }));
+    await requestNearIntentsQuote(quoteParams(true));
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]!.body))).toMatchObject({
+      dry: true,
+      refundTo: NEAR_DRY_QUOTE_REFUND_ACCOUNT,
+      refundType: 'INTENTS',
+    });
+  });
+
+  it('refuses a dry quote that echoes the user refund target instead of the placeholder', async () => {
+    mockFetch(201, quoteResponse());
+    await expect(requestNearIntentsQuote(quoteParams(true))).rejects.toMatchObject({ kind: 'invalid_response' });
+  });
+
   it('sends an EXACT_OUTPUT request for DASH to the deposit address', async () => {
     const fetchMock = mockFetch(201, quoteResponse());
-    await requestNearIntentsQuote(quoteParams(true));
+    await requestNearIntentsQuote(quoteParams(false));
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe(`${NEAR_INTENTS_API_URL}/v0/quote`);
     expect(JSON.parse(String(init!.body))).toMatchObject({
-      dry: true,
+      dry: false,
       swapType: 'EXACT_OUTPUT',
       originAsset: USDC.assetId,
       destinationAsset: NEAR_INTENTS_DASH_ASSET_ID,
@@ -153,6 +184,7 @@ describe('requestNearIntentsQuote', () => {
       amountIn: '2680000',
       minAmountIn: '2650000',
       amountOut: '5000000',
+      minAmountOut: '5000000',
       amountInUsd: 2.68,
       amountOutUsd: 2.65,
       timeEstimateSec: 134,
@@ -180,31 +212,31 @@ describe('requestNearIntentsQuote', () => {
   it('asks for a 3 hour deadline when paying from a slow chain', async () => {
     const fetchMock = mockFetch(201, quoteResponse({ quoteRequest: { originAsset: 'nep141:btc.omft.near' } }));
     const btc = { assetId: 'nep141:btc.omft.near', symbol: 'BTC', blockchain: 'btc', decimals: 8 };
-    await requestNearIntentsQuote({ ...quoteParams(true), originAsset: btc });
+    await requestNearIntentsQuote({ ...quoteParams(false), originAsset: btc });
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]!.body)).deadline).toBe('2026-10-07T20:00:00.000Z');
   });
 
   it.each([['2.68'], ['2.680000'], ['02.68']])('accepts amountInFormatted %s matching the decimals', async (formatted) => {
     mockFetch(201, quoteResponse({ quote: { amountInFormatted: formatted } }));
-    await expect(requestNearIntentsQuote(quoteParams(true))).resolves.toMatchObject({ amountIn: '2680000' });
+    await expect(requestNearIntentsQuote(quoteParams(false))).resolves.toMatchObject({ amountIn: '2680000' });
   });
 
   it.each([['0.00000268'], ['2680000'], ['2.68 USDC'], [2.68]])(
     'refuses a quote whose amountInFormatted %s disagrees with the decimals',
     async (formatted) => {
       mockFetch(201, quoteResponse({ quote: { amountInFormatted: formatted } }));
-      await expect(requestNearIntentsQuote(quoteParams(true))).rejects.toMatchObject({ kind: 'invalid_response' });
+      await expect(requestNearIntentsQuote(quoteParams(false))).rejects.toMatchObject({ kind: 'invalid_response' });
     }
   );
 
   it('refuses a minimum input above the quoted input', async () => {
     mockFetch(201, quoteResponse({ quote: { minAmountIn: '2680001' } }));
-    await expect(requestNearIntentsQuote(quoteParams(true))).rejects.toMatchObject({ kind: 'invalid_response' });
+    await expect(requestNearIntentsQuote(quoteParams(false))).rejects.toMatchObject({ kind: 'invalid_response' });
   });
 
   it('turns "No liquidity available" into a friendly message', async () => {
     mockFetch(400, { message: 'No liquidity available', correlationId: 'x' });
-    const error = await requestNearIntentsQuote(quoteParams(true)).catch((e) => e);
+    const error = await requestNearIntentsQuote(quoteParams(false)).catch((e) => e);
     expect(error).toBeInstanceOf(NearIntentsError);
     expect(error.kind).toBe('no_liquidity');
     expect(error.message).toMatch(/can't route this asset to DASH right now/);
@@ -213,7 +245,7 @@ describe('requestNearIntentsQuote', () => {
 
   it('passes other 4xx messages through, shortened', async () => {
     mockFetch(400, { message: `refundTo is not valid ${'x'.repeat(500)}` });
-    const error = await requestNearIntentsQuote(quoteParams(true)).catch((e) => e);
+    const error = await requestNearIntentsQuote(quoteParams(false)).catch((e) => e);
     expect(error.kind).toBe('rejected');
     expect(error.message.startsWith('NEAR Intents rejected the request: refundTo is not valid')).toBe(true);
     expect(error.message.length).toBeLessThan(260);
@@ -225,6 +257,8 @@ describe('requestNearIntentsQuote', () => {
     ['origin asset', { quoteRequest: { originAsset: 'nep141:wrap.near' } }],
     ['amount', { quoteRequest: { amount: '1' } }],
     ['swap type', { quoteRequest: { swapType: 'EXACT_INPUT' } }],
+    ['slippage', { quoteRequest: { slippageTolerance: 9000 } }],
+    ['missing slippage', { quoteRequest: { slippageTolerance: undefined } }],
     ['refund address', { quoteRequest: { refundTo: '0xdeadbeef00000000000000000000000000000000' } }],
     ['missing refund address', { quoteRequest: { refundTo: undefined } }],
     ['missing recipient type', { quoteRequest: { recipientType: undefined } }],
@@ -235,9 +269,62 @@ describe('requestNearIntentsQuote', () => {
     await expect(requestNearIntentsQuote(quoteParams(false))).rejects.toMatchObject({ kind: 'invalid_response' });
   });
 
+  it('accepts BTC echoed in the newer native-coin id scheme', async () => {
+    const btc = { assetId: 'nep141:btc.omft.near', symbol: 'BTC', blockchain: 'btc', decimals: 8 };
+    mockFetch(201, quoteResponse({ quoteRequest: { originAsset: '1cs_v1:btc:native:coin' } }));
+    await expect(requestNearIntentsQuote({ ...quoteParams(false), originAsset: btc })).resolves.toMatchObject({ amountOut: '5000000' });
+  });
+
+  it('matches native-coin ids only to the same chain\'s coin', () => {
+    expect(isSameNearAsset('nep141:btc.omft.near', '1cs_v1:btc:native:coin')).toBe(true);
+    expect(isSameNearAsset('nep141:btc.omft.near', '1cs_v1:ltc:native:coin')).toBe(false);
+    expect(isSameNearAsset(USDC.assetId, '1cs_v1:eth:native:coin')).toBe(false);
+    expect(isSameNearAsset('nep141:btc.omft.near', undefined)).toBe(false);
+  });
+
+  it('sends a pay-side amount as EXACT_INPUT and keeps the guaranteed minimum', async () => {
+    const fetchMock = mockFetch(201, exactInputResponse());
+    const quote = await requestNearIntentsQuote(exactInput);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]!.body))).toMatchObject({ swapType: 'EXACT_INPUT', amount: '20000000' });
+    expect(quote).toMatchObject({ amountIn: '20000000', amountOut: '39400815', minAmountOut: '39006806' });
+  });
+
+  it.each([
+    ['prices a different input', { amountIn: '19000000' }],
+    ['gives no minimum output', { minAmountOut: undefined }],
+    ['has a minimum above the estimate', { minAmountOut: '39400816' }],
+    ['has a minimum far below the estimate', { minAmountOut: '310000' }],
+  ])('refuses an EXACT_INPUT quote that %s', async (_case, quote) => {
+    mockFetch(201, exactInputResponse(quote));
+    await expect(requestNearIntentsQuote(exactInput)).rejects.toMatchObject({ kind: 'invalid_response' });
+  });
+
+  it('refuses an EXACT_INPUT quote that may deliver less than the deposit needs', async () => {
+    mockFetch(201, exactInputResponse());
+    const error = await requestNearIntentsQuote({ ...exactInput, minAmountOutDuffs: 40_000_000 }).catch((e) => e);
+    expect(error.kind).toBe('too_low');
+    expect(error.message).toMatch(/less than the 0.4 DASH this deposit needs/);
+  });
+
+  it.each([
+    ['EXACT_OUTPUT', quoteParams(false), '10392075', '0.10392075 DASH'],
+    ['EXACT_INPUT', exactInput, '564367', '0.564367 USDC'],
+  ])('reports the minimum of a too-small %s amount in the typed asset', async (_type, params, min, text) => {
+    mockFetch(400, { message: `Amount is too low for bridge, try at least ${min}` });
+    const error = await requestNearIntentsQuote(params).catch((e) => e);
+    expect(error).toMatchObject({ kind: 'too_low', minAmount: min });
+    expect(error.message).toContain(`The minimum is ${text}.`);
+  });
+
+  it('refuses to request a zero amount', async () => {
+    const fetchMock = mockFetch(201, quoteResponse());
+    await expect(requestNearIntentsQuote({ ...quoteParams(false), amount: '0' })).rejects.toBeInstanceOf(NearIntentsError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('refuses a quote that would deliver less DASH than requested', async () => {
     mockFetch(201, quoteResponse({ quote: { minAmountOut: '4000000' } }));
-    await expect(requestNearIntentsQuote(quoteParams(true))).rejects.toMatchObject({ kind: 'invalid_response' });
+    await expect(requestNearIntentsQuote(quoteParams(false))).rejects.toMatchObject({ kind: 'invalid_response' });
   });
 
   it.each([
@@ -256,7 +343,7 @@ describe('requestNearIntentsQuote', () => {
 
   it('rejects non-numeric amounts', async () => {
     mockFetch(201, quoteResponse({ quote: { amountIn: '1e9' } }));
-    await expect(requestNearIntentsQuote(quoteParams(true))).rejects.toMatchObject({ kind: 'invalid_response' });
+    await expect(requestNearIntentsQuote(quoteParams(false))).rejects.toMatchObject({ kind: 'invalid_response' });
   });
 });
 
@@ -287,16 +374,28 @@ describe('helpers', () => {
     expect(formatUnits('42', 0)).toBe('42');
   });
 
-  it('parses DASH amounts into duffs', () => {
-    expect(parseDashToDuffs('0.05')).toBe(5_000_000);
-    expect(parseDashToDuffs(' 1 ')).toBe(100_000_000);
-    expect(parseDashToDuffs('1.')).toBe(100_000_000);
-    expect(parseDashToDuffs('0.000000001')).toBeNull();
-    expect(parseDashToDuffs('-1')).toBeNull();
-    expect(parseDashToDuffs('abc')).toBeNull();
-    expect(parseDashToDuffs('')).toBeNull();
-    expect(parseDashToDuffs('21000000')).toBe(2_100_000_000_000_000);
-    expect(parseDashToDuffs('99999999.99999999')).toBeNull();
+  it('parses typed amounts into smallest units', () => {
+    expect(parseUnits('0.05', 8)).toBe('5000000');
+    expect(parseUnits(' 1 ', 8)).toBe('100000000');
+    expect(parseUnits('1.', 8)).toBe('100000000');
+    expect(parseUnits('.5', 6)).toBe('500000');
+    expect(parseUnits('20', 6)).toBe('20000000');
+    expect(parseUnits('1.5', 18)).toBe('1500000000000000000');
+    expect(parseUnits('42', 0)).toBe('42');
+    expect(parseUnits('0.000000001', 8)).toBeNull();
+    expect(parseUnits('1.5', 0)).toBeNull();
+    expect(parseUnits('-1', 8)).toBeNull();
+    expect(parseUnits('1e3', 8)).toBeNull();
+    expect(parseUnits('abc', 8)).toBeNull();
+    expect(parseUnits('.', 8)).toBeNull();
+    expect(parseUnits('', 8)).toBeNull();
+  });
+
+  it('shortens amounts for display, rounding payments up', () => {
+    expect(formatUnitsShort('39400815', 8)).toBe('0.394008');
+    expect(formatUnitsShort('39400815', 8, 6, true)).toBe('0.394009');
+    expect(formatUnitsShort('2680000', 6)).toBe('2.68');
+    expect(formatUnitsShort('1234567890123456789', 18, 6, true)).toBe('1.234568');
   });
 
   it('gives slow source chains a longer payment window', () => {
@@ -328,6 +427,12 @@ describe('helpers', () => {
     expect(isNearPriceIncreaseTooLarge('1000000', '1020001', 200n)).toBe(true);
     expect(isNearPriceIncreaseTooLarge('1000000', '900000', 200n)).toBe(false);
     expect(isNearPriceIncreaseTooLarge('1', '2', 200n)).toBe(true);
+  });
+
+  it('flags a confirmed quote delivering more than the allowed basis points less DASH', () => {
+    expect(isNearOutputDropTooLarge('1000000', '980000', 200n)).toBe(false);
+    expect(isNearOutputDropTooLarge('1000000', '979999', 200n)).toBe(true);
+    expect(isNearOutputDropTooLarge('1000000', '1100000', 200n)).toBe(false);
   });
 
   it('checks refund addresses loosely', () => {

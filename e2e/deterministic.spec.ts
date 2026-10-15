@@ -465,17 +465,14 @@ test.describe('Pay with other crypto via NEAR Intents (mainnet, mock mode, stubb
       if (quote === 'no-liquidity') {
         return route.fulfill({ status: 400, json: { message: 'No liquidity available', correlationId: 'c1' } });
       }
+      const exactInput = body.swapType === 'EXACT_INPUT';
       return route.fulfill({
         status: 201,
         json: {
           quote: {
-            amountIn: '2680000',
-            amountInUsd: '2.68',
-            minAmountIn: '2650000',
-            amountOut: body.amount,
-            amountOutUsd: '2.65',
-            minAmountOut: body.amount,
-            timeEstimate: 134,
+            ...(exactInput
+              ? { amountIn: body.amount, amountInUsd: '20.00', minAmountIn: body.amount, amountOut: '39400815', amountOutUsd: '19.82', minAmountOut: '39006806', timeEstimate: 177 }
+              : { amountIn: '2680000', amountInUsd: '2.68', minAmountIn: '2650000', amountOut: body.amount, amountOutUsd: '2.65', minAmountOut: body.amount, timeEstimate: 134 }),
             ...(body.dry ? {} : { depositAddress: NEAR_DEPOSIT_ADDRESS, deadline: body.deadline }),
           },
           quoteRequest: body,
@@ -500,32 +497,20 @@ test.describe('Pay with other crypto via NEAR Intents (mainnet, mock mode, stubb
     return (await page.locator('.address-section .address').textContent())!.trim();
   }
 
-  test('quotes a swap into DASH, shows the payment address and follows it to delivery', async ({ page }) => {
+  test('prices a swap live, opens it with the refund address and follows it to delivery', async ({ page }) => {
     const quoteBodies = await stubOneClick(page, 'ok', ['PENDING_DEPOSIT', 'PROCESSING', 'SUCCESS']);
     const depositAddress = await openDepositScreen(page);
     expect(depositAddress).toMatch(/^X/);
 
-    await page.click('#near-intents-toggle');
-    const select = page.locator('#near-asset-select');
-    await expect(select).toHaveValue(USDC_ETH);
-    // DASH itself is not offered as a source.
-    await expect(select.locator('option')).toHaveText(['USDC (Ethereum)', 'SOL (Solana)']);
-    await expect(page.locator('#near-amount-input')).toHaveValue('0.05');
+    await page.click('#deposit-tab-near');
+    // The DASH QR and address give way to the swap form.
+    await expect(page.locator('.address-section')).toHaveCount(0);
+    await expect(page.locator('#near-asset-btn')).toContainText('USDC');
+    await expect(page.locator('#near-amount-out')).toHaveValue('0.05');
 
-    // Inputs are validated before anything is sent.
-    await page.click('#near-quote-btn');
-    await expect(page.locator('.near-intents-error')).toContainText('Enter an address on the source chain');
-    await page.fill('#near-amount-input', '0.001');
-    await page.fill('#near-refund-input', REFUND);
-    await page.click('#near-quote-btn');
-    await expect(page.locator('.near-intents-error')).toContainText('Enter at least 0.003 DASH');
-    expect(quoteBodies).toHaveLength(0);
-
-    await page.fill('#near-amount-input', '0.05');
-    await page.click('#near-quote-btn');
-    const quote = page.locator('#near-intents-quote');
-    await expect(quote).toContainText('2.68 USDC');
-    await expect(quote).toContainText('0.05 DASH');
+    // The default amount is priced without any click, using a placeholder refund target.
+    await expect(page.locator('#near-amount-in')).toHaveValue('2.68');
+    await expect(page.locator('#near-intents-quote')).toContainText('1 DASH ≈ 53.60 USDC');
     expect(quoteBodies[0]).toMatchObject({
       dry: true,
       swapType: 'EXACT_OUTPUT',
@@ -533,14 +518,22 @@ test.describe('Pay with other crypto via NEAR Intents (mainnet, mock mode, stubb
       destinationAsset: 'nep141:dash.omft.near',
       amount: '5000000',
       recipient: depositAddress,
-      refundTo: REFUND,
+      refundTo: 'intents.near',
+      refundType: 'INTENTS',
     });
 
+    // The refund address is required before a payment address is handed out.
     await page.click('#near-confirm-btn');
+    await expect(page.locator('.near-refund-error')).toContainText('Enter an address on the source chain');
+    const quotesBeforeConfirm = quoteBodies.length;
+    await page.fill('#near-refund-input', REFUND);
+    await page.click('#near-confirm-btn');
+
     await expect(page.locator('#near-deposit-address')).toHaveText(NEAR_DEPOSIT_ADDRESS);
     await expect(page.locator('.near-swap-instruction')).toContainText('Send exactly 2.68 USDC on Ethereum');
     await expect(page.locator('.near-intents-warning')).toContainText(REFUND);
-    expect(quoteBodies[1]).toMatchObject({ dry: false, recipient: depositAddress });
+    expect(quoteBodies).toHaveLength(quotesBeforeConfirm + 1);
+    expect(quoteBodies.at(-1)).toMatchObject({ dry: false, recipient: depositAddress, refundTo: REFUND, refundType: 'ORIGIN_CHAIN' });
 
     // Status polling follows the swap to delivery.
     await expect(page.locator('#near-swap-status')).toContainText('DASH delivered', { timeout: 20_000 });
@@ -550,22 +543,59 @@ test.describe('Pay with other crypto via NEAR Intents (mainnet, mock mode, stubb
     await expect(page.getByText('Save your keys')).toBeVisible();
   });
 
+  test('prices either side, enforces the deposit minimum and switches assets from the picker', async ({ page }) => {
+    const quoteBodies = await stubOneClick(page, 'ok');
+    await openDepositScreen(page);
+    await page.click('#deposit-tab-near');
+    await expect(page.locator('#near-amount-in')).toHaveValue('2.68');
+
+    // Typing what to pay asks for an EXACT_INPUT quote.
+    await page.fill('#near-amount-in', '20');
+    await expect(page.locator('#near-amount-out')).toHaveValue('0.394008');
+    await expect(page.locator('.near-amount-note')).toContainText('At least 0.390068 DASH');
+    expect(quoteBodies.at(-1)).toMatchObject({ dry: true, swapType: 'EXACT_INPUT', amount: '20000000' });
+
+    // Too little DASH is caught before asking 1Click, with a one-click fix.
+    const quotes = quoteBodies.length;
+    await page.fill('#near-amount-out', '0.001');
+    await expect(page.locator('.near-intents-error')).toContainText('needs at least 0.003 DASH');
+    expect(quoteBodies).toHaveLength(quotes);
+    await page.click('#near-use-min-btn');
+    await expect(page.locator('#near-amount-out')).toHaveValue('0.003');
+    await expect(page.locator('#near-amount-in')).toHaveValue('2.68');
+    expect(quoteBodies.at(-1)).toMatchObject({ swapType: 'EXACT_OUTPUT', amount: '300000' });
+
+    // The picker searches by symbol or chain; DASH itself is not offered.
+    await page.click('#near-asset-btn');
+    await expect(page.locator('#near-asset-filter')).toBeFocused();
+    await expect(page.locator('.near-token-option[data-asset-id="nep141:dash.omft.near"]')).toHaveCount(0);
+    await page.fill('#near-asset-filter', 'solana');
+    await page.locator('.near-token-option', { hasText: 'SOL' }).click();
+    await expect(page.locator('#near-asset-btn')).toContainText('SOL');
+    await expect(page.locator('label[for="near-refund-input"]')).toHaveText('Refund address on Solana');
+    await expect.poll(() => quoteBodies.at(-1)?.originAsset).toBe('nep141:sol.omft.near');
+
+    // Pricing paused by the picker picks up again when it closes.
+    await page.fill('#near-amount-out', '0.1');
+    await page.click('#near-asset-btn');
+    await page.keyboard.press('Escape');
+    // The stub prices 2680000 smallest units: 0.00268 SOL at 9 decimals.
+    await expect(page.locator('#near-amount-in')).toHaveValue('0.00268');
+    expect(quoteBodies.at(-1)).toMatchObject({ swapType: 'EXACT_OUTPUT', amount: '10000000' });
+  });
+
   test('explains when NEAR Intents has no liquidity into DASH, and the DASH deposit stays usable', async ({ page }) => {
     await stubOneClick(page, 'no-liquidity');
     await openDepositScreen(page);
 
-    await page.click('#near-intents-toggle');
-    await page.selectOption('#near-asset-select', 'nep141:sol.omft.near');
-    await expect(page.locator('label[for="near-refund-input"]')).toHaveText('Refund address on Solana');
-    await page.fill('#near-refund-input', '7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV');
-    await page.click('#near-quote-btn');
-
+    await page.click('#deposit-tab-near');
     await expect(page.locator('.near-intents-error')).toContainText("NEAR Intents can't route this asset to DASH right now");
-    await expect(page.locator('#near-quote-btn')).toBeEnabled();
+    await expect(page.locator('#near-confirm-btn')).toBeDisabled();
     const fallback = page.locator('.near-intents-fallback a');
-    await expect(fallback).toHaveAttribute('href', 'https://near-intents.org/?from=SOL:sol&to=DASH');
+    await expect(fallback).toHaveAttribute('href', 'https://near-intents.org/?from=USDC:eth&to=DASH');
 
-    // The regular DASH deposit is unaffected.
+    // The regular DASH deposit is one tab away and unaffected.
+    await page.click('#deposit-tab-dash');
     await expect(page.locator('.address-section .address')).toBeVisible();
     await page.evaluate(() => (window as { __e2eMockAdvance?: () => void }).__e2eMockAdvance?.());
     await expect(page.getByText('Save your keys')).toBeVisible();
@@ -577,7 +607,7 @@ test.describe('Pay with other crypto via NEAR Intents (mainnet, mock mode, stubb
     await page.click('#mode-create-btn');
     await page.click('#continue-btn');
     await expect(page.locator('.deposit-headline')).toBeVisible();
-    await expect(page.locator('#near-intents-toggle')).toHaveCount(0);
+    await expect(page.locator('#deposit-tab-near')).toHaveCount(0);
   });
 });
 

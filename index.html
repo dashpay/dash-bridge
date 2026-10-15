@@ -2382,44 +2382,42 @@
        NEAR Intents ("Pay with other crypto", mainnet deposit screen)
        ============================================================================ */
 
-    .near-intents-section {
-      margin-top: 24px;
-      border-top: 1px solid rgba(255, 255, 255, 0.1);
-      padding-top: 20px;
-      text-align: left;
-    }
-
-    .near-intents-toggle {
-      color: #b0b0b0;
-    }
-
-    .near-intents-via {
-      color: #666;
-      font-size: 0.8rem;
-      margin-left: 4px;
-    }
-
-    .near-intents-body {
-      margin-top: 14px;
-      padding: 20px;
-      background: rgba(0, 0, 0, 0.2);
+    .deposit-tabs {
+      display: flex;
+      gap: 4px;
+      margin: 20px 0 4px;
+      padding: 4px;
+      background: rgba(0, 0, 0, 0.25);
       border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 10px;
+      border-radius: 12px;
     }
 
-    .near-intents-intro {
-      color: #b0b0b0;
-      font-size: 0.85rem;
-      line-height: 1.5;
-      margin-bottom: 16px;
+    .deposit-tab {
+      flex: 1;
+      padding: 10px 8px;
+      background: transparent;
+      border: none;
+      border-radius: 9px;
+      color: #8a8fa3;
+      font-size: 0.9rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
     }
 
-    .near-intents-form .input-label {
-      margin-top: 14px;
+    .deposit-tab:hover {
+      color: #e0e0e0;
     }
 
-    .near-intents-form .input-label:first-child {
-      margin-top: 0;
+    .deposit-tab.active {
+      background: rgba(255, 255, 255, 0.1);
+      color: #fff;
+      font-weight: 600;
+    }
+
+    .near-intents-section {
+      margin-top: 12px;
+      text-align: left;
     }
 
     .near-input {
@@ -2446,19 +2444,173 @@
       opacity: 0.6;
     }
 
-    #near-asset-filter {
-      margin-bottom: 8px;
-    }
-
-    .near-select option,
-    .near-select optgroup {
-      background: #16213e;
-      color: #e0e0e0;
-    }
-
     #near-refund-input {
       font-family: 'SF Mono', Monaco, monospace;
       font-size: 0.85rem;
+    }
+
+    .near-amount-box {
+      padding: 12px 14px;
+      background: rgba(0, 0, 0, 0.25);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 14px;
+      transition: border-color 0.2s;
+    }
+
+    .near-amount-box:focus-within {
+      border-color: rgba(0, 141, 228, 0.6);
+    }
+
+    .near-amount-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: #8a8fa3;
+      font-size: 0.8rem;
+      margin-bottom: 4px;
+    }
+
+    .near-amount-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .near-amount-input {
+      flex: 1;
+      min-width: 0;
+      background: transparent;
+      border: none;
+      color: #fff;
+      font-size: 1.7rem;
+      font-weight: 600;
+      padding: 2px 0;
+    }
+
+    .near-amount-input:focus {
+      outline: none;
+    }
+
+    .near-amount-input::placeholder {
+      color: #4a4f63;
+      font-weight: 500;
+    }
+
+    .near-amount-box:not(.typed) .near-amount-input::placeholder {
+      font-size: 1rem;
+    }
+
+    .near-amount-input:disabled {
+      opacity: 0.6;
+    }
+
+    .near-token-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      flex-shrink: 0;
+      max-width: 60%;
+      padding: 6px 10px 6px 6px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 999px;
+      color: #fff;
+      font-size: 0.95rem;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .near-token-btn:hover:not(.static):not(:disabled) {
+      background: rgba(255, 255, 255, 0.14);
+    }
+
+    .near-token-btn.static {
+      cursor: default;
+      padding-right: 12px;
+    }
+
+    .near-token-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .near-token-icon {
+      display: inline-grid;
+      place-items: center;
+      width: 24px;
+      height: 24px;
+      flex-shrink: 0;
+      border-radius: 50%;
+      color: #fff;
+      font-size: 0.72rem;
+      font-weight: 700;
+    }
+
+    .near-token-symbol {
+      font-weight: 600;
+    }
+
+    .near-token-chain {
+      color: #8a8fa3;
+      font-size: 0.8rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .near-token-caret {
+      color: #8a8fa3;
+      font-size: 0.75rem;
+    }
+
+    .near-amount-arrow {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      margin: -10px auto;
+      background: #1c2440;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 10px;
+      color: #8a8fa3;
+    }
+
+    .near-amount-note {
+      color: #777;
+      font-size: 0.78rem;
+      margin: 6px 4px 0;
+    }
+
+    .near-quote-meta {
+      display: grid;
+      gap: 6px;
+      margin: 14px 4px 0;
+      font-size: 0.82rem;
+      color: #8a8fa3;
+    }
+
+    .near-quote-meta div {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .near-quote-meta div span:last-child {
+      color: #d5d9e6;
+      text-align: right;
+    }
+
+    .near-refund-label {
+      margin-top: 18px;
+    }
+
+    .near-refund-error {
+      color: #ff8a80;
+    }
+
+    .near-use-min {
+      margin-top: 8px;
     }
 
     .near-btn {
@@ -2470,14 +2622,14 @@
     }
 
     .near-btn:disabled {
-      opacity: 0.6;
+      opacity: 0.5;
       cursor: not-allowed;
       transform: none;
       box-shadow: none;
     }
 
     .near-intents-error {
-      margin-top: 16px;
+      margin-top: 14px;
       padding: 12px 14px;
       background: rgba(244, 67, 54, 0.1);
       border: 1px solid rgba(244, 67, 54, 0.3);
@@ -2489,69 +2641,127 @@
     }
 
     .near-loading {
-      justify-content: flex-start;
+      justify-content: center;
       color: #b0b0b0;
+      padding: 24px 0;
     }
 
-    .near-intents-quote {
-      margin-top: 18px;
-      padding: 16px;
-      background: rgba(0, 141, 228, 0.08);
-      border: 1px solid rgba(0, 141, 228, 0.3);
-      border-radius: 10px;
+    .near-picker {
+      padding: 14px;
+      background: rgba(0, 0, 0, 0.25);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 14px;
     }
 
-    .near-quote-row {
+    .near-picker-head {
       display: flex;
       justify-content: space-between;
-      align-items: baseline;
-      gap: 12px;
-      color: #b0b0b0;
-      font-size: 0.9rem;
-    }
-
-    .near-quote-row strong {
-      color: #fff;
-      font-size: 1.05rem;
-      word-break: break-all;
-      text-align: right;
-    }
-
-    .near-quote-row.near-quote-sub {
-      color: #777;
-      font-size: 0.8rem;
+      align-items: center;
       margin-bottom: 10px;
     }
 
-    .near-quote-note {
-      color: #888;
+    .near-picker-close {
+      background: none;
+      border: none;
+      color: #8a8fa3;
+      font-size: 1.4rem;
+      line-height: 1;
+      cursor: pointer;
+      padding: 0 4px;
+    }
+
+    .near-picker-list {
+      max-height: 320px;
+      overflow-y: auto;
+      margin-top: 10px;
+    }
+
+    .near-picker-group {
+      color: #6f7896;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin: 12px 4px 6px;
+    }
+
+    .near-picker-popular {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .near-picker-popular .near-token-option {
+      width: auto;
+      padding: 5px 10px 5px 5px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 999px;
+    }
+
+    .near-token-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      padding: 8px;
+      background: none;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      color: #e0e0e0;
+      font-size: 0.9rem;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .near-token-option:hover {
+      background: rgba(255, 255, 255, 0.06);
+    }
+
+    .near-token-option.selected {
+      border-color: rgba(0, 141, 228, 0.6);
+      background: rgba(0, 141, 228, 0.1);
+    }
+
+    .near-token-option-symbol {
+      font-weight: 600;
+    }
+
+    .near-token-option-chain {
+      color: #8a8fa3;
       font-size: 0.8rem;
-      line-height: 1.5;
-      margin-top: 8px;
+    }
+
+    .near-picker-empty {
+      color: #8a8fa3;
+      font-size: 0.85rem;
+      padding: 12px 4px;
+    }
+
+    .near-intents-footer {
+      margin-top: 14px;
+      color: #6f7896;
+      font-size: 0.78rem;
+      text-align: center;
     }
 
     .near-intents-fallback {
-      margin-top: 18px;
+      margin-top: 6px;
       color: #888;
       font-size: 0.8rem;
-      line-height: 1.7;
+      line-height: 1.6;
+      text-align: center;
+    }
+
+    .near-intents-fallback summary {
+      cursor: pointer;
+      color: #8a8fa3;
+    }
+
+    .near-intents-fallback p {
+      margin: 8px 0;
     }
 
     .near-intents-fallback a {
       color: #008de4;
-    }
-
-    .near-intents-fallback-address {
-      background: rgba(0, 0, 0, 0.3);
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-family: 'SF Mono', Monaco, monospace;
-      word-break: break-all;
-    }
-
-    .near-intents-fallback .copy-btn {
-      padding: 2px 10px;
-      margin-left: 4px;
     }
 
     .near-intents-swap {
@@ -2573,12 +2783,6 @@
     .near-swap-status p {
       color: #b0b0b0;
       margin-top: 2px;
-    }
-
-    .near-swap-status.pending {
-      background: rgba(0, 141, 228, 0.1);
-      border: 1px solid rgba(0, 141, 228, 0.3);
-      color: #4fc3f7;
     }
 
     .near-swap-status.success {
@@ -2609,14 +2813,79 @@
       color: #4CAF50;
     }
 
-    .near-swap-qr {
-      margin-bottom: 6px;
+    .near-pay {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      text-align: left;
     }
 
-    .near-swap-qr-note {
-      color: #888;
-      font-size: 0.75rem;
-      margin-bottom: 14px;
+    .near-swap-qr {
+      flex-shrink: 0;
+      margin: 0;
+    }
+
+    .near-pay-details {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .near-pay-details .address-display {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+
+    .near-pay-details .address {
+      word-break: break-all;
+    }
+
+    .near-progress {
+      list-style: none;
+      display: grid;
+      gap: 10px;
+      margin: 16px 0 4px;
+      padding: 14px 16px;
+      background: rgba(0, 0, 0, 0.2);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      text-align: left;
+      font-size: 0.88rem;
+    }
+
+    .near-progress li {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: #6f7896;
+    }
+
+    .near-progress li.done {
+      color: #d5d9e6;
+    }
+
+    .near-progress li.current {
+      color: #fff;
+      font-weight: 600;
+    }
+
+    .near-progress-dot {
+      width: 12px;
+      height: 12px;
+      flex-shrink: 0;
+      margin: 0 3px;
+      border: 2px solid #3a4262;
+      border-radius: 50%;
+    }
+
+    .near-progress li.done .near-progress-dot {
+      background: #4CAF50;
+      border-color: #4CAF50;
+    }
+
+    .near-progress .near-spinner {
+      width: 18px;
+      height: 18px;
     }
 
     .near-swap-address {
@@ -3327,13 +3596,26 @@
       }
 
       /* NEAR Intents panel */
-      .near-intents-body {
-        padding: 16px 12px;
+      .deposit-tab {
+        font-size: 0.82rem;
+        padding: 10px 4px;
       }
 
-      .near-intents-toggle {
-        flex-wrap: wrap;
-        padding: 12px 14px;
+      .near-amount-input {
+        font-size: 1.4rem;
+      }
+
+      .near-token-chain {
+        display: none;
+      }
+
+      .near-pay {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .near-swap-qr {
+        align-self: center;
       }
 
       .near-btn {

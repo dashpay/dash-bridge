@@ -153,19 +153,23 @@ import {
   setFaucetError,
   // NEAR Intents state functions
   depositMinimumDuffs,
-  toggleNearIntentsPanel,
+  setNearIntentsTabOpen,
   setNearIntentsTokensLoading,
   setNearIntentsTokens,
   setNearIntentsError,
+  setNearIntentsPickerOpen,
   setNearIntentsAssetFilter,
   setNearIntentsOriginAsset,
-  setNearIntentsAmountInput,
+  setNearIntentsAmount,
   setNearIntentsRefundAddress,
+  setNearIntentsRefundError,
   setNearIntentsQuoting,
+  clearNearIntentsQuote,
   setNearIntentsQuote,
   setNearIntentsConfirming,
   setNearIntentsSwap,
   clearNearIntentsSwap,
+  nearChainName,
 } from './ui/index.js';
 import {
   getFaucetStatus,
@@ -176,8 +180,10 @@ import {
   fetchNearIntentsTokens,
   formatUnits,
   getNearSwapStatus,
+  isNearOutputDropTooLarge,
   isNearPriceIncreaseTooLarge,
-  parseDashToDuffs,
+  NearIntentsError,
+  parseUnits,
   requestNearIntentsQuote,
   validateRefundAddress,
   type NearQuoteRequest,
@@ -973,45 +979,70 @@ function setupEventListeners(container: HTMLElement) {
     faucetBtn.addEventListener('click', requestFaucetFunds);
   }
 
-  // NEAR Intents panel (mainnet deposit screen)
-  container.querySelector('#near-intents-toggle')?.addEventListener('click', () => {
-    updateState(toggleNearIntentsPanel(state));
-    if (state.nearIntents?.open) void loadNearIntentsTokens();
+  // NEAR Intents tab (mainnet deposit screen)
+  container.querySelector('#deposit-tab-dash')?.addEventListener('click', () => {
+    if (state.nearIntents?.open) updateState(setNearIntentsTabOpen(state, false));
+  });
+  container.querySelector('#deposit-tab-near')?.addEventListener('click', () => {
+    if (state.nearIntents?.open) return;
+    updateState(setNearIntentsTabOpen(state, true));
+    void loadNearIntentsTokens();
   });
   container.querySelector('#near-tokens-retry-btn')?.addEventListener('click', () => {
     void loadNearIntentsTokens();
   });
-  container.querySelector('#near-asset-filter')?.addEventListener('input', (e) => {
+  container.querySelector('#near-asset-btn')?.addEventListener('click', () => {
+    updateState(setNearIntentsPickerOpen(state, true));
+    (document.getElementById('near-asset-filter') as HTMLInputElement | null)?.focus();
+  });
+  container.querySelector('#near-picker-close')?.addEventListener('click', () => {
+    updateState(setNearIntentsPickerOpen(state, false));
+    resumeNearQuote();
+  });
+  const assetFilter = container.querySelector('#near-asset-filter');
+  assetFilter?.addEventListener('input', (e) => {
     updateState(setNearIntentsAssetFilter(state, (e.target as HTMLInputElement).value));
   });
-  container.querySelector('#near-asset-select')?.addEventListener('change', (e) => {
-    updateState(setNearIntentsOriginAsset(state, (e.target as HTMLSelectElement).value));
+  assetFilter?.addEventListener('keydown', (e) => {
+    if ((e as KeyboardEvent).key !== 'Escape') return;
+    updateState(setNearIntentsPickerOpen(state, false));
+    resumeNearQuote();
   });
-  // Typing only needs a re-render when it clears a quote or error on screen;
-  // otherwise just record the value (re-rendering rebuilds the QR codes).
-  const setNearFormValue = (next: BridgeState): void => {
-    if (state.nearIntents?.quote || state.nearIntents?.error) updateState(next);
-    else state = next;
-  };
-  container.querySelector('#near-amount-input')?.addEventListener('input', (e) => {
-    setNearFormValue(setNearIntentsAmountInput(state, (e.target as HTMLInputElement).value));
+  container.querySelectorAll<HTMLElement>('.near-token-option').forEach((option) => {
+    option.addEventListener('click', () => {
+      updateState(setNearIntentsOriginAsset(state, option.dataset.assetId ?? ''));
+      scheduleNearQuote(0);
+    });
+  });
+  for (const side of ['in', 'out'] as const) {
+    container.querySelector(`#near-amount-${side}`)?.addEventListener('input', (e) => {
+      updateState(setNearIntentsAmount(state, side, (e.target as HTMLInputElement).value));
+      scheduleNearQuote();
+    });
+  }
+  container.querySelector('#near-use-min-btn')?.addEventListener('click', () => {
+    const near = state.nearIntents;
+    if (!near?.minimumInput) return;
+    updateState(setNearIntentsAmount(state, near.amountSide, near.minimumInput));
+    scheduleNearQuote(0);
   });
   container.querySelector('#near-refund-input')?.addEventListener('input', (e) => {
-    setNearFormValue(setNearIntentsRefundAddress(state, (e.target as HTMLInputElement).value));
-  });
-  container.querySelector('#near-quote-btn')?.addEventListener('click', () => {
-    void requestNearQuote(true);
+    // Only re-render to clear an error on screen; typing needs no other update.
+    const next = setNearIntentsRefundAddress(state, (e.target as HTMLInputElement).value);
+    if (state.nearIntents?.refundError) updateState(next);
+    else state = next;
   });
   container.querySelector('#near-confirm-btn')?.addEventListener('click', () => {
-    void requestNearQuote(false);
+    void confirmNearSwap();
   });
   container.querySelector('#near-swap-reset-btn')?.addEventListener('click', () => {
     stopNearSwapPolling();
     updateState(clearNearIntentsSwap(state));
+    scheduleNearQuote(0);
   });
 
   // Deposit method toggle (testnet collapsible section)
-  const depositToggle = container.querySelector('.deposit-method-toggle:not(#near-intents-toggle)');
+  const depositToggle = container.querySelector('.deposit-method-toggle');
   if (depositToggle) {
     depositToggle.addEventListener('click', () => {
       const content = container.querySelector('.deposit-method-content');
@@ -4374,69 +4405,180 @@ async function requestFaucetFunds() {
 // NEAR Intents ("Pay with other crypto", mainnet)
 // ============================================================================
 
-/** A confirmed quote may cost at most this much more than the one the user approved (basis points). */
-const NEAR_MAX_PRICE_INCREASE_BPS = 200n;
+/** A confirmed quote may be at most this much worse than the one the user approved (basis points). */
+const NEAR_MAX_PRICE_CHANGE_BPS = 200n;
+/** Pause after typing before pricing the swap. */
+const NEAR_QUOTE_DEBOUNCE_MS = 500;
+/** How often a shown price is refreshed while the user looks at it. */
+const NEAR_QUOTE_REFRESH_MS = 30_000;
 let nearPollController: AbortController | undefined;
+let nearQuoteTimer: ReturnType<typeof setTimeout> | undefined;
+/** Bumped on every input change, so replies for older inputs are dropped. */
+let nearQuoteSeq = 0;
 
 function isOnDepositStep(): boolean {
   return state.step === 'awaiting_deposit' || state.step === 'detecting_deposit';
 }
 
-async function loadNearIntentsTokens(): Promise<void> {
-  if (state.nearIntents?.tokens || state.nearIntents?.busy === 'tokens') return;
-  updateState(setNearIntentsTokensLoading(state));
-  try {
-    const tokens = await fetchNearIntentsTokens();
-    updateState(setNearIntentsTokens(state, tokens));
-  } catch (error) {
-    updateState(setNearIntentsError(state, extractErrorMessage(error)));
-  }
+/** Whether a reply for `recipient` still belongs on screen. */
+function isNearQuoteCurrent(recipient: string): boolean {
+  return isOnDepositStep() && state.depositAddress === recipient && Boolean(state.nearIntents);
 }
 
-/** Validated quote inputs from the form, or a message saying what to fix. */
-function readNearQuoteInputs(): Omit<NearQuoteRequest, 'dry'> | string {
-  const near = state.nearIntents;
-  const originAsset = near?.tokens?.find((t) => t.assetId === near.originAssetId);
-  if (!near || !originAsset) return 'Choose an asset to pay with.';
-  if (!state.depositAddress) return 'No deposit address yet.';
-  const amountOutDuffs = parseDashToDuffs(near.amountInput);
-  if (amountOutDuffs === null) return 'Enter a valid DASH amount (up to 8 decimal places).';
-  const minimum = depositMinimumDuffs(state);
-  if (amountOutDuffs < minimum) return `Enter at least ${formatUnits(String(minimum), 8)} DASH.`;
-  const refundError = validateRefundAddress(near.refundAddress);
-  if (refundError) return refundError;
-  return { originAsset, amountOutDuffs, recipient: state.depositAddress, refundTo: near.refundAddress.trim() };
+async function loadNearIntentsTokens(): Promise<void> {
+  if (state.nearIntents?.busy === 'tokens') return;
+  if (!state.nearIntents?.tokens) {
+    updateState(setNearIntentsTokensLoading(state));
+    try {
+      const tokens = await fetchNearIntentsTokens();
+      updateState(setNearIntentsTokens(state, tokens));
+    } catch (error) {
+      updateState(setNearIntentsError(state, extractErrorMessage(error)));
+      return;
+    }
+  }
+  resumeNearQuote();
+}
+
+/** Price the current inputs after `delayMs`, superseding any pending or in-flight quote. */
+function scheduleNearQuote(delayMs = NEAR_QUOTE_DEBOUNCE_MS): void {
+  clearTimeout(nearQuoteTimer);
+  nearQuoteSeq++;
+  nearQuoteTimer = setTimeout(() => void refreshNearQuote(false), delayMs);
+}
+
+/** Refresh the shown price in the background after `delayMs`, keeping it on screen meanwhile. */
+function armNearQuoteRefresh(delayMs = NEAR_QUOTE_REFRESH_MS): void {
+  clearTimeout(nearQuoteTimer);
+  nearQuoteTimer = setTimeout(() => void refreshNearQuote(true), delayMs);
 }
 
 /**
- * Price the swap (dry) or, once the user confirms, open it and show the
- * payment address. Results for a deposit address the user has moved past are
- * dropped.
+ * Pricing pauses while the picker or the DASH tab is shown; pick it up again
+ * when the form is back: refresh a shown price, or price from scratch.
  */
-async function requestNearQuote(dry: boolean): Promise<void> {
-  if (state.nearIntents?.busy) return;
+function resumeNearQuote(): void {
+  if (state.nearIntents?.quote) armNearQuoteRefresh(0);
+  else scheduleNearQuote(0);
+}
+
+type NearQuoteInputs = Omit<Extract<NearQuoteRequest, { dry: true }>, 'dry'>;
+
+/**
+ * Validated quote inputs from the form; null when there is nothing to price
+ * yet, or what to fix (with the smallest valid amount, when that is the fix).
+ */
+function readNearQuoteInputs(): NearQuoteInputs | null | { error: string; minimumInput?: string } {
+  const near = state.nearIntents;
+  const originAsset = near?.tokens?.find((t) => t.assetId === near.originAssetId);
+  if (!near || !originAsset || !state.depositAddress) return null;
+  const typed = near.amountInput.trim();
+  if (!typed) return null;
+  const minAmountOutDuffs = depositMinimumDuffs(state);
+  const base = { originAsset, minAmountOutDuffs, recipient: state.depositAddress };
+  if (near.amountSide === 'out') {
+    const duffs = parseUnits(typed, 8);
+    if (duffs === null) return { error: 'Enter a valid DASH amount (up to 8 decimal places).' };
+    if (BigInt(duffs) < BigInt(minAmountOutDuffs)) {
+      const minimum = formatUnits(String(minAmountOutDuffs), 8);
+      return { error: `This deposit needs at least ${minimum} DASH.`, minimumInput: minimum };
+    }
+    return { ...base, swapType: 'EXACT_OUTPUT', amount: duffs };
+  }
+  const units = parseUnits(typed, originAsset.decimals);
+  if (units === null) return { error: `Enter a valid ${originAsset.symbol} amount (up to ${originAsset.decimals} decimal places).` };
+  if (BigInt(units) === 0n) return null;
+  return { ...base, swapType: 'EXACT_INPUT', amount: units };
+}
+
+/**
+ * For a "too small" error: an amount just above NEAR Intents' minimum,
+ * formatted for the typed side. The minimum moves with the price, so it is
+ * padded by 3% and rounded up to three significant digits.
+ */
+function nearMinimumInput(error: unknown, inputs: NearQuoteInputs): string | undefined {
+  if (!(error instanceof NearIntentsError) || error.kind !== 'too_low' || error.minAmount === undefined) return undefined;
+  const padded = (BigInt(error.minAmount) * 103n + 99n) / 100n;
+  const step = 10n ** BigInt(Math.max(0, padded.toString().length - 3));
+  const suggested = ((padded + step - 1n) / step) * step;
+  if (inputs.swapType === 'EXACT_INPUT') return formatUnits(suggested.toString(), inputs.originAsset.decimals);
+  const floor = BigInt(inputs.minAmountOutDuffs);
+  return formatUnits((suggested > floor ? suggested : floor).toString(), 8);
+}
+
+/**
+ * Price the current inputs with a dry quote. A background refresh keeps the
+ * shown price on screen until the new one arrives; while a price is shown it
+ * is refreshed every NEAR_QUOTE_REFRESH_MS.
+ */
+async function refreshNearQuote(background: boolean): Promise<void> {
+  const near = state.nearIntents;
+  if (!isOnDepositStep() || !near?.open || near.swap || near.pickerOpen || near.busy === 'confirm') return;
   const inputs = readNearQuoteInputs();
-  if (typeof inputs === 'string') {
-    updateState(setNearIntentsError(state, inputs));
+  if (inputs === null) {
+    if (near.quote || near.error || near.busy) updateState(clearNearIntentsQuote(state));
     return;
   }
-  const approved = state.nearIntents?.quote;
-  updateState(dry ? setNearIntentsQuoting(state) : setNearIntentsConfirming(state));
-  const stillCurrent = () => isOnDepositStep() && state.depositAddress === inputs.recipient && Boolean(state.nearIntents);
+  if ('error' in inputs) {
+    updateState(setNearIntentsError(clearNearIntentsQuote(state), inputs.error, inputs.minimumInput));
+    return;
+  }
+  const seq = nearQuoteSeq;
+  // Replies for older inputs are dropped; confirming bumps the counter too.
+  const stale = () => seq !== nearQuoteSeq || !isNearQuoteCurrent(inputs.recipient);
+  if (!background) updateState(setNearIntentsQuoting(state));
   try {
-    const quote = await requestNearIntentsQuote({ ...inputs, dry });
-    if (!stillCurrent()) return;
-    if (dry) {
-      updateState(setNearIntentsQuote(state, quote));
+    const quote = await requestNearIntentsQuote({ ...inputs, dry: true });
+    if (stale()) return;
+    updateState(setNearIntentsQuote(state, quote));
+    armNearQuoteRefresh();
+  } catch (error) {
+    if (stale()) return;
+    console.warn('NEAR Intents quote failed:', error);
+    // A hiccup while refreshing keeps the shown price (confirming re-prices anyway) and retries.
+    if (background && error instanceof NearIntentsError && error.kind === 'unavailable' && state.nearIntents?.quote) {
+      armNearQuoteRefresh();
       return;
     }
-    // The user approved a price; don't show a payment address that costs
-    // noticeably more. Show the new price for another confirmation instead.
-    if (approved && isNearPriceIncreaseTooLarge(approved.amountIn, quote.amountIn, NEAR_MAX_PRICE_INCREASE_BPS)) {
+    updateState(setNearIntentsError(clearNearIntentsQuote(state), extractErrorMessage(error), nearMinimumInput(error, inputs)));
+  }
+}
+
+/**
+ * Open the swap the user approved: a real quote with their refund address,
+ * which hands out the payment address. A real quote noticeably worse than the
+ * approved one is shown for another confirmation instead.
+ */
+async function confirmNearSwap(): Promise<void> {
+  const near = state.nearIntents;
+  const approved = near?.quote;
+  if (!near || near.busy || !approved) return;
+  const inputs = readNearQuoteInputs();
+  if (inputs === null || 'error' in inputs) return;
+  const refundError = validateRefundAddress(near.refundAddress);
+  if (refundError) {
+    updateState(setNearIntentsRefundError(state, refundError));
+    armNearQuoteRefresh();
+    return;
+  }
+  const refundTo = near.refundAddress.trim();
+  clearTimeout(nearQuoteTimer);
+  nearQuoteSeq++;
+  updateState(setNearIntentsConfirming(state));
+  try {
+    const quote = await requestNearIntentsQuote({ ...inputs, dry: false, refundTo });
+    if (!isNearQuoteCurrent(inputs.recipient)) return;
+    // EXACT_INPUT: both the estimate and the guaranteed floor must hold up.
+    const worse = inputs.swapType === 'EXACT_OUTPUT'
+      ? isNearPriceIncreaseTooLarge(approved.amountIn, quote.amountIn, NEAR_MAX_PRICE_CHANGE_BPS)
+      : isNearOutputDropTooLarge(approved.amountOut, quote.amountOut, NEAR_MAX_PRICE_CHANGE_BPS) ||
+        isNearOutputDropTooLarge(approved.minAmountOut ?? approved.amountOut, quote.minAmountOut ?? '0', NEAR_MAX_PRICE_CHANGE_BPS);
+    if (worse) {
       updateState(setNearIntentsError(
         setNearIntentsQuote(state, { ...quote, depositAddress: undefined, depositMemo: undefined }),
-        'The price changed since your quote. Review the new amount and confirm again.'
+        'The price changed since your quote. Review the new amounts and confirm again.'
       ));
+      armNearQuoteRefresh();
       return;
     }
     const { originAsset } = inputs;
@@ -4444,13 +4586,15 @@ async function requestNearQuote(dry: boolean): Promise<void> {
       depositAddress: quote.depositAddress!,
       depositMemo: quote.depositMemo,
       recipient: inputs.recipient,
-      refundTo: inputs.refundTo,
+      refundTo,
       originAssetId: originAsset.assetId,
       symbol: originAsset.symbol,
       blockchain: originAsset.blockchain,
       decimals: originAsset.decimals,
+      swapType: inputs.swapType,
       amountIn: quote.amountIn,
       amountOut: quote.amountOut,
+      minAmountOut: quote.minAmountOut,
       deadline: quote.deadline,
       correlationId: quote.correlationId,
       status: 'PENDING_DEPOSIT',
@@ -4458,7 +4602,14 @@ async function requestNearQuote(dry: boolean): Promise<void> {
     startNearSwapPolling();
   } catch (error) {
     console.warn('NEAR Intents quote failed:', error);
-    if (stillCurrent()) updateState(setNearIntentsError(state, extractErrorMessage(error)));
+    if (!isNearQuoteCurrent(inputs.recipient)) return;
+    // 1Click checks the refund address per chain; point at the field it is about.
+    if (error instanceof NearIntentsError && error.kind === 'rejected' && /refund/i.test(error.message)) {
+      updateState(setNearIntentsRefundError(state, `That doesn't look like a valid ${nearChainName(inputs.originAsset.blockchain)} address.`));
+    } else {
+      updateState(setNearIntentsError(state, extractErrorMessage(error), nearMinimumInput(error, inputs)));
+    }
+    armNearQuoteRefresh();
   }
 }
 

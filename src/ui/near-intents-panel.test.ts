@@ -8,7 +8,8 @@ vi.mock('./qrcode.js', () => ({
 
 import { render } from './components.js';
 import { createInitialState } from './state.js';
-import type { BridgeState, NearIntentsSwap } from '../types.js';
+import type { BridgeState, NearIntentsState, NearIntentsSwap } from '../types.js';
+import type { NearIntentsQuote, NearIntentsToken } from '../api/near-intents.js';
 
 const BRIDGE_ADDRESS = 'XanAvE5GMB8CsPH78B9moJq9viEVKvCS4f';
 const SWAP: NearIntentsSwap = {
@@ -19,25 +20,119 @@ const SWAP: NearIntentsSwap = {
   symbol: 'USDC',
   blockchain: 'eth',
   decimals: 6,
+  swapType: 'EXACT_OUTPUT',
   amountIn: '2680000',
   amountOut: '5000000',
   deadline: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
   status: 'PENDING_DEPOSIT',
 };
 
-function renderSwap(swap: Partial<NearIntentsSwap>, overrides: Partial<BridgeState> = {}): HTMLElement {
+const USDC: NearIntentsToken = { assetId: SWAP.originAssetId, symbol: 'USDC', blockchain: 'eth', decimals: 6 };
+const BTC: NearIntentsToken = { assetId: 'nep141:btc.omft.near', symbol: 'BTC', blockchain: 'btc', decimals: 8 };
+const DASH: NearIntentsToken = { assetId: 'nep141:dash.omft.near', symbol: 'DASH', blockchain: 'dash', decimals: 8 };
+const QUOTE: NearIntentsQuote = {
+  originAssetId: USDC.assetId,
+  amountIn: '2680000',
+  minAmountIn: '2650000',
+  amountOut: '5000000',
+  amountInUsd: 2.68,
+  amountOutUsd: 2.65,
+  timeEstimateSec: 134,
+  deadline: SWAP.deadline,
+};
+
+function renderNear(near: Partial<NearIntentsState>, overrides: Partial<BridgeState> = {}): HTMLElement {
   const container = document.createElement('div');
   render({
     ...createInitialState('mainnet'),
     step: 'detecting_deposit',
     depositAddress: BRIDGE_ADDRESS,
-    nearIntents: { open: true, assetFilter: '', amountInput: '0.05', refundAddress: '', swap: { ...SWAP, ...swap } },
+    nearIntents: { open: true, pickerOpen: false, assetFilter: '', amountSide: 'out', amountInput: '0.05', refundAddress: '', ...near },
     ...overrides,
   }, container);
   return container;
 }
 
+function renderSwap(swap: Partial<NearIntentsSwap>, overrides: Partial<BridgeState> = {}): HTMLElement {
+  return renderNear({ swap: { ...SWAP, ...swap } }, overrides);
+}
+
+describe('NEAR Intents tab', () => {
+  const form = { tokens: [DASH, USDC, BTC], originAssetId: USDC.assetId };
+
+  it('replaces the DASH QR and address while selected', () => {
+    const near = renderNear(form);
+    expect(near.querySelector('#deposit-tab-near')!.getAttribute('aria-selected')).toBe('true');
+    expect(near.querySelector('.address-section')).toBeNull();
+    const dash = renderNear({ ...form, open: false });
+    expect(dash.querySelector('#deposit-tab-dash')!.getAttribute('aria-selected')).toBe('true');
+    expect(dash.querySelector('.address-section')).not.toBeNull();
+    expect(dash.querySelector('#near-intents-section')).toBeNull();
+  });
+
+  it('shows the quoted pay amount, rate, fees and time for a typed DASH amount', () => {
+    const c = renderNear({ ...form, quote: QUOTE });
+    expect((c.querySelector('#near-amount-out') as HTMLInputElement).value).toBe('0.05');
+    expect((c.querySelector('#near-amount-in') as HTMLInputElement).value).toBe('2.68');
+    expect(c.querySelector('#near-asset-btn')!.textContent).toContain('USDC');
+    const meta = c.querySelector('#near-intents-quote')!.textContent!;
+    expect(meta).toContain('1 DASH ≈ 53.60 USDC');
+    expect(meta).toContain('Fees (included)');
+    expect(meta).toContain('~2 min');
+    expect((c.querySelector('#near-confirm-btn') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('shows the quoted DASH and its floor for a typed pay amount', () => {
+    const quote = { ...QUOTE, amountIn: '20000000', amountOut: '39400815', minAmountOut: '39006806' };
+    const c = renderNear({ ...form, amountSide: 'in', amountInput: '20', quote });
+    expect((c.querySelector('#near-amount-in') as HTMLInputElement).value).toBe('20');
+    expect((c.querySelector('#near-amount-out') as HTMLInputElement).value).toBe('0.394008');
+    expect(c.querySelector('.near-amount-note')!.textContent).toContain('At least 0.390068 DASH');
+  });
+
+  it('cannot confirm without a quote, and says when one is loading', () => {
+    const c = renderNear({ ...form, busy: 'quote' });
+    expect((c.querySelector('#near-confirm-btn') as HTMLButtonElement).disabled).toBe(true);
+    expect((c.querySelector('#near-amount-in') as HTMLInputElement).placeholder).toBe('Getting price…');
+  });
+
+  it('labels the refund field for the chosen chain and shows its error', () => {
+    const c = renderNear({ ...form, originAssetId: BTC.assetId, refundError: 'Not a Bitcoin address' });
+    expect(c.querySelector('label[for="near-refund-input"]')!.textContent).toBe('Refund address on Bitcoin');
+    expect(c.querySelector('.near-refund-error')!.textContent).toBe('Not a Bitcoin address');
+  });
+
+  it('offers the minimum after a too-small error', () => {
+    const c = renderNear({ ...form, error: 'Too small', minimumInput: '0.107' });
+    expect(c.querySelector('#near-use-min-btn')!.textContent).toContain('0.107 DASH');
+  });
+
+  it('lists popular assets in the picker, never DASH, and ranks exact matches first when searching', () => {
+    const wbtc = { assetId: 'nep141:eth-wbtc.omft.near', symbol: 'WBTC', blockchain: 'eth', decimals: 8 };
+    const picker = renderNear({ ...form, tokens: [DASH, USDC, BTC, wbtc], pickerOpen: true });
+    expect(picker.querySelector('.near-picker-popular')!.textContent).toContain('BTC');
+    const ids = [...picker.querySelectorAll<HTMLElement>('.near-token-option')].map((o) => o.dataset.assetId);
+    expect(ids).not.toContain(DASH.assetId);
+    const search = renderNear({ ...form, tokens: [DASH, USDC, wbtc, BTC], pickerOpen: true, assetFilter: 'btc' });
+    const symbols = [...search.querySelectorAll('.near-token-option-symbol')].map((o) => o.textContent);
+    expect(symbols).toEqual(['BTC', 'WBTC']);
+  });
+});
+
 describe('NEAR Intents swap panel', () => {
+  it('shows progress while a swap is under way', () => {
+    const waiting = renderSwap({}).querySelector('#near-swap-status')!;
+    expect(waiting.querySelector('li.current')!.textContent).toContain('Waiting for your USDC');
+    const swapping = renderSwap({ status: 'PROCESSING' }).querySelector('#near-swap-status')!;
+    expect(swapping.querySelectorAll('li.done')).toHaveLength(2);
+    expect(swapping.querySelector('li.current')!.textContent).toContain('Swapping to DASH');
+  });
+
+  it('gives an estimate and floor for a pay-side swap', () => {
+    const c = renderSwap({ swapType: 'EXACT_INPUT', amountOut: '39400815', minAmountOut: '39006806' });
+    expect(c.querySelector('.near-swap-receive')!.textContent).toContain('about 0.394008 DASH (at least 0.390068)');
+  });
+
   it('shows the payment address, a QR and the amount while waiting for payment', () => {
     const c = renderSwap({});
     expect(c.querySelector('#near-deposit-address')!.textContent).toBe(SWAP.depositAddress);
@@ -102,6 +197,7 @@ describe('NEAR Intents swap panel', () => {
 
   it('is not rendered on testnet', () => {
     const c = renderSwap({}, { network: 'testnet', depositAddress: 'yWdXnYxGbouNoo8yMvcbZmZ3Gdp6BpySxL' });
-    expect(c.querySelector('#near-intents-toggle')).toBeNull();
+    expect(c.querySelector('#deposit-tab-near')).toBeNull();
+    expect(c.querySelector('#near-intents-section')).toBeNull();
   });
 });

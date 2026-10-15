@@ -1,12 +1,14 @@
 import type { BridgeState, KeyType, KeyPurpose, SecurityLevel, NetworkHealth, EmbedNotice, NearIntentsState, NearIntentsSwap } from '../types.js';
 import { canCancel } from '../embed/bridge.js';
-import { getStepProgress, getStepDescription, ErrorCodes, ErrorCodeLabels, depositMinimumDuffs } from './state.js';
+import { getStepProgress, getStepDescription, ErrorCodes, ErrorCodeLabels } from './state.js';
 import {
   formatUnits,
+  formatUnitsShort,
   isNearSwapExpired,
   nearIntentsAppUrl,
   nearSwapPaymentCutoff,
   selectableSourceTokens,
+  type NearIntentsQuote,
   type NearIntentsToken,
   type NearSwapStatus,
 } from '../api/near-intents.js';
@@ -989,6 +991,11 @@ function renderDepositStep(state: BridgeState): HTMLElement {
     div.appendChild(faucetSection);
   }
 
+  // Mainnet: tabs to pay in DASH or with another asset via NEAR Intents
+  const offerNear = state.network === 'mainnet' && Boolean(address);
+  const nearSelected = offerNear && Boolean(state.nearIntents?.open);
+  if (offerNear) div.appendChild(renderDepositTabs(nearSelected));
+
   // Collapsible section for QR/address (testnet) or regular section (mainnet)
   const depositMethodSection = document.createElement('div');
   depositMethodSection.className = state.network === 'testnet' ? 'deposit-method-section collapsible' : 'deposit-method-section';
@@ -1007,6 +1014,8 @@ function renderDepositStep(state: BridgeState): HTMLElement {
   const depositMethodContent = document.createElement('div');
   depositMethodContent.className = state.network === 'testnet' ? 'deposit-method-content collapsed' : 'deposit-method-content';
 
+  if (nearSelected) depositMethodContent.appendChild(renderNearIntentsPanel(state, address));
+
   // QR section
   const qrSection = document.createElement('div');
   qrSection.className = 'qr-section';
@@ -1021,21 +1030,23 @@ function renderDepositStep(state: BridgeState): HTMLElement {
   qrContainer.innerHTML = '<div class="qr-loading">Loading...</div>';
   qrSection.appendChild(qrContainer);
 
-  // Generate QR code asynchronously
-  generateQRCodeDataUrl(address, 200).then((dataUrl) => {
-    const img = document.createElement('img');
-    img.src = dataUrl;
-    img.alt = 'Deposit Address QR Code';
-    img.width = 200;
-    img.height = 200;
-    qrContainer.innerHTML = '';
-    qrContainer.appendChild(img);
-  }).catch((err) => {
-    console.error('QR code generation failed:', err);
-    qrContainer.innerHTML = '<div class="qr-error">QR failed</div>';
-  });
+  if (!nearSelected) {
+    // Generate QR code asynchronously
+    generateQRCodeDataUrl(address, 200).then((dataUrl) => {
+      const img = document.createElement('img');
+      img.src = dataUrl;
+      img.alt = 'Deposit Address QR Code';
+      img.width = 200;
+      img.height = 200;
+      qrContainer.innerHTML = '';
+      qrContainer.appendChild(img);
+    }).catch((err) => {
+      console.error('QR code generation failed:', err);
+      qrContainer.innerHTML = '<div class="qr-error">QR failed</div>';
+    });
 
-  depositMethodContent.appendChild(qrSection);
+    depositMethodContent.appendChild(qrSection);
+  }
 
   // Mnemonic display section
   if (state.mnemonic) {
@@ -1086,7 +1097,7 @@ function renderDepositStep(state: BridgeState): HTMLElement {
   `;
   addressSection.appendChild(addressDisplay);
 
-  depositMethodContent.appendChild(addressSection);
+  if (!nearSelected) depositMethodContent.appendChild(addressSection);
   depositMethodSection.appendChild(depositMethodContent);
   div.appendChild(depositMethodSection);
 
@@ -1123,11 +1134,6 @@ function renderDepositStep(state: BridgeState): HTMLElement {
     }
 
     div.appendChild(recheckSection);
-  }
-
-  // Mainnet: fund the deposit address from another asset via NEAR Intents
-  if (state.network === 'mainnet' && address) {
-    div.appendChild(renderNearIntentsPanel(state, address));
   }
 
   // Mode-specific note at bottom
@@ -1198,15 +1204,10 @@ function rankOf(list: string[], value: string): number {
   return i === -1 ? list.length : i;
 }
 
-/** Source assets grouped by chain, filtered by `filter`, always keeping `selectedId`. */
-function groupNearTokens(
-  tokens: NearIntentsToken[],
-  filter: string,
-  selectedId?: string
-): [string, NearIntentsToken[]][] {
+/** Source assets grouped by chain, filtered by `filter`. */
+function groupNearTokens(tokens: NearIntentsToken[], filter: string): [string, NearIntentsToken[]][] {
   const needle = filter.trim().toLowerCase();
   const matches = selectableSourceTokens(tokens).filter((t) =>
-    t.assetId === selectedId ||
     !needle ||
     t.symbol.toLowerCase().includes(needle) ||
     t.blockchain.toLowerCase().includes(needle) ||
@@ -1224,6 +1225,22 @@ function groupNearTokens(
       rankOf(NEAR_SYMBOL_ORDER, a.symbol) - rankOf(NEAR_SYMBOL_ORDER, b.symbol) || a.symbol.localeCompare(b.symbol))]);
 }
 
+/**
+ * Source assets matching `filter`: exact symbol matches first, then symbols
+ * starting with it, then any other match (symbol or chain), each in chain order.
+ */
+function rankNearTokenMatches(tokens: NearIntentsToken[], filter: string): NearIntentsToken[] {
+  const needle = filter.trim().toLowerCase();
+  const score = (t: NearIntentsToken) => {
+    const symbol = t.symbol.toLowerCase();
+    if (symbol === needle) return 0;
+    if (symbol.startsWith(needle)) return 1;
+    return 2;
+  };
+  // Array sort is stable, so chain order holds within each score.
+  return groupNearTokens(tokens, filter).flatMap(([, list]) => list).sort((a, b) => score(a) - score(b));
+}
+
 function formatUsd(value?: number): string {
   return value === undefined ? '' : `$${value.toFixed(2)}`;
 }
@@ -1232,22 +1249,108 @@ function formatNearTime(ms: number): string {
   return new Date(ms).toLocaleString(undefined, { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' });
 }
 
-function renderNearFallbackLink(address: string, token?: NearIntentsToken): string {
+/** "about 42 min" / "about 2 h 5 min" until `ms`. */
+function formatTimeLeft(ms: number): string {
+  const minutes = Math.max(1, Math.round((ms - Date.now()) / 60_000));
+  if (minutes < 60) return `about ${minutes} min`;
+  const rest = minutes % 60;
+  return `about ${Math.floor(minutes / 60)} h${rest ? ` ${rest} min` : ''}`;
+}
+
+/** Brand-ish colors for common assets' monogram icons; others get a stable pick from the fallback palette. */
+const NEAR_TOKEN_COLORS: Record<string, string> = {
+  USDC: '#2775ca', USDT: '#26a17b', ETH: '#4a6fd1', WETH: '#4a6fd1', BTC: '#f7931a', WBTC: '#f09242',
+  CBBTC: '#f09242', SOL: '#14a37f', NEAR: '#00a37a', DASH: '#008de4', DAI: '#e5a224', BNB: '#d9a70b',
+  TRX: '#d8322b', XRP: '#4a5568', DOGE: '#b8992d', LTC: '#345d9d', ZEC: '#d9a72b', TON: '#0098ea',
+};
+const NEAR_FALLBACK_COLORS = ['#3b82c4', '#d9822b', '#2a9d8f', '#c0504d', '#5f8f2f', '#4682b4', '#b5651d'];
+
+function nearTokenIcon(symbol: string): string {
+  let color = NEAR_TOKEN_COLORS[symbol.toUpperCase()];
+  if (!color) {
+    let hash = 0;
+    for (const ch of symbol) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+    color = NEAR_FALLBACK_COLORS[hash % NEAR_FALLBACK_COLORS.length];
+  }
+  return `<span class="near-token-icon" style="background:${color}" aria-hidden="true">${escapeHtml(symbol.charAt(0).toUpperCase())}</span>`;
+}
+
+/** Shown first in the asset picker when listed: [symbol, chain]. */
+const NEAR_POPULAR_ASSETS: [string, string][] = [
+  ['USDC', 'eth'], ['USDC', 'base'], ['USDC', 'sol'], ['USDT', 'eth'], ['USDT', 'tron'],
+  ['ETH', 'eth'], ['BTC', 'btc'], ['SOL', 'sol'],
+];
+
+function renderDepositTabs(nearSelected: boolean): HTMLElement {
+  const tabs = document.createElement('div');
+  tabs.className = 'deposit-tabs';
+  tabs.setAttribute('role', 'tablist');
+  tabs.innerHTML = `
+    <button id="deposit-tab-dash" class="deposit-tab${nearSelected ? '' : ' active'}" role="tab" aria-selected="${!nearSelected}">Send DASH</button>
+    <button id="deposit-tab-near" class="deposit-tab${nearSelected ? ' active' : ''}" role="tab" aria-selected="${nearSelected}">Pay with other crypto</button>
+  `;
+  return tabs;
+}
+
+function renderNearFooter(address: string, token?: NearIntentsToken): string {
   return `
-    <p class="near-intents-fallback">
-      Prefer the NEAR Intents app?
-      <a href="${escapeAttr(nearIntentsAppUrl(token))}" target="_blank" rel="noopener noreferrer">Open NEAR Intents</a>,
-      swap to DASH, then withdraw the DASH to your deposit address:
-      <code class="near-intents-fallback-address">${escapeHtml(address)}</code>
-      <button class="copy-btn" data-copy="${escapeAttr(address)}">Copy</button>
-    </p>
+    <p class="near-intents-footer">Swaps by NEAR Intents. DASH is sent straight to your deposit address.</p>
+    <details class="near-intents-fallback">
+      <summary>Prefer the NEAR Intents app?</summary>
+      <p>
+        <a href="${escapeAttr(nearIntentsAppUrl(token))}" target="_blank" rel="noopener noreferrer">Open NEAR Intents</a>,
+        swap to DASH, then withdraw the DASH to your deposit address:
+      </p>
+      <div class="address-display near-swap-address">
+        <code class="address near-intents-fallback-address">${escapeHtml(address)}</code>
+        <button class="copy-btn" data-copy="${escapeAttr(address)}">Copy</button>
+      </div>
+    </details>
   `;
 }
 
-function renderNearQuoteSummary(near: NearIntentsState, token: NearIntentsToken): string {
-  const quote = near.quote!;
-  const usdIn = formatUsd(quote.amountInUsd);
-  const usdOut = formatUsd(quote.amountOutUsd);
+function renderNearAssetPicker(near: NearIntentsState): string {
+  const tokens = near.tokens ?? [];
+  const sources = selectableSourceTokens(tokens);
+  const option = (t: NearIntentsToken) => `
+    <button class="near-token-option${t.assetId === near.originAssetId ? ' selected' : ''}" data-asset-id="${escapeAttr(t.assetId)}" role="option" aria-selected="${t.assetId === near.originAssetId}">
+      ${nearTokenIcon(t.symbol)}
+      <span class="near-token-option-symbol">${escapeHtml(t.symbol)}</span>
+      <span class="near-token-option-chain">${escapeHtml(nearChainName(t.blockchain))}</span>
+    </button>`;
+  const filtering = near.assetFilter.trim() !== '';
+  const popular = filtering
+    ? []
+    : NEAR_POPULAR_ASSETS
+      .map(([symbol, chain]) => sources.find((t) => t.symbol === symbol && t.blockchain === chain))
+      .filter((t): t is NearIntentsToken => t !== undefined);
+  // While searching, one list with the closest symbol matches first; otherwise grouped by chain.
+  const groups: [string | undefined, NearIntentsToken[]][] = filtering
+    ? [[undefined, rankNearTokenMatches(tokens, near.assetFilter)]]
+    : groupNearTokens(tokens, '');
+  return `
+    <div class="near-picker" id="near-asset-picker">
+      <div class="near-picker-head">
+        <strong>Pay with</strong>
+        <button id="near-picker-close" class="near-picker-close" aria-label="Close">&times;</button>
+      </div>
+      <input type="search" id="near-asset-filter" class="near-input" placeholder="Search assets or chains" value="${escapeAttr(near.assetFilter)}" autocomplete="off" />
+      <div class="near-picker-list" role="listbox" aria-label="Assets">
+        ${popular.length ? `<p class="near-picker-group">Popular</p><div class="near-picker-popular">${popular.map(option).join('')}</div>` : ''}
+        ${groups.every(([, list]) => list.length === 0)
+          ? '<p class="near-picker-empty">No matching assets</p>'
+          : groups.map(([chain, list]) => `${chain ? `<p class="near-picker-group">${escapeHtml(nearChainName(chain))}</p>` : ''}${list.map(option).join('')}`).join('')}
+      </div>
+    </div>
+  `;
+}
+
+/** Rate, fees and time for a live quote. */
+function renderNearQuoteMeta(quote: NearIntentsQuote, token: NearIntentsToken): string {
+  const amountIn = Number(formatUnits(quote.amountIn, token.decimals));
+  const amountOut = Number(formatUnits(quote.amountOut, 8));
+  const rate = amountOut > 0 ? amountIn / amountOut : undefined;
+  const rateText = rate === undefined ? '' : rate >= 100 ? rate.toFixed(2) : rate.toPrecision(4);
   // EXACT_OUTPUT: amountIn carries a slippage buffer that is refunded, so the
   // likely fee is based on minAmountIn; without it, amountIn only bounds it.
   const spentUsd = quote.amountInUsd !== undefined && quote.minAmountIn !== undefined
@@ -1256,26 +1359,109 @@ function renderNearQuoteSummary(near: NearIntentsState, token: NearIntentsToken)
   const feeUsd = spentUsd !== undefined && quote.amountOutUsd !== undefined
     ? Math.max(0, spentUsd - quote.amountOutUsd)
     : undefined;
-  const feeQualifier = quote.minAmountIn !== undefined ? 'about' : 'up to';
   const minutes = quote.timeEstimateSec !== undefined ? Math.max(1, Math.round(quote.timeEstimateSec / 60)) : undefined;
   return `
-    <div class="near-intents-quote" id="near-intents-quote">
-      <div class="near-quote-row">
-        <span>You send</span>
-        <strong>${escapeHtml(formatUnits(quote.amountIn, token.decimals))} ${escapeHtml(token.symbol)}</strong>
-      </div>
-      <div class="near-quote-row near-quote-sub"><span>on ${escapeHtml(nearChainName(token.blockchain))}</span><span>${escapeHtml(usdIn)}</span></div>
-      <div class="near-quote-row">
-        <span>You receive</span>
-        <strong>${escapeHtml(formatUnits(quote.amountOut, 8))} DASH</strong>
-      </div>
-      <div class="near-quote-row near-quote-sub"><span>at your deposit address</span><span>${escapeHtml(usdOut)}</span></div>
-      ${minutes !== undefined ? `<p class="near-quote-note">Usually arrives in about ${minutes} min after your payment confirms.</p>` : ''}
-      <p class="near-quote-note">The rate includes NEAR Intents swap and network fees${feeUsd !== undefined ? ` (${feeQualifier} ${escapeHtml(formatUsd(feeUsd))} in total)` : ''}. Any unused slippage buffer is refunded. Confirming fetches a fresh quote and a one-time payment address; the amount may change slightly.</p>
-      <div class="near-quote-actions">
-        <button id="near-confirm-btn" class="primary-btn near-btn" ${near.busy ? 'disabled' : ''}>${near.busy === 'confirm' ? 'Preparing…' : 'Get payment address'}</button>
-      </div>
+    <div class="near-quote-meta" id="near-intents-quote">
+      ${rateText ? `<div><span>Rate</span><span>1 DASH ≈ ${escapeHtml(rateText)} ${escapeHtml(token.symbol)}</span></div>` : ''}
+      ${feeUsd !== undefined ? `<div><span>Fees (included)</span><span>≈ ${escapeHtml(formatUsd(feeUsd))}</span></div>` : ''}
+      ${minutes !== undefined ? `<div><span>Arrives in</span><span>~${minutes} min after your payment confirms</span></div>` : ''}
     </div>
+  `;
+}
+
+function renderNearIntentsPanel(state: BridgeState, address: string): HTMLElement {
+  const section = document.createElement('div');
+  section.className = 'near-intents-section';
+  section.id = 'near-intents-section';
+  const near = state.nearIntents;
+  if (!near) return section;
+  const errorHtml = near.error ? `<p class="near-intents-error" role="alert">${escapeHtml(near.error)}</p>` : '';
+
+  // A swap is only shown for the address it delivers to.
+  if (near.swap && near.swap.recipient === address) {
+    section.appendChild(renderNearSwap(near.swap));
+    return section;
+  }
+
+  if (!near.tokens) {
+    section.innerHTML = near.busy === 'tokens' || !near.error
+      ? `<div class="faucet-loading near-loading"><div class="faucet-spinner"></div><span>Loading assets…</span></div>`
+      : `${errorHtml}<button id="near-tokens-retry-btn" class="secondary-btn near-btn">Try again</button>${renderNearFooter(address)}`;
+    return section;
+  }
+
+  if (near.pickerOpen) {
+    section.innerHTML = renderNearAssetPicker(near);
+    return section;
+  }
+
+  const selected = near.tokens.find((t) => t.assetId === near.originAssetId);
+  const quote = near.quote && selected && near.quote.originAssetId === selected.assetId ? near.quote : undefined;
+  const confirming = near.busy === 'confirm';
+  const quoting = near.busy === 'quote';
+  const chainName = selected ? nearChainName(selected.blockchain) : 'the source chain';
+  const typedIn = near.amountSide === 'in';
+  const lock = confirming ? 'disabled' : '';
+  const quotedPlaceholder = quoting ? 'Getting price…' : '0';
+  const [inPlaceholder, outPlaceholder] = typedIn ? ['0', quotedPlaceholder] : [quotedPlaceholder, '0'];
+  const inValue = typedIn ? near.amountInput : quote && selected ? formatUnitsShort(quote.amountIn, selected.decimals, 6, true) : '';
+  const outValue = typedIn ? (quote ? formatUnitsShort(quote.amountOut, 8, 6) : '') : near.amountInput;
+  const approx = (usd?: number) => (usd === undefined ? '' : `≈ ${escapeHtml(formatUsd(usd))}`);
+  const minOutHtml = typedIn && quote?.minAmountOut
+    ? `<p class="near-amount-note">At least ${escapeHtml(formatUnitsShort(quote.minAmountOut, 8, 6))} DASH after slippage.</p>`
+    : '';
+
+  section.innerHTML = `
+    <div class="near-swap-form">
+      <div class="near-amount-box${typedIn ? ' typed' : ''}">
+        <div class="near-amount-head"><label for="near-amount-in">You pay</label><span>${approx(quote?.amountInUsd)}</span></div>
+        <div class="near-amount-row">
+          <input type="text" id="near-amount-in" class="near-amount-input" inputmode="decimal" autocomplete="off" placeholder="${inPlaceholder}" value="${escapeAttr(inValue)}" ${lock} />
+          <button id="near-asset-btn" class="near-token-btn" aria-haspopup="listbox" ${lock}>
+            ${selected ? `${nearTokenIcon(selected.symbol)}<span class="near-token-symbol">${escapeHtml(selected.symbol)}</span><span class="near-token-chain">${escapeHtml(chainName)}</span>` : '<span class="near-token-symbol">Choose asset</span>'}
+            <span class="near-token-caret" aria-hidden="true">&#9662;</span>
+          </button>
+        </div>
+      </div>
+      <div class="near-amount-arrow" aria-hidden="true">&#8595;</div>
+      <div class="near-amount-box${typedIn ? '' : ' typed'}">
+        <div class="near-amount-head"><label for="near-amount-out">You get at your deposit address</label><span>${approx(quote?.amountOutUsd)}</span></div>
+        <div class="near-amount-row">
+          <input type="text" id="near-amount-out" class="near-amount-input" inputmode="decimal" autocomplete="off" placeholder="${outPlaceholder}" value="${escapeAttr(outValue)}" ${lock} />
+          <span class="near-token-btn static">${nearTokenIcon('DASH')}<span class="near-token-symbol">DASH</span></span>
+        </div>
+      </div>
+      ${minOutHtml}
+      ${quote && selected ? renderNearQuoteMeta(quote, selected) : ''}
+      ${errorHtml}
+      ${near.minimumInput ? `<button id="near-use-min-btn" class="tertiary-btn near-use-min">Use the minimum (${escapeHtml(near.minimumInput)} ${escapeHtml(typedIn && selected ? selected.symbol : 'DASH')})</button>` : ''}
+      <label class="input-label near-refund-label" for="near-refund-input">Refund address on ${escapeHtml(chainName)}</label>
+      <input type="text" id="near-refund-input" class="near-input" placeholder="Your ${escapeAttr(chainName)} address" autocomplete="off" spellcheck="false" value="${escapeAttr(near.refundAddress)}" ${lock} />
+      ${near.refundError
+        ? `<p class="input-hint near-refund-error" role="alert">${escapeHtml(near.refundError)}</p>`
+        : '<p class="input-hint">Only used if the swap can\'t complete.</p>'}
+      <button id="near-confirm-btn" class="primary-btn near-btn" ${quote && !near.busy ? '' : 'disabled'}>${confirming ? 'Preparing…' : 'Get payment address'}</button>
+    </div>
+    ${renderNearFooter(address, selected)}
+  `;
+  return section;
+}
+
+/** Where a swap in progress stands, as a short checklist. */
+function renderNearProgress(swap: NearIntentsSwap): string {
+  const paymentLabel = swap.status === 'KNOWN_DEPOSIT_TX'
+    ? 'Payment seen, confirming'
+    : `Waiting for your ${swap.symbol}`;
+  const steps = ['Payment address ready', paymentLabel, 'Swapping to DASH', 'DASH arrives at your deposit address'];
+  const current = swap.status === 'PROCESSING' ? 2 : 1;
+  const step = (label: string, i: number) => {
+    if (i === current) return `<li class="current"><span class="faucet-spinner near-spinner"></span><span>${escapeHtml(label)}</span></li>`;
+    return `<li class="${i < current ? 'done' : ''}"><span class="near-progress-dot"></span><span>${escapeHtml(label)}</span></li>`;
+  };
+  return `
+    <ol class="near-progress" id="near-swap-status" aria-live="polite">
+      ${steps.map(step).join('')}
+    </ol>
   `;
 }
 
@@ -1297,35 +1483,45 @@ function renderNearSwap(swap: NearIntentsSwap): HTMLElement {
   // A QR holds only the address: a wallet scanning it would skip a required memo.
   const qrHtml = swap.depositMemo
     ? ''
-    : `<div class="qr-container near-swap-qr"><div class="qr-loading">Loading...</div></div>
-       <p class="near-swap-qr-note">Address only. Choose ${escapeHtml(swap.symbol)} on ${escapeHtml(chain)} in your wallet.</p>`;
+    : `<div class="qr-container near-swap-qr"><div class="qr-loading">Loading...</div></div>`;
+  const cutoff = nearSwapPaymentCutoff(swap);
+  const dashOut = swap.swapType === 'EXACT_INPUT'
+    ? `about <strong>${escapeHtml(formatUnitsShort(swap.amountOut, 8, 6))} DASH</strong>${swap.minAmountOut ? ` (at least ${escapeHtml(formatUnitsShort(swap.minAmountOut, 8, 6))})` : ''}`
+    : `<strong>${escapeHtml(formatUnits(swap.amountOut, 8))} DASH</strong>`;
+  // Pending swaps show a checklist; outcomes and problems a status box.
+  const statusHtml = status.tone === 'pending'
+    ? renderNearProgress(swap)
+    : `<div class="near-swap-status ${status.tone}" id="near-swap-status">
+        <div>
+          <strong>${escapeHtml(status.label)}</strong>
+          <p>${escapeHtml(status.detail)}</p>
+        </div>
+      </div>`;
 
   el.innerHTML = `
-    <div class="near-swap-status ${status.tone}" id="near-swap-status">
-      ${status.tone === 'pending' ? '<span class="faucet-spinner near-spinner"></span>' : ''}
-      <div>
-        <strong>${escapeHtml(status.label)}</strong>
-        <p>${escapeHtml(status.detail)}</p>
-      </div>
-    </div>
     ${showPayment ? `
       <p class="near-swap-instruction">${instruction}</p>
-      ${qrHtml}
-      <div class="address-display near-swap-address">
-        <code class="address" id="near-deposit-address">${escapeHtml(swap.depositAddress)}</code>
-        <button class="copy-btn" data-copy="${escapeAttr(swap.depositAddress)}">Copy</button>
+      <div class="near-pay">
+        ${qrHtml}
+        <div class="near-pay-details">
+          <div class="address-display near-swap-address">
+            <code class="address" id="near-deposit-address">${escapeHtml(swap.depositAddress)}</code>
+            <button class="copy-btn" data-copy="${escapeAttr(swap.depositAddress)}">Copy</button>
+          </div>
+          ${swap.depositMemo ? `
+            <p class="near-swap-memo-label">Memo (required, or the payment is lost)</p>
+            <div class="address-display near-swap-address">
+              <code class="address" id="near-deposit-memo">${escapeHtml(swap.depositMemo)}</code>
+              <button class="copy-btn" data-copy="${escapeAttr(swap.depositMemo)}">Copy</button>
+            </div>` : ''}
+        </div>
       </div>
-      ${swap.depositMemo ? `
-        <p class="near-swap-memo-label">Memo (required, or the payment is lost)</p>
-        <div class="address-display near-swap-address">
-          <code class="address" id="near-deposit-memo">${escapeHtml(swap.depositMemo)}</code>
-          <button class="copy-btn" data-copy="${escapeAttr(swap.depositMemo)}">Copy</button>
-        </div>` : ''}
       <div class="near-intents-warning">
-        <p>${incomplete ? 'Complete the payment' : `Send exactly <strong>${escapeHtml(amount)}</strong>`} on <strong>${escapeHtml(chain)}</strong> before <strong>${escapeHtml(formatNearTime(nearSwapPaymentCutoff(swap)))}</strong>, so it confirms before the swap deadline. Any other asset or network may be lost.</p>
+        <p>${incomplete ? 'Complete the payment' : 'Pay'} within <strong>${escapeHtml(formatTimeLeft(cutoff))}</strong> (before ${escapeHtml(formatNearTime(cutoff))}). Send only ${escapeHtml(swap.symbol)} on ${escapeHtml(chain)}; any other asset or network may be lost.</p>
         <p>If the swap can't complete, it is refunded to <code>${escapeHtml(swap.refundTo)}</code>.</p>
       </div>` : ''}
-    <p class="near-swap-receive">You receive <strong>${escapeHtml(formatUnits(swap.amountOut, 8))} DASH</strong> at your bridge deposit address.</p>
+    ${statusHtml}
+    <p class="near-swap-receive">You receive ${dashOut} at your bridge deposit address.</p>
     ${swap.statusError ? `<p class="near-swap-status-error">Couldn't check the swap status (retrying): ${escapeHtml(swap.statusError)}</p>` : ''}
     ${swap.correlationId ? `<p class="near-swap-ref">NEAR Intents reference: <code>${escapeHtml(swap.correlationId)}</code></p>` : ''}
     ${canReset ? `<button id="near-swap-reset-btn" class="tertiary-btn near-swap-reset">${swap.status === 'PENDING_DEPOSIT' && !expired ? "Pay with a different asset (only if you haven't sent anything)" : 'Get a new quote'}</button>` : ''}
@@ -1333,12 +1529,12 @@ function renderNearSwap(swap: NearIntentsSwap): HTMLElement {
 
   const qr = el.querySelector('.near-swap-qr');
   if (qr) {
-    generateQRCodeDataUrl(swap.depositAddress, 180).then((dataUrl) => {
+    generateQRCodeDataUrl(swap.depositAddress, 160).then((dataUrl) => {
       const img = document.createElement('img');
       img.src = dataUrl;
       img.alt = 'NEAR Intents payment address QR code';
-      img.width = 180;
-      img.height = 180;
+      img.width = 160;
+      img.height = 160;
       qr.innerHTML = '';
       qr.appendChild(img);
     }).catch(() => {
@@ -1346,77 +1542,6 @@ function renderNearSwap(swap: NearIntentsSwap): HTMLElement {
     });
   }
   return el;
-}
-
-function renderNearIntentsPanel(state: BridgeState, address: string): HTMLElement {
-  const section = document.createElement('div');
-  section.className = 'near-intents-section';
-  section.id = 'near-intents-section';
-  const near = state.nearIntents;
-  const open = near?.open ?? false;
-
-  section.innerHTML = `
-    <button id="near-intents-toggle" class="deposit-method-toggle near-intents-toggle${open ? ' expanded' : ''}" aria-expanded="${open}">
-      <span>Pay with other crypto <span class="near-intents-via">via NEAR Intents</span></span>
-      <span class="toggle-icon">&#9662;</span>
-    </button>
-  `;
-  if (!open || !near) return section;
-
-  const body = document.createElement('div');
-  body.className = 'near-intents-body';
-  section.appendChild(body);
-  const errorHtml = near.error ? `<p class="near-intents-error" role="alert">${escapeHtml(near.error)}</p>` : '';
-
-  // A swap is only shown for the address it delivers to.
-  if (near.swap && near.swap.recipient === address) {
-    body.appendChild(renderNearSwap(near.swap));
-    return section;
-  }
-
-  const intro = `<p class="near-intents-intro">Pay with USDC, USDT, ETH, BTC, SOL and more from any wallet or exchange. NEAR Intents swaps it and sends DASH to your deposit address.</p>`;
-
-  if (!near.tokens) {
-    body.innerHTML = near.busy === 'tokens' || !near.error
-      ? `${intro}<div class="faucet-loading near-loading"><div class="faucet-spinner"></div><span>Loading assets…</span></div>`
-      : `${intro}${errorHtml}<button id="near-tokens-retry-btn" class="secondary-btn near-btn">Try again</button>${renderNearFallbackLink(address)}`;
-    return section;
-  }
-
-  const selected = near.tokens.find((t) => t.assetId === near.originAssetId);
-  const groups = groupNearTokens(near.tokens, near.assetFilter, near.originAssetId);
-  const options = groups.length === 0
-    ? '<option disabled>No matching assets</option>'
-    : groups.map(([chain, list]) => `
-        <optgroup label="${escapeAttr(nearChainName(chain))}">
-          ${list.map((t) => `<option value="${escapeAttr(t.assetId)}"${t.assetId === near.originAssetId ? ' selected' : ''}>${escapeHtml(t.symbol)} (${escapeHtml(nearChainName(t.blockchain))})</option>`).join('')}
-        </optgroup>`).join('');
-  const minDash = formatUnits(String(depositMinimumDuffs(state)), 8);
-  const chainName = selected ? nearChainName(selected.blockchain) : 'the source chain';
-  const busy = Boolean(near.busy);
-
-  body.innerHTML = `
-    ${intro}
-    <div class="near-intents-form">
-      <label class="input-label" for="near-asset-select">Pay with</label>
-      <input type="search" id="near-asset-filter" class="near-input" placeholder="Search assets or chains" value="${escapeAttr(near.assetFilter)}" autocomplete="off" />
-      <select id="near-asset-select" class="near-input near-select" ${busy ? 'disabled' : ''}>${options}</select>
-
-      <label class="input-label" for="near-amount-input">DASH to receive</label>
-      <input type="text" id="near-amount-input" class="near-input" inputmode="decimal" autocomplete="off" value="${escapeAttr(near.amountInput)}" ${busy ? 'disabled' : ''} />
-      <p class="input-hint">At least ${escapeHtml(minDash)} DASH. This is what reaches your deposit address.</p>
-
-      <label class="input-label" for="near-refund-input">Refund address on ${escapeHtml(chainName)}</label>
-      <input type="text" id="near-refund-input" class="near-input" placeholder="Your ${escapeAttr(chainName)} address" autocomplete="off" spellcheck="false" value="${escapeAttr(near.refundAddress)}" ${busy ? 'disabled' : ''} />
-      <p class="input-hint">If the swap can't complete, your payment is returned here.</p>
-    </div>
-    ${errorHtml}
-    ${near.quote && selected
-      ? renderNearQuoteSummary(near, selected)
-      : `<button id="near-quote-btn" class="primary-btn near-btn" ${busy || !selected ? 'disabled' : ''}>${near.busy === 'quote' ? 'Getting quote…' : 'Get quote'}</button>`}
-    ${renderNearFallbackLink(address, selected)}
-  `;
-  return section;
 }
 
 function renderProcessingStep(state: BridgeState): HTMLElement {
