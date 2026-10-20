@@ -36,8 +36,8 @@ const schemasWithDefinitions = {
 
 const changeRules = {
   $formatVersion: '0',
-  authorizedToMakeChange: 'NoOne',
-  adminActionTakers: 'NoOne',
+  authorizedToMakeChange: { $type: 'noOne' },
+  adminActionTakers: { $type: 'noOne' },
   changingAuthorizedActionTakersToNoOneAllowed: false,
   changingAdminActionTakersToNoOneAllowed: false,
   selfChangingAdminActionTakersAllowed: false,
@@ -95,7 +95,7 @@ const tokenJson = {
   destroyFrozenFundsRules: changeRules,
   emergencyActionRules: changeRules,
   mainControlGroup: null,
-  mainControlGroupCanBeModified: 'NoOne',
+  mainControlGroupCanBeModified: { $type: 'noOne' },
   description: null,
 };
 
@@ -104,7 +104,7 @@ describe('contract token normalization', () => {
     await ensureInitialized();
   });
 
-  it('documents that evo-sdk rc.2 rejects raw token JSON', () => {
+  it('documents that evo-sdk rejects raw token JSON', () => {
     expect(() => new DataContract({
       ownerId,
       identityNonce: 0n,
@@ -114,7 +114,7 @@ describe('contract token normalization', () => {
     })).toThrow(/TokenConfiguration/);
   });
 
-  it('builds token contracts from plain JSON through the rc.2 fromJSON path', () => {
+  it('builds token contracts from plain JSON through the fromJSON path', () => {
     const platformVersion = PlatformVersion.latest();
     const contractJson = buildDataContractJson(
       ownerId,
@@ -131,7 +131,7 @@ describe('contract token normalization', () => {
     expect(dataContract.id.toString()).toBe(contractJson.id);
   });
 
-  it('preserves contract-level JSON metadata under the rc.2 keys and survives fromJSON', () => {
+  it('preserves contract-level JSON metadata under the SDK JSON keys and survives fromJSON', () => {
     const platformVersion = PlatformVersion.latest();
     const schemaDefinitions = {
       localizedString: {
