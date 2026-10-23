@@ -4,6 +4,7 @@ import DAPIClientModule from '@dashevo/dapi-client';
 import dashcoreLib from '@dashevo/dashcore-lib';
 import { hash160 } from '../crypto/hash.js';
 import { describeIslock } from '../utils/islock-debug.js';
+import { fetchPlatformStatus, type PlatformStatus } from '../platform/status.js';
 
 interface BloomFilterStatic {
   create(elements: number, falsePositiveRate: number, nTweak: number, nFlags: number): {
@@ -412,13 +413,14 @@ export class DAPISubscriptionClient {
   }
 
   /**
-   * Read the chain-locked Dash Core block height directly from Platform via
-   * gRPC (`platform.getStatus()` → `chain.coreChainLockedHeight`).
+   * Read the chain-locked Dash Core block height directly from Platform
+   * (`chain.coreChainLockedHeight` of the Platform status).
    *
-   * We go straight to dapi-client rather than `sdk.system.status()` because
-   * the wasm SDK in trusted mode returns testnet-cached values for this
-   * field on devnets, while this path is authoritative for whatever
-   * masternode the dapiAddresses point at.
+   * Devnets go straight to dapi-client (`platform.getStatus()`) rather than
+   * `sdk.system.status()` because the wasm SDK in trusted mode can return
+   * testnet-cached values there, while this path is authoritative for
+   * whatever masternode the dapiAddresses point at. Testnet uses the SDK;
+   * see {@link getPlatformStatus}.
    *
    * @returns the chain-locked height, or `undefined` if the masternode
    *   reports no chain-lock yet.
@@ -429,17 +431,22 @@ export class DAPISubscriptionClient {
   }
 
   /**
-   * Read Platform/Tenderdash status via gRPC `platform.getStatus()`. Surfaces
-   * the chain-locked Core height plus the latest Platform block height and its
-   * timestamp, which together let callers detect a stalled Platform consensus
-   * (Core advancing while Tenderdash is stuck). Fields are `undefined` when the
-   * masternode doesn't report them.
+   * Read Platform/Tenderdash status. Surfaces the chain-locked Core height
+   * plus the latest Platform block height and its timestamp, which together
+   * let callers detect a stalled Platform consensus (Core advancing while
+   * Tenderdash is stuck). Fields are `undefined` when the masternode doesn't
+   * report them.
+   *
+   * Testnet reads through the EvoSDK: every testnet node omits the optional
+   * `state_sync` message that dapi-client's `platform.getStatus()` decoder
+   * dereferences unconditionally, so that call always throws there. Devnets
+   * keep the dapi-client gRPC call (see getCoreChainLockedHeight).
    */
-  async getPlatformStatus(): Promise<{
-    coreChainLockedHeight?: number;
-    latestBlockHeight?: number;
-    latestBlockTimeMs?: number;
-  }> {
+  async getPlatformStatus(): Promise<PlatformStatus> {
+    if (this.network === 'testnet') {
+      return fetchPlatformStatus(this.network);
+    }
+
     const status = await this.dapiClient.platform.getStatus();
 
     const chain = status.getChainStatus?.() ?? status.chain;

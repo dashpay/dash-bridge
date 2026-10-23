@@ -1,5 +1,6 @@
 import { DAPIClient, type DAPIConfig } from './dapi.js';
 import { DAPISubscriptionClient, type DAPISubscriptionConfig } from './dapi-subscription.js';
+import type { PlatformStatus } from '../platform/status.js';
 import type { RetryOptions } from '../utils/retry.js';
 import { abortableSleep } from '../utils/sleep.js';
 
@@ -148,9 +149,9 @@ export class IslockService {
   }
 
   /**
-   * Direct gRPC read of the Platform chain-locked Dash Core height.
-   * Used by the chainlock fallback — see DAPISubscriptionClient
-   * for why this bypasses `sdk.system.status()`.
+   * Read of the Platform chain-locked Dash Core height. Used by the
+   * chainlock fallback; testnet reads it through the EvoSDK and devnets over
+   * direct gRPC — see DAPISubscriptionClient for why.
    */
   async getCoreChainLockedHeight(): Promise<number | undefined> {
     return this.subscriptionClient.getCoreChainLockedHeight();
@@ -177,14 +178,11 @@ export class IslockService {
 
   /**
    * Read Platform/Tenderdash status (chain-locked Core height, latest Platform
-   * block height + timestamp) over DAPI. Used by the network-health indicator
-   * on devnets (which have explicit dapiAddresses).
+   * block height + timestamp). Used by the network-health indicator on
+   * testnet (via the EvoSDK) and devnets (via DAPI over their explicit
+   * dapiAddresses).
    */
-  async getPlatformStatus(): Promise<{
-    coreChainLockedHeight?: number;
-    latestBlockHeight?: number;
-    latestBlockTimeMs?: number;
-  }> {
+  async getPlatformStatus(): Promise<PlatformStatus> {
     return this.subscriptionClient.getPlatformStatus();
   }
 

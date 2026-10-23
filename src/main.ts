@@ -3362,14 +3362,16 @@ async function startChainlockFallback(): Promise<void> {
     }
   );
 
-  // Poll #2: chain-locked Dash Core height. DAPI JSON-RPC
-  // `getbestchainlock` first (when an rpcUrl is configured), then direct
-  // gRPC `platform.getStatus()` via @dashevo/dapi-client. We intentionally
-  // do NOT use `sdk.system.status()`: in pre-dev.7 builds the testnet
-  // trusted context returned testnet-cached values on devnets. SDK
-  // 3.1.0-dev.7 fixes this with per-devnet trusted contexts, but the
-  // direct dapi-client call works uniformly across trusted and
-  // non-trusted devnets, so we keep it.
+  // Poll #2: chain-locked Dash Core height. JSON-RPC `getbestchainlock`
+  // first (mainnet only; it returns nothing without an rpcUrl), then the
+  // Platform status via IslockService. On testnet that is
+  // `sdk.system.status()` (dapi-client's decoder throws on every testnet
+  // node, which omit `state_sync`). On devnets it is direct gRPC
+  // `platform.getStatus()` via @dashevo/dapi-client: in pre-dev.7 builds the
+  // SDK's testnet trusted context returned testnet-cached values on devnets.
+  // SDK 3.1.0-dev.7 fixes this with per-devnet trusted contexts, but the
+  // direct dapi-client call works uniformly across trusted and non-trusted
+  // devnets, so we keep it there.
   const chainLockPoll = (async (): Promise<void> => {
     while (!signal.aborted) {
       let height: number | undefined;
