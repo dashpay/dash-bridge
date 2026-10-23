@@ -29,18 +29,53 @@ export interface DAPISubscriptionConfig {
   dapiAddresses?: string[];
 }
 
+/** Distinct evonodes the IS lock stream is opened on at once. */
+export const ISLOCK_CONCURRENT_NODES = 3;
+/** Total streams opened per subscription, initial ones plus replacements for failed ones. */
+export const ISLOCK_MAX_NODE_ATTEMPTS = ISLOCK_CONCURRENT_NODES + 6;
+/** Longest subscribeForInstantSendLock waits for a first stream message before returning. */
+export const ISLOCK_READINESS_CAP_MS = 3000;
+
+const CLIENT_OPTIONS = { timeout: 30000, retries: 3 };
+
+interface DapiAddress {
+  protocol: string;
+  host: string;
+  port: number;
+}
+
+interface NodeSlot {
+  client?: any;
+  stream?: any;
+  failed: boolean;
+}
+
+function shuffled<T>(items: readonly T[]): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
 export class DAPISubscriptionClient {
   readonly network: string;
   private readonly dapiClient: any;
+  private readonly nodeAddresses: DapiAddress[];
+  // Aborts of in-flight multi-node subscriptions. DAPIClient.disconnect() does
+  // not cancel streams, so disconnect() must stop these to close the per-node clients.
+  private readonly activeSubscriptions = new Set<() => void>();
 
   constructor(config: DAPISubscriptionConfig) {
     this.network = config.network;
-    const options: any = { timeout: 30000, retries: 3 };
+    const options: any = { ...CLIENT_OPTIONS };
+    this.nodeAddresses = [];
     if (config.dapiAddresses?.length) {
       // DAPIClient expects address objects { host, port, protocol }, not URL strings.
       // Our configs store URLs (https://host:port) for EvoSDK compatibility, so
       // parse them here.
-      options.dapiAddresses = config.dapiAddresses.map((addr) => {
+      const parsed: DapiAddress[] = config.dapiAddresses.map((addr) => {
         const url = new URL(addr);
         return {
           protocol: url.protocol.replace(':', ''),
@@ -48,6 +83,9 @@ export class DAPISubscriptionClient {
           port: url.port ? parseInt(url.port, 10) : 443,
         };
       });
+      options.dapiAddresses = parsed;
+      // A repeated address would put two "distinct" streams on one node.
+      this.nodeAddresses = [...new Map(parsed.map((a) => [`${a.host}:${a.port}`, a])).values()];
     } else {
       options.network = config.network === 'mainnet' ? 'mainnet' : 'testnet';
     }
@@ -119,6 +157,12 @@ export class DAPISubscriptionClient {
     console.log('[islock-sub] Current block height:', currentHeight);
     const fromBlockHeight = Math.max(1, currentHeight - 10);
 
+    if (this.nodeAddresses.length >= 2) {
+      return this.subscribeOnMultipleNodes(
+        txid, bloomFilter, fromBlockHeight, timeoutMs, onProgress, signal
+      );
+    }
+
     onProgress?.(`Subscribing from block ${fromBlockHeight}...`);
     const stream = await this.dapiClient.core.subscribeToTransactionsWithProofs(
       bloomFilter,
@@ -153,31 +197,8 @@ export class DAPISubscriptionClient {
       }
 
       stream.on('data', (response: unknown) => {
-        try {
-          const islockMessages = (response as any).getInstantSendLockMessages?.();
-          const hasIslocks = !!islockMessages;
-          const hasMerkleBlock = !!(response as any).getRawMerkleBlock?.()?.length;
-          const hasRawTxs = !!(response as any).getRawTransactions?.()?.getTransactionsList?.()?.length;
-          console.log(`[islock-sub] stream data: islocks=${hasIslocks} merkleBlock=${hasMerkleBlock} rawTxs=${hasRawTxs}`);
-          if (!islockMessages) return;
-          const messages = islockMessages.getMessagesList_asU8?.() || islockMessages.getMessagesList?.();
-          if (!messages || messages.length === 0) return;
-          console.log(`[islock-sub] received ${messages.length} IS lock(s) in stream message`);
-          for (const msgBytes of messages) {
-            const bytes = msgBytes instanceof Uint8Array ? msgBytes : new Uint8Array(msgBytes);
-            const lockTxid = this.parseInstantLockTxid(bytes);
-            console.log(`[islock-sub] IS lock txid=${lockTxid} (want ${txid})`);
-            if (lockTxid === txid) {
-              onProgress?.('InstantSend lock received!');
-              const debug = describeIslock(bytes, 'dapi-subscription');
-              console.log('[islock-debug] IS lock received via gRPC subscription:', debug);
-              finish(() => resolve(bytes));
-              return;
-            }
-          }
-        } catch (error) {
-          console.warn('Error processing stream data:', error);
-        }
+        const bytes = this.findMatchingLock(response, txid, onProgress);
+        if (bytes) finish(() => resolve(bytes));
       });
 
       stream.on('error', (error: Error) => {
@@ -196,6 +217,187 @@ export class DAPISubscriptionClient {
     return { wait: () => lockPromise };
   }
 
+  /** Returns the bytes of the IS lock for `txid` carried by a stream message, if any. */
+  private findMatchingLock(
+    response: unknown,
+    txid: string,
+    onProgress?: (message: string) => void
+  ): Uint8Array | null {
+    try {
+      const islockMessages = (response as any).getInstantSendLockMessages?.();
+      const hasIslocks = !!islockMessages;
+      const hasMerkleBlock = !!(response as any).getRawMerkleBlock?.()?.length;
+      const hasRawTxs = !!(response as any).getRawTransactions?.()?.getTransactionsList?.()?.length;
+      console.log(`[islock-sub] stream data: islocks=${hasIslocks} merkleBlock=${hasMerkleBlock} rawTxs=${hasRawTxs}`);
+      if (!islockMessages) return null;
+      const messages = islockMessages.getMessagesList_asU8?.() || islockMessages.getMessagesList?.();
+      if (!messages || messages.length === 0) return null;
+      console.log(`[islock-sub] received ${messages.length} IS lock(s) in stream message`);
+      for (const msgBytes of messages) {
+        const bytes = msgBytes instanceof Uint8Array ? msgBytes : new Uint8Array(msgBytes);
+        const lockTxid = this.parseInstantLockTxid(bytes);
+        console.log(`[islock-sub] IS lock txid=${lockTxid} (want ${txid})`);
+        if (lockTxid === txid) {
+          onProgress?.('InstantSend lock received!');
+          const debug = describeIslock(bytes, 'dapi-subscription');
+          console.log('[islock-debug] IS lock received via gRPC subscription:', debug);
+          return bytes;
+        }
+      }
+    } catch (error) {
+      console.warn('Error processing stream data:', error);
+    }
+    return null;
+  }
+
+  /**
+   * Subscribe on several distinct evonodes at once and take the first matching
+   * IS lock. A single random node can be dead (the stream then errors ~12 s
+   * after connecting, long after the tx was broadcast) or can silently drop the
+   * lock, so each node gets its own one-address client: a shared client would
+   * pick nodes at random and could land on the same one twice.
+   *
+   * subscribeToTransactionsWithProofs resolves before any connection exists, so
+   * readiness is approximated: return once any stream delivers a message (the
+   * server replays recent blocks, usually within ~1 s) or after the readiness
+   * cap, whichever comes first. The remaining streams keep connecting.
+   */
+  private async subscribeOnMultipleNodes(
+    txid: string,
+    bloomFilter: ReturnType<DAPISubscriptionClient['createBloomFilter']>,
+    fromBlockHeight: number,
+    timeoutMs: number,
+    onProgress?: (message: string) => void,
+    signal?: AbortSignal
+  ): Promise<{ wait: () => Promise<Uint8Array> }> {
+    const nodes = shuffled(this.nodeAddresses);
+    const initialCount = Math.min(ISLOCK_CONCURRENT_NODES, nodes.length);
+    onProgress?.(`Subscribing from block ${fromBlockHeight} on ${initialCount} nodes...`);
+
+    let markReady!: () => void;
+    const ready = new Promise<void>((resolve) => { markReady = resolve; });
+    const readyTimerId = setTimeout(markReady, ISLOCK_READINESS_CAP_MS);
+
+    const lockPromise = new Promise<Uint8Array>((resolve, reject) => {
+      const slots = new Set<NodeSlot>();
+      let settled = false;
+      let nextNode = 0;
+      let attempts = 0;
+      let running = 0;
+
+      const cancelStream = (stream: any): void => {
+        try { stream?.cancel(); } catch { /* ignore */ }
+      };
+
+      const release = (slot: NodeSlot): void => {
+        slots.delete(slot);
+        cancelStream(slot.stream);
+        const client = slot.client;
+        if (!client) return;
+        try {
+          Promise.resolve(client.disconnect()).catch(() => {});
+        } catch { /* ignore */ }
+      };
+
+      const finish = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        clearTimeout(readyTimerId);
+        this.activeSubscriptions.delete(onAbort);
+        signal?.removeEventListener('abort', onAbort);
+        for (const slot of [...slots]) release(slot);
+        markReady();
+        fn();
+      };
+
+      const onAbort = (): void => {
+        finish(() => reject(new Error(`InstantSend lock subscription aborted for ${txid}`)));
+      };
+
+      const timeoutId = setTimeout(() => {
+        finish(() => reject(new Error(`Timeout waiting for InstantSend lock for ${txid} after ${timeoutMs}ms`)));
+      }, timeoutMs);
+
+      const openNode = (): void => {
+        const address = nodes[nextNode++];
+        if (!address) return;
+        const slot: NodeSlot = { failed: false };
+        slots.add(slot);
+        attempts++;
+        running++;
+
+        const fail = (error: unknown): void => {
+          if (settled || slot.failed) return;
+          slot.failed = true;
+          running--;
+          release(slot);
+          if (nextNode < nodes.length && attempts < ISLOCK_MAX_NODE_ATTEMPTS) {
+            openNode();
+          } else if (running === 0) {
+            const reason = error instanceof Error ? error.message : String(error);
+            finish(() => reject(new Error(
+              `InstantSend lock subscription failed for ${txid}: ${attempts} nodes tried, last error: ${reason}`
+            )));
+          }
+        };
+
+        console.log(`[islock-sub] opening stream on ${address.host}:${address.port} (attempt ${attempts})`);
+        try {
+          slot.client = new DAPIClientClass({ ...CLIENT_OPTIONS, dapiAddresses: [address] });
+          Promise.resolve(
+            slot.client.core.subscribeToTransactionsWithProofs(bloomFilter, { fromBlockHeight, count: 0 })
+          ).then((stream: any) => {
+            if (settled || slot.failed) {
+              cancelStream(stream);
+              return;
+            }
+            slot.stream = stream;
+            stream.on('data', (response: unknown) => {
+              if (settled) return;
+              markReady();
+              const bytes = this.findMatchingLock(response, txid, onProgress);
+              if (bytes) finish(() => resolve(bytes));
+            });
+            // Listeners stay attached after cancel(): Node gRPC streams emit
+            // 'error' on cancel, which would throw if nothing were listening.
+            // The browser build reports one failure through both 'error' and
+            // 'end'; slot.failed makes the second a no-op.
+            stream.on('error', (error: Error) => {
+              if (settled || slot.failed) return;
+              console.error(`[islock-sub] stream error on ${address.host}:${address.port}:`, error);
+              fail(error);
+            });
+            stream.on('end', () => {
+              if (settled || slot.failed) return;
+              console.warn(`[islock-sub] stream ended on ${address.host}:${address.port}`);
+              fail(new Error(`Stream ended before receiving InstantSend lock for ${txid}`));
+            });
+          }).catch(fail);
+        } catch (error) {
+          fail(error);
+        }
+      };
+
+      if (signal) {
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+      this.activeSubscriptions.add(onAbort);
+
+      for (let i = 0; i < initialCount && !settled; i++) openNode();
+    });
+
+    // Avoid unhandled-rejection warnings if the caller never awaits .wait()
+    lockPromise.catch(() => {});
+
+    await ready;
+    return { wait: () => lockPromise };
+  }
+
   async waitForInstantSendLock(
     txid: string,
     publicKey: Uint8Array,
@@ -209,6 +411,7 @@ export class DAPISubscriptionClient {
   }
 
   async disconnect(): Promise<void> {
+    for (const abort of [...this.activeSubscriptions]) abort();
     try { await this.dapiClient.disconnect(); } catch { /* ignore */ }
   }
 
