@@ -14,7 +14,7 @@ vi.mock('./dapi.js', () => ({
   DAPIClient: vi.fn().mockImplementation((config: { network: string; rpcUrl?: string }) => ({
     network: config.network,
     get hasRpcUrl() {
-      return !!config.rpcUrl || config.network === 'mainnet' || config.network === 'testnet';
+      return !!config.rpcUrl || config.network === 'mainnet';
     },
     waitForInstantSendLock: mocks.waitForInstantSendLock,
     getBestChainLock: mocks.getBestChainLock,
@@ -60,6 +60,26 @@ describe('IslockService', () => {
     expect(mocks.subscribeForInstantSendLock).not.toHaveBeenCalled();
     expect(mocks.getTransactionLockStatus).not.toHaveBeenCalled();
     expect(progress).toEqual(['Polling InstantSend lock...']);
+    await expect(handle.wait()).resolves.toBe(bytes);
+  });
+
+  it('uses the DAPI subscription on testnet (no JSON-RPC since V24)', async () => {
+    const { TESTNET } = await import('../config.js');
+    const bytes = new Uint8Array([5, 6]);
+    mocks.subscribeForInstantSendLock.mockResolvedValue({ wait: vi.fn().mockResolvedValue(bytes) });
+    const service = new IslockService({
+      network: 'testnet',
+      rpcUrl: TESTNET.rpcUrl,
+      dapiAddresses: TESTNET.dapiAddresses,
+    });
+
+    expect(TESTNET.rpcUrl).toBeUndefined();
+    expect(TESTNET.dapiAddresses?.length).toBeGreaterThan(0);
+    expect(service.supportsJsonRpc).toBe(false);
+    const handle = await service.subscribeForInstantSendLock('txid', new Uint8Array([4]), { txid: 'prevout', vout: 0 });
+
+    expect(mocks.waitForInstantSendLock).not.toHaveBeenCalled();
+    expect(mocks.subscribeForInstantSendLock).toHaveBeenCalledOnce();
     await expect(handle.wait()).resolves.toBe(bytes);
   });
 

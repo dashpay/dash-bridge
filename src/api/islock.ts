@@ -66,11 +66,12 @@ export class IslockService {
 
   /**
    * Open the IS lock source before broadcasting and return a handle whose
-   * `.wait()` resolves with the IS lock bytes once available. Devnets without
-   * RPC use the DAPI bloom subscription, which must be established before
-   * broadcast because subscriptions don't replay historical IS locks.
-   * Mainnet/testnet use JSON-RPC polling, which can recover by txid and avoids
-   * browser-hostile dapi-client stream discovery.
+   * `.wait()` resolves with the IS lock bytes once available. Networks without
+   * RPC (testnet, devnets) use the DAPI bloom subscription over their explicit
+   * dapiAddresses, which must be established before broadcast because
+   * subscriptions don't replay historical IS locks. Mainnet uses JSON-RPC
+   * polling, which can recover by txid and avoids browser-hostile dapi-client
+   * stream discovery.
    */
   async subscribeForInstantSendLock(
     txid: string,
@@ -102,7 +103,7 @@ export class IslockService {
       };
     }
 
-    // JSON-RPC backed networks (mainnet/testnet) should not touch dapi-client
+    // JSON-RPC backed networks (mainnet) should not touch dapi-client
     // stream setup here. Browser seed/SML discovery can fail on TLS-hostname
     // validation and report "No available addresses", which would block the
     // broadcast even though the RPC islock endpoint is sufficient.

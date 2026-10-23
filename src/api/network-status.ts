@@ -34,11 +34,11 @@ export async function fetchNetworkStatus(
   const checkedAtMs = Date.now();
 
   // Route the chain-lock source the same way the islock flow is routed:
-  //   - mainnet/testnet (JSON-RPC available): read Core's best chain-lock over
+  //   - mainnet (JSON-RPC available): read Core's best chain-lock over
   //     JSON-RPC. The dapi-client DAPI path can't resolve a masternode address
   //     in a browser there (seed/SML resolution fails on bad certs + CORS), so
   //     we deliberately avoid it.
-  //   - devnets (no JSON-RPC, explicit dapiAddresses): read full Platform
+  //   - testnet/devnets (no JSON-RPC, explicit dapiAddresses): read full Platform
   //     status over DAPI, which also yields Tenderdash block height + age.
   const useDapiPlatformStatus = !islock.supportsJsonRpc;
 

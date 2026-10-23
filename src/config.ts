@@ -44,7 +44,29 @@ export const TESTNET: NetworkConfig = {
   dustThreshold: 546,
   platformHrp: 'tdash',
   faucetBaseUrl: 'https://faucet.thepasta.org',
-  rpcUrl: 'https://trpc.digitalcash.dev',
+  // No rpcUrl: trpc.digitalcash.dev is stuck on Core v23 and has no IS locks
+  // past the V24 fork (block 1,578,000). IS locks come from the DAPI bloom
+  // stream instead. Explicit addresses skip dapi-client's seed/SML discovery,
+  // which can't parse V24 CbTx v4 coinbases. Snapshot (2026-10-23) of ENABLED
+  // evonodes whose DAPI version check passed, with an IP-valid TLS cert and a
+  // CORS preflight that reflects the request origin.
+  dapiAddresses: [
+    'https://68.67.122.1:1443',
+    'https://68.67.122.2:1443',
+    'https://68.67.122.3:1443',
+    'https://68.67.122.4:1443',
+    'https://68.67.122.5:1443',
+    'https://68.67.122.6:1443',
+    'https://68.67.122.7:1443',
+    'https://68.67.122.8:1443',
+    'https://68.67.122.9:1443',
+    'https://68.67.122.10:1443',
+    'https://68.67.122.11:1443',
+    'https://68.67.122.12:1443',
+    'https://85.209.243.1:1443',
+    'https://85.209.243.2:1443',
+    'https://87.229.22.126:1443',
+  ],
 };
 
 export const MAINNET: NetworkConfig = {
