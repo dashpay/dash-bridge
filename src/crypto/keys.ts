@@ -226,23 +226,21 @@ export function findMatchingKeyIndex(
   identityPublicKeys: IdentityPublicKeyInfo[],
   network: string
 ): { keyId: number; type: number; securityLevel: number; purpose: number; publicKey: Uint8Array } | null {
-  // Decode the WIF to get the private key
-  let privateKey: Uint8Array;
+  // Both the WIF encoding and the private scalar must be valid.
+  let publicKey: Uint8Array;
   try {
     const decoded = wifToPrivateKey(privateKeyWif);
-    privateKey = decoded.privateKey;
 
     // Validate network prefix
     const networkConfig = getNetwork(network);
     if (decoded.prefix !== networkConfig.wifPrefix) {
       return null; // Network mismatch
     }
+    publicKey = getPublicKey(decoded.privateKey);
   } catch {
-    return null; // Invalid WIF format
+    return null; // Invalid WIF format or private scalar
   }
 
-  // Derive the public key from the private key
-  const publicKey = getPublicKey(privateKey);
   const publicKeyHash = hash160(publicKey);
 
   // Check against each identity key
