@@ -411,7 +411,7 @@ export function updateIdentityKey(
     throw new Error('No mnemonic available for HD derivation');
   }
 
-  const identityKeys = state.identityKeys.map((key, index) => {
+  const identityKeys = state.identityKeys.map((key) => {
     if (key.id !== keyId) return key;
 
     // Determine effective purpose and security level
@@ -433,7 +433,7 @@ export function updateIdentityKey(
         effectiveSecurityLevel,
         state.network,
         state.mnemonic!,
-        index // Use array index as key index
+        key.id // Key IDs stay stable when earlier keys are removed.
       );
     }
 
@@ -457,7 +457,7 @@ export function addIdentityKey(state: BridgeState): BridgeState {
   }
 
   const nextId = Math.max(...state.identityKeys.map((k) => k.id)) + 1;
-  const keyIndex = state.identityKeys.length; // Use array length as key index
+  const keyIndex = nextId; // Array length can reuse a remaining key's path after removal.
 
   const newKey = generateIdentityKeyFromMnemonic(
     nextId,
@@ -497,7 +497,7 @@ export function regenerateAllIdentityKeys(state: BridgeState): BridgeState {
     throw new Error('No mnemonic available for HD derivation');
   }
 
-  const identityKeys = state.identityKeys.map((key, index) =>
+  const identityKeys = state.identityKeys.map((key) =>
     generateIdentityKeyFromMnemonic(
       key.id,
       key.name,
@@ -506,7 +506,7 @@ export function regenerateAllIdentityKeys(state: BridgeState): BridgeState {
       key.securityLevel,
       state.network,
       state.mnemonic!,
-      index
+      key.id
     )
   );
 
@@ -708,7 +708,7 @@ export function setNetwork(
   }
 
   // Re-derive keys with same mnemonic for new network (derivation paths change)
-  const identityKeys = state.identityKeys.map((key, index) =>
+  const identityKeys = state.identityKeys.map((key) =>
     generateIdentityKeyFromMnemonic(
       key.id,
       key.name,
@@ -717,7 +717,7 @@ export function setNetwork(
       key.securityLevel,
       network,
       state.mnemonic!,
-      index
+      key.id
     )
   );
 
