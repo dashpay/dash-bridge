@@ -8,7 +8,7 @@ export {
   updateKeyType,
   generateDefaultIdentityKeys,
 } from './keys.js';
-export { publicKeyToAddress, publicKeyToHash, validateCoreAddress } from './address.js';
+export { publicKeyToAddress, publicKeyToHash, validateCoreAddress, validatePlatformAddress } from './address.js';
 export {
   signHash,
   createP2PKHScriptSig,

@@ -1,5 +1,5 @@
 import { getNetwork, initNetworkRegistry, createCustomDevnetConfig, saveCustomDevnet, isReservedNetworkName, MAINNET, TESTNET } from './config.js';
-import { publicKeyToAddress, signTransaction, generateKeyPair, validateCoreAddress } from './crypto/index.js';
+import { publicKeyToAddress, signTransaction, generateKeyPair, validateCoreAddress, validatePlatformAddress } from './crypto/index.js';
 import {
   formatCreditsAsDash,
   MIN_WITHDRAWAL_CREDITS,
@@ -643,7 +643,7 @@ function stateFromUrl(): BridgeState {
   let initial = createInitialState(network);
 
   // Deep-link: ?address=<bech32m> opens send-to-address mode with address pre-filled
-  if (addressParam && validatePlatformAddress(addressParam, network)) {
+  if (addressParam && validatePlatformAddress(addressParam, getNetwork(network))) {
     initial = setMode(initial, 'send_to_address');
     initial = setRecipientPlatformAddress(initial, addressParam);
   }
@@ -948,7 +948,7 @@ function setupEventListeners(container: HTMLElement) {
   if (continueSendToAddressBtn) {
     continueSendToAddressBtn.addEventListener('click', () => {
       const address = state.recipientPlatformAddress;
-      if (address && validatePlatformAddress(address, state.network)) {
+      if (address && validatePlatformAddress(address, getNetwork(state.network))) {
         startSendToAddress();
       } else {
         const prefix = `${getNetwork(state.network).platformHrp}1`;
@@ -2604,21 +2604,6 @@ async function approveLogin(): Promise<void> {
  */
 function validateIdentityId(id?: string): boolean {
   return !!id && isValidIdentityId(id);
-}
-
-/**
- * Validate platform address format (bech32m, correct network prefix)
- */
-function validatePlatformAddress(address: string, network: string): boolean {
-  const trimmed = address.trim();
-  if (!trimmed) return false;
-
-  try {
-    const decoded = bech32m.decode(trimmed as `${string}1${string}`);
-    return decoded.prefix === getNetwork(network).platformHrp;
-  } catch {
-    return false;
-  }
 }
 
 /**

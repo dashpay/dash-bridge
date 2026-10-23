@@ -1,8 +1,47 @@
 import { describe, it, expect } from 'vitest';
 
-import { validateCoreAddress } from './address.js';
+import { validateCoreAddress, validatePlatformAddress } from './address.js';
+import { bech32m } from '@scure/base';
 import { base58CheckEncode } from '../utils/base58.js';
 import { TESTNET, MAINNET } from '../config.js';
+
+describe('validatePlatformAddress', () => {
+  const encode = (bytes: Uint8Array, hrp = 'tdash') => bech32m.encode(hrp, bech32m.toWords(bytes));
+
+  it('accepts SDK-generated P2PKH and P2SH fixtures on the correct network', () => {
+    // Generated with evo-sdk 4.1.1 PlatformAddress.fromP2{pkh,sh}Hash(...).toBech32m().
+    const fixtures = [
+      ['tdash1kqqszqgpqyqszqgpqyqszqgpqyqszqgpqymtq8wv', TESTNET],
+      ['tdash1sqqszqgpqyqszqgpqyqszqgpqyqszqgpqykswwxq', TESTNET],
+      ['dash1kqqszqgpqyqszqgpqyqszqgpqyqszqgpqytvnelz', MAINNET],
+      ['dash1sqqszqgpqyqszqgpqyqszqgpqyqszqgpqyxhashw', MAINNET],
+    ] as const;
+    for (const [address, network] of fixtures) {
+      expect(validatePlatformAddress(address, network)).toBe(true);
+      expect(validatePlatformAddress(address.toUpperCase(), network)).toBe(true);
+      expect(validatePlatformAddress(address, network === TESTNET ? MAINNET : TESTNET)).toBe(false);
+    }
+  });
+
+  it('rejects checksum-valid payloads with incorrect lengths', () => {
+    for (const size of [0, 1, 20, 22, 32]) {
+      const bytes = new Uint8Array(size).fill(0xb0);
+      expect(validatePlatformAddress(encode(bytes), TESTNET)).toBe(false);
+    }
+  });
+
+  it('rejects unknown wire types, including raw SDK enum values', () => {
+    for (const type of [0, 1, 2, 0xff]) {
+      expect(validatePlatformAddress(encode(new Uint8Array(21).fill(type)), TESTNET)).toBe(false);
+    }
+  });
+
+  it('rejects a bad checksum and invalid byte padding', () => {
+    expect(validatePlatformAddress('tdash1kqqszqgpqyqszqgpqyqszqgpqyqszqgpqymtq8wq', TESTNET)).toBe(false);
+    expect(validatePlatformAddress(bech32m.encode('tdash', [1]), TESTNET)).toBe(false);
+    expect(validatePlatformAddress('', TESTNET)).toBe(false);
+  });
+});
 
 function makeAddress(prefix: number, fill = 0x42): string {
   const payload = new Uint8Array(21);
