@@ -2,6 +2,21 @@ import { hash160 } from './hash.js';
 import { base58CheckEncode, base58CheckDecode } from '../utils/base58.js';
 import { concatBytes } from '../utils/hex.js';
 import type { NetworkConfig } from '../config.js';
+import { bech32m } from '@scure/base';
+
+/** Validate the complete Platform address before asking the user to fund it. */
+export function validatePlatformAddress(address: string, network: NetworkConfig): boolean {
+  try {
+    const { prefix, bytes } = bech32m.decodeToBytes(address.trim());
+    // The bech32m wire types are 0xb0 (P2PKH) and 0x80 (P2SH), distinct
+    // from the SDK's raw-address enum bytes (0 and 1).
+    return prefix === network.platformHrp
+      && bytes.length === 21
+      && (bytes[0] === 0xb0 || bytes[0] === 0x80);
+  } catch {
+    return false;
+  }
+}
 
 export interface CoreAddressValidation {
   valid: boolean;

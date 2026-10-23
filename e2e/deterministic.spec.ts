@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { bech32m } from '@scure/base';
 import {
   E2E_MOCK_DPNS_WIF,
   E2E_MOCK_IDENTITY_ID,
@@ -685,3 +686,35 @@ test.describe('Mainnet DashPay app recommendation (mock mode)', () => {
     await context.close();
   });
 });
+
+
+test('rejects malformed Platform addresses before showing a deposit address', async ({ page }) => {
+  await page.goto('/?network=testnet&e2e=mock');
+  await page.click('#mode-send-to-address-btn');
+  for (const bytes of [new Uint8Array([0xb0]), new Uint8Array(21).fill(0xff)]) {
+    const address = bech32m.encode('tdash', bech32m.toWords(bytes));
+    await page.fill('#recipient-address-input', address);
+    await page.click('#continue-send-to-address-btn');
+    await expect(page.locator('#recipient-address-validation-msg')).toBeVisible();
+    await expect(page.locator('.deposit-headline')).toHaveCount(0);
+  }
+});
+
+test('ignores malformed address deep links', async ({ page }) => {
+  const address = bech32m.encode('tdash', bech32m.toWords(new Uint8Array([0xb0])));
+  await page.goto(`/?network=testnet&e2e=mock&address=${address}`);
+  await expect(page.locator('#mode-create-btn')).toBeVisible();
+  await expect(page.locator('#recipient-address-input')).toHaveCount(0);
+});
+
+for (const type of [0xb0, 0x80]) {
+  test(`accepts a valid Platform address of type ${type}`, async ({ page }) => {
+    const bytes = new Uint8Array(21).fill(1);
+    bytes[0] = type;
+    const address = bech32m.encode('tdash', bech32m.toWords(bytes));
+    await page.goto(`/?network=testnet&e2e=mock&address=${address}`);
+    await expect(page.locator('#recipient-address-input')).toHaveValue(address);
+    await page.click('#continue-send-to-address-btn');
+    await expect(page.locator('.deposit-headline')).toBeVisible();
+  });
+}
