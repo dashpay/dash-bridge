@@ -281,9 +281,8 @@ export class DAPISubscriptionClient {
     const lockPromise = new Promise<Uint8Array>((resolve, reject) => {
       const slots = new Set<NodeSlot>();
       let settled = false;
-      let nextNode = 0;
+      // Streams opened so far; also the index of the next untried node.
       let attempts = 0;
-      let running = 0;
 
       const cancelStream = (stream: any): void => {
         try { stream?.cancel(); } catch { /* ignore */ }
@@ -320,21 +319,18 @@ export class DAPISubscriptionClient {
       }, timeoutMs);
 
       const openNode = (): void => {
-        const address = nodes[nextNode++];
+        const address = nodes[attempts++];
         if (!address) return;
         const slot: NodeSlot = { failed: false };
         slots.add(slot);
-        attempts++;
-        running++;
 
         const fail = (error: unknown): void => {
           if (settled || slot.failed) return;
           slot.failed = true;
-          running--;
           release(slot);
-          if (nextNode < nodes.length && attempts < ISLOCK_MAX_NODE_ATTEMPTS) {
+          if (attempts < nodes.length && attempts < ISLOCK_MAX_NODE_ATTEMPTS) {
             openNode();
-          } else if (running === 0) {
+          } else if (slots.size === 0) {
             const reason = error instanceof Error ? error.message : String(error);
             finish(() => reject(new Error(
               `InstantSend lock subscription failed for ${txid}: ${attempts} nodes tried, last error: ${reason}`
