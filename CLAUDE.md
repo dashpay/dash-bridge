@@ -41,7 +41,10 @@ src/
 │   └── builder.ts       # InstantSend lock proof building
 ├── api/                 # Network communication
 │   ├── insight.ts       # Insight API client (UTXO fetching, broadcast)
-│   └── dapi.ts          # DAPI client (Platform operations, InstantSend)
+│   ├── dapi.ts          # JSON-RPC client (mainnet InstantSend locks, best chain lock)
+│   ├── dapi-subscription.ts # DAPI bloom-filter stream (testnet/devnet InstantSend locks)
+│   ├── islock.ts        # IslockService: picks the InstantSend lock source per network
+│   └── evonodes.ts      # Live testnet evonode list (static list in config.ts is the fallback)
 ├── platform/            # Dash Platform operations
 │   ├── identity.ts      # Identity registration and top-up
 │   └── login.ts         # Sign in with Dash: key checks and signing
@@ -80,6 +83,12 @@ Uses random one-time keypair (not HD-derived) to add credits to an existing iden
 ### Network Selection
 
 Network is determined by URL parameter: `?network=mainnet` (defaults to testnet).
+
+InstantSend lock source and Platform status per network:
+
+- **mainnet**: JSON-RPC at `rpc.digitalcash.dev` (`rpcUrl` in `config.ts`).
+- **testnet**: no JSON-RPC service (trpc.digitalcash.dev never upgraded to Core V24). The lock comes from the DAPI bloom-filter stream on evonodes, discovered from the quorum service at init with the static `dapiAddresses` as fallback. Platform status is read through the EvoSDK (`platform/status.ts`) because dapi-client's `platform.getStatus()` throws on testnet nodes.
+- **devnets**: their configured `rpcUrl` if any, otherwise the DAPI stream over their `dapiAddresses`; Platform status through dapi-client.
 
 ## Dependencies
 

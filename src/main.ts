@@ -14,6 +14,7 @@ import { InsightClient, isAmbiguousBroadcastError } from './api/insight.js';
 import type { IslockService } from './api/islock.js';
 import { fetchNetworkStatus } from './api/network-status.js';
 import { DAPIClient } from './api/dapi.js';
+import { resolveDapiAddresses } from './api/evonodes.js';
 import { buildInstantAssetLockProof, buildChainAssetLockProof } from './proof/index.js';
 import { bech32m } from '@scure/base';
 import { privateKeyToWif, bytesToHex, abortableSleep } from './utils/index.js';
@@ -46,11 +47,11 @@ import {
   setDepositTimedOut,
   setDepositVerificationFailed,
   setNetwork,
-  setNetworkStatus,
   updateIdentityKey,
   addIdentityKey,
   removeIdentityKey,
   render,
+  refreshNetworkStatusTooltip,
   renderEmbedNotice,
   downloadKeyBackup,
   // DPNS state functions
@@ -189,6 +190,7 @@ import {
   type NearQuoteRequest,
 } from './api/near-intents.js';
 import { pollNearSwap } from './ui/near-swap-poll.js';
+import { createNetworkStatusSync } from './ui/network-status-sync.js';
 import { isContestedUsername } from './platform/dpns.js';
 import {
   findMatchingKeyIndex,
@@ -207,6 +209,7 @@ import {
   loadPlatformModule,
   loadUsernameTransferModule,
   warmDashModules,
+  warmPlatformSdkForFunding,
 } from './platform/loaders.js';
 import {
   deriveCandidateKeys,
@@ -286,11 +289,20 @@ let warmupStarted = false;
 async function initClients(network: string): Promise<void> {
   const config = getNetwork(network);
   insightClient = new InsightClient(config);
-  const { IslockService } = await loadIslockModule();
+  // Testnet evonodes (and their certificates) rotate within days, so use the
+  // live list; the static one in config.ts is the fallback.
+  const [{ IslockService }, dapiAddresses] = await Promise.all([
+    loadIslockModule(),
+    resolveDapiAddresses(config),
+  ]);
+  // The evonode fetch can take seconds. If the user switched networks meanwhile,
+  // the newer init owns the clients; installing these would pair this network's
+  // IS-lock service with the other network's Insight client.
+  if (state.network !== network) return;
   islockService = new IslockService({
     network,
     rpcUrl: config.rpcUrl,
-    dapiAddresses: config.dapiAddresses,
+    dapiAddresses,
   });
   startNetworkStatusPolling();
 }
@@ -328,6 +340,19 @@ function preloadDashWarmup(): void {
   void ensureClients().catch((err) => console.warn('Dash warmup failed:', err));
 }
 
+/**
+ * Funding is about to start: begin connecting the SDK (testnet only), so the
+ * health indicator reads Platform before the asset lock is broadcast. Polls
+ * right after the connect settles instead of waiting for the next 30 s tick.
+ */
+function startPlatformSdkForFunding(): void {
+  // Mock-mode flows must not touch the network.
+  if (isE2EMockMode()) return;
+  void warmPlatformSdkForFunding(state.network).then((attempted) => {
+    if (attempted) pollNetworkStatusNow?.();
+  });
+}
+
 // ── Network-status polling ──────────────────────────────────────────────────
 // Periodically compares Core (Insight) height against Platform (DAPI) status
 // so the header can warn when Platform consensus stalls while Core keeps
@@ -336,7 +361,15 @@ function preloadDashWarmup(): void {
 const NETWORK_STATUS_POLL_MS = 30_000;
 let networkStatusTimer: ReturnType<typeof setInterval> | undefined;
 let networkStatusGeneration = 0;
-let lastNetworkStatusKey: string | undefined;
+let pollNetworkStatusNow: (() => void) | undefined;
+const networkStatusSync = createNetworkStatusSync({
+  getState: () => state,
+  setStateQuietly: (next) => {
+    state = next;
+  },
+  updateState: (next) => updateState(next),
+  refreshTooltip: (status) => refreshNetworkStatusTooltip(document, status),
+});
 
 function stopNetworkStatusPolling(): void {
   if (networkStatusTimer !== undefined) {
@@ -345,7 +378,8 @@ function stopNetworkStatusPolling(): void {
   }
   // Bump the generation so any in-flight fetch result is ignored.
   networkStatusGeneration += 1;
-  lastNetworkStatusKey = undefined;
+  pollNetworkStatusNow = undefined;
+  networkStatusSync.reset();
 }
 
 function startNetworkStatusPolling(): void {
@@ -354,23 +388,30 @@ function startNetworkStatusPolling(): void {
   const generation = networkStatusGeneration;
   const insight = insightClient;
   const islock = islockService;
+  const network = state.network;
+
+  // Polls can overlap (the extra poll after the SDK connects); a slower, older
+  // one must not overwrite the result of a newer one.
+  let issued = 0;
+  let applied = 0;
 
   const poll = async (): Promise<void> => {
+    const sequence = ++issued;
     try {
       const status = await fetchNetworkStatus(insight, islock);
       // Ignore results from a superseded network/client.
       if (generation !== networkStatusGeneration) return;
+      if (sequence < applied) return;
+      applied = sequence;
 
-      const key = `${status.health}|${status.reasons.join('|')}`;
-      if (key === lastNetworkStatusKey) return;
-      lastNetworkStatusKey = key;
-      updateState(setNetworkStatus(state, status));
+      networkStatusSync.apply(network, status);
     } catch (err) {
       console.warn('Network status poll failed:', err);
     }
   };
 
   void poll();
+  pollNetworkStatusNow = () => void poll();
   networkStatusTimer = setInterval(() => void poll(), NETWORK_STATUS_POLL_MS);
 }
 
@@ -379,7 +420,10 @@ function switchNetwork(network: string): void {
   if (islockService) {
     islockService.disconnect().catch((err) => console.warn('Error disconnecting IslockService:', err));
   }
-  updateState(setNetwork(state, network));
+  // The previous network's health snapshot must not sit under the new network's
+  // badge until the next poll; the old poller's late results are ignored (see
+  // createNetworkStatusSync.apply).
+  updateState({ ...setNetwork(state, network), networkStatus: undefined });
   syncSmartAppBanner(document, network);
   clientInitPromise = undefined;
   warmupScheduled = false;
@@ -709,7 +753,8 @@ async function parseAndEstimateContract(json: unknown) {
 function updateState(newState: BridgeState) {
   const prevState = state;
   const previousStep = prevState?.step;
-  state = applyEmbed(newState);
+  // A flow reset builds a fresh state without the health snapshot; keep the last one.
+  state = applyEmbed(networkStatusSync.carryOver(newState));
   const container = document.getElementById('app');
   // Embed request cancelled or expired: the flow UI stays replaced.
   if (embedSession?.notice) {
@@ -2693,6 +2738,7 @@ async function startTopUp() {
 
     updateState(setStep(state, 'generating_keys'));
     await ensureClients();
+    startPlatformSdkForFunding();
     const islock = islockService!;
     const network = getNetwork(state.network);
 
@@ -2817,6 +2863,7 @@ async function startSendToAddress() {
   try {
     updateState(setStep(state, 'generating_keys'));
     await ensureClients();
+    startPlatformSdkForFunding();
     const islock = islockService!;
     const network = getNetwork(state.network);
 
@@ -2988,6 +3035,7 @@ async function startBridge() {
     // Step 1: Derive asset lock key from mnemonic (identity keys are pre-configured in state)
     updateState(setStep(state, 'generating_keys'));
     await ensureClients();
+    startPlatformSdkForFunding();
     const islock = islockService!;
 
     const { privateKey, publicKey } = deriveAssetLockKeyPair(state.mnemonic, state.network);
@@ -3326,8 +3374,8 @@ function cancelChainlockFallback(): void {
 
 /**
  * Begin the chainlock fallback flow: poll Insight for the asset-lock tx's
- * confirming block, poll Platform (with DAPI JSON-RPC as backup) for the
- * chain-locked tip, and once `coreChainLockedHeight >= blockHeight` build a
+ * confirming block, poll for the chain-locked tip (JSON-RPC on mainnet,
+ * Platform status elsewhere), and once `coreChainLockedHeight >= blockHeight` build a
  * chain asset lock proof and resubmit the original Platform operation.
  */
 async function startChainlockFallback(): Promise<void> {
@@ -3362,14 +3410,11 @@ async function startChainlockFallback(): Promise<void> {
     }
   );
 
-  // Poll #2: chain-locked Dash Core height. DAPI JSON-RPC
-  // `getbestchainlock` first (when an rpcUrl is configured), then direct
-  // gRPC `platform.getStatus()` via @dashevo/dapi-client. We intentionally
-  // do NOT use `sdk.system.status()`: in pre-dev.7 builds the testnet
-  // trusted context returned testnet-cached values on devnets. SDK
-  // 3.1.0-dev.7 fixes this with per-devnet trusted contexts, but the
-  // direct dapi-client call works uniformly across trusted and
-  // non-trusted devnets, so we keep it.
+  // Poll #2: chain-locked Dash Core height. JSON-RPC `getbestchainlock`
+  // first (it returns nothing without an rpcUrl, e.g. on testnet), then the
+  // Platform status via IslockService: the EvoSDK on testnet, direct gRPC via
+  // @dashevo/dapi-client elsewhere (it works uniformly across trusted and
+  // non-trusted devnets; see DAPISubscriptionClient.getCoreChainLockedHeight).
   const chainLockPoll = (async (): Promise<void> => {
     while (!signal.aborted) {
       let height: number | undefined;

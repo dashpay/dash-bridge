@@ -1,5 +1,6 @@
 import { DAPIClient, type DAPIConfig } from './dapi.js';
 import { DAPISubscriptionClient, type DAPISubscriptionConfig } from './dapi-subscription.js';
+import type { PlatformStatus } from '../platform/status.js';
 import type { RetryOptions } from '../utils/retry.js';
 import { abortableSleep } from '../utils/sleep.js';
 
@@ -66,11 +67,12 @@ export class IslockService {
 
   /**
    * Open the IS lock source before broadcasting and return a handle whose
-   * `.wait()` resolves with the IS lock bytes once available. Devnets without
-   * RPC use the DAPI bloom subscription, which must be established before
-   * broadcast because subscriptions don't replay historical IS locks.
-   * Mainnet/testnet use JSON-RPC polling, which can recover by txid and avoids
-   * browser-hostile dapi-client stream discovery.
+   * `.wait()` resolves with the IS lock bytes once available. Networks without
+   * RPC (testnet, devnets) use the DAPI bloom subscription over their explicit
+   * dapiAddresses, which must be established before broadcast because
+   * subscriptions don't replay historical IS locks. Mainnet uses JSON-RPC
+   * polling, which can recover by txid and avoids browser-hostile dapi-client
+   * stream discovery.
    */
   async subscribeForInstantSendLock(
     txid: string,
@@ -102,7 +104,7 @@ export class IslockService {
       };
     }
 
-    // JSON-RPC backed networks (mainnet/testnet) should not touch dapi-client
+    // JSON-RPC backed networks (mainnet) should not touch dapi-client
     // stream setup here. Browser seed/SML discovery can fail on TLS-hostname
     // validation and report "No available addresses", which would block the
     // broadcast even though the RPC islock endpoint is sufficient.
@@ -147,19 +149,19 @@ export class IslockService {
   }
 
   /**
-   * Direct gRPC read of the Platform chain-locked Dash Core height.
-   * Used by the chainlock fallback — see DAPISubscriptionClient
-   * for why this bypasses `sdk.system.status()`.
+   * Platform's chain-locked Dash Core height, for the chainlock fallback.
+   * See DAPISubscriptionClient.getCoreChainLockedHeight for how it is read.
    */
   async getCoreChainLockedHeight(): Promise<number | undefined> {
     return this.subscriptionClient.getCoreChainLockedHeight();
   }
 
   /**
-   * Whether a JSON-RPC endpoint is configured (mainnet/testnet). Devnets have
-   * none and must read Platform status over DAPI instead. The network-status
-   * poller uses this to avoid the dapi-client seed/SML address resolution,
-   * which can't complete in a browser on mainnet/testnet.
+   * Whether a JSON-RPC endpoint is configured (mainnet, or a devnet with an
+   * rpcUrl). Testnet and other devnets have none and read Platform status
+   * instead. The network-status poller uses this to avoid the dapi-client
+   * seed/SML address resolution, which can't complete in a browser on
+   * mainnet.
    */
   get supportsJsonRpc(): boolean {
     return this.hasJsonRpc;
@@ -176,15 +178,21 @@ export class IslockService {
 
   /**
    * Read Platform/Tenderdash status (chain-locked Core height, latest Platform
-   * block height + timestamp) over DAPI. Used by the network-health indicator
-   * on devnets (which have explicit dapiAddresses).
+   * block height + timestamp). Used by the network-health indicator on
+   * testnet and devnets; see DAPISubscriptionClient.getPlatformStatus.
    */
-  async getPlatformStatus(): Promise<{
-    coreChainLockedHeight?: number;
-    latestBlockHeight?: number;
-    latestBlockTimeMs?: number;
-  }> {
+  async getPlatformStatus(): Promise<PlatformStatus> {
     return this.subscriptionClient.getPlatformStatus();
+  }
+
+  /**
+   * Platform status for background polling: `undefined` means "not read yet"
+   * (testnet, before any funding flow started connecting the EvoSDK, or while
+   * that connect is in flight), which is not a failure. A failing read after
+   * that rejects. See DAPISubscriptionClient.peekPlatformStatus.
+   */
+  async peekPlatformStatus(): Promise<PlatformStatus | undefined> {
+    return this.subscriptionClient.peekPlatformStatus();
   }
 
   /**

@@ -124,7 +124,7 @@ describe('per-request deadlines', () => {
 
   it('JSON-RPC IS-lock wait rejects at its deadline when the response body stalls', async () => {
     vi.stubGlobal('fetch', stalledBody());
-    const client = new DAPIClient({ network: 'testnet' });
+    const client = new DAPIClient({ network: 'mainnet' });
     const wait = track(client.waitForInstantSendLock('txid', 30_000));
 
     await vi.advanceTimersByTimeAsync(29_999);
@@ -135,7 +135,7 @@ describe('per-request deadlines', () => {
 
   it('JSON-RPC IS-lock wait rejects at its deadline even mid retry backoff', async () => {
     vi.stubGlobal('fetch', stalledHeaders());
-    const client = new DAPIClient({ network: 'testnet' });
+    const client = new DAPIClient({ network: 'mainnet' });
     // First request times out at 8s, then withRetry backs off 1s: 8.5s lands in the backoff.
     const wait = track(client.waitForInstantSendLock('txid', 8500));
 
@@ -149,7 +149,7 @@ describe('per-request deadlines', () => {
     const fetchMock = stalledHeaders();
     vi.stubGlobal('fetch', fetchMock);
     const controller = new AbortController();
-    const client = new DAPIClient({ network: 'testnet' });
+    const client = new DAPIClient({ network: 'mainnet' });
     const wait = track(client.waitForInstantSendLock('txid', 60_000, undefined, controller.signal));
 
     await vi.advanceTimersByTimeAsync(10);

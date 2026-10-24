@@ -2,8 +2,14 @@
 
 import DAPIClientModule from '@dashevo/dapi-client';
 import dashcoreLib from '@dashevo/dashcore-lib';
+import { getNetwork } from '../config.js';
 import { hash160 } from '../crypto/hash.js';
 import { describeIslock } from '../utils/islock-debug.js';
+import {
+  fetchPlatformStatus,
+  fetchPlatformStatusIfSdkReady,
+  type PlatformStatus,
+} from '../platform/status.js';
 
 interface BloomFilterStatic {
   create(elements: number, falsePositiveRate: number, nTweak: number, nFlags: number): {
@@ -29,18 +35,55 @@ export interface DAPISubscriptionConfig {
   dapiAddresses?: string[];
 }
 
+/** Distinct evonodes the IS lock stream is opened on at once. */
+export const ISLOCK_CONCURRENT_NODES = 3;
+/** Total streams opened per subscription, initial ones plus replacements for failed ones. */
+export const ISLOCK_MAX_NODE_ATTEMPTS = ISLOCK_CONCURRENT_NODES + 6;
+/** Deadline for each node's best-block-height answer before the stream starts. */
+export const ISLOCK_HEIGHT_TIMEOUT_MS = 8000;
+/** Longest subscribeForInstantSendLock waits for a first stream message before returning. */
+export const ISLOCK_READINESS_CAP_MS = 3000;
+
+const CLIENT_OPTIONS = { timeout: 30000, retries: 3 };
+
+interface DapiAddress {
+  protocol: string;
+  host: string;
+  port: number;
+}
+
+interface NodeSlot {
+  client?: any;
+  stream?: any;
+  failed: boolean;
+}
+
+function shuffled<T>(items: readonly T[]): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
 export class DAPISubscriptionClient {
   readonly network: string;
   private readonly dapiClient: any;
+  private readonly nodeAddresses: DapiAddress[];
+  // Aborts of in-flight multi-node subscriptions. DAPIClient.disconnect() does
+  // not cancel streams, so disconnect() must stop these to close the per-node clients.
+  private readonly activeSubscriptions = new Set<() => void>();
 
   constructor(config: DAPISubscriptionConfig) {
     this.network = config.network;
-    const options: any = { timeout: 30000, retries: 3 };
+    const options: any = { ...CLIENT_OPTIONS };
+    this.nodeAddresses = [];
     if (config.dapiAddresses?.length) {
       // DAPIClient expects address objects { host, port, protocol }, not URL strings.
       // Our configs store URLs (https://host:port) for EvoSDK compatibility, so
       // parse them here.
-      options.dapiAddresses = config.dapiAddresses.map((addr) => {
+      const parsed: DapiAddress[] = config.dapiAddresses.map((addr) => {
         const url = new URL(addr);
         return {
           protocol: url.protocol.replace(':', ''),
@@ -48,10 +91,112 @@ export class DAPISubscriptionClient {
           port: url.port ? parseInt(url.port, 10) : 443,
         };
       });
+      options.dapiAddresses = parsed;
+      // A repeated address would put two "distinct" streams on one node.
+      this.nodeAddresses = [...new Map(parsed.map((a) => [`${a.host}:${a.port}`, a])).values()];
     } else {
       options.network = config.network === 'mainnet' ? 'mainnet' : 'testnet';
     }
     this.dapiClient = new DAPIClientClass(options);
+  }
+
+  /** A client pinned to one node, so streams and height probes can't land on the same node twice. */
+  private createNodeClient(address: DapiAddress): any {
+    return new DAPIClientClass({ ...CLIENT_OPTIONS, dapiAddresses: [address] });
+  }
+
+  private tryCreateNodeClient(address: DapiAddress): any | undefined {
+    try {
+      return this.createNodeClient(address);
+    } catch (error) {
+      console.warn(`[islock-sub] could not create client for ${address.host}:${address.port}:`, error);
+      return undefined;
+    }
+  }
+
+  private disconnectQuietly(client: any | undefined): void {
+    if (!client) return;
+    try {
+      Promise.resolve(client.disconnect()).catch(() => {});
+    } catch { /* ignore */ }
+  }
+
+  /**
+   * Ask every client for the best block height at once and take the first
+   * success. Each request has its own deadline because a blackholed node never
+   * answers and the transport only gives up after ~75 s. Rejects only when
+   * every node failed (same message shape as a failed stream subscription), or
+   * when `signal` aborts.
+   */
+  private raceBestBlockHeight(
+    txid: string,
+    clients: Array<any | undefined>,
+    signal?: AbortSignal
+  ): Promise<number> {
+    return new Promise<number>((resolve, reject) => {
+      let done = false;
+      let failures = 0;
+      const timers = new Set<ReturnType<typeof setTimeout>>();
+
+      const settle = (fn: () => void): void => {
+        if (done) return;
+        done = true;
+        for (const timer of timers) clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        fn();
+      };
+      const onAbort = (): void => {
+        settle(() => reject(new Error(`InstantSend lock subscription aborted for ${txid}`)));
+      };
+      const failOne = (error: unknown): void => {
+        if (done) return;
+        console.warn('[islock-sub] block height request failed:', error);
+        if (++failures < clients.length) return;
+        const reason = error instanceof Error ? error.message : String(error);
+        settle(() => reject(new Error(
+          `InstantSend lock subscription failed for ${txid}: ${clients.length} nodes tried, last error: ${reason}`
+        )));
+      };
+
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      for (const client of clients) {
+        if (!client) {
+          failOne(new Error('Could not create a client for the node'));
+          continue;
+        }
+        let answered = false;
+        const timer = setTimeout(() => {
+          if (answered) return;
+          answered = true;
+          failOne(new Error(`getBestBlockHeight timed out after ${ISLOCK_HEIGHT_TIMEOUT_MS}ms`));
+        }, ISLOCK_HEIGHT_TIMEOUT_MS);
+        timers.add(timer);
+        Promise.resolve()
+          .then(() =>
+            // retries 0 + a gRPC deadline: no hidden background retries after our own
+            // deadline has already counted this node as failed.
+            client.core.getBestBlockHeight({ retries: 0, timeout: ISLOCK_HEIGHT_TIMEOUT_MS })
+          )
+          .then((height: unknown) => {
+            if (answered) return;
+            answered = true;
+            if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) {
+              failOne(new Error(`Invalid block height ${String(height)}`));
+              return;
+            }
+            settle(() => resolve(height));
+          }, (error: unknown) => {
+            if (answered) return;
+            answered = true;
+            failOne(error);
+          });
+      }
+    });
   }
 
   private createBloomFilter(
@@ -115,6 +260,37 @@ export class DAPISubscriptionClient {
     const bloomFilter = this.createBloomFilter(hash160(publicKey), utxo);
 
     onProgress?.('Getting current block height...');
+    if (this.nodeAddresses.length >= 2) {
+      // The shared client picks one random node and waits out its full connect
+      // timeout (~75 s in browsers) when that node is unreachable, with nothing
+      // broadcast meanwhile. Ask the nodes the streams will use, all at once.
+      const nodes = shuffled(this.nodeAddresses);
+      const clients = nodes
+        .slice(0, ISLOCK_CONCURRENT_NODES)
+        .map((address) => this.tryCreateNodeClient(address));
+      // disconnect() (e.g. a network switch) must also stop this wait, or the
+      // streams below would open on the network being left.
+      const raceAbort = new AbortController();
+      const abortRace = (): void => raceAbort.abort();
+      if (signal?.aborted) abortRace();
+      signal?.addEventListener('abort', abortRace, { once: true });
+      this.activeSubscriptions.add(abortRace);
+      let currentHeight: number;
+      try {
+        currentHeight = await this.raceBestBlockHeight(txid, clients, raceAbort.signal);
+      } catch (error) {
+        for (const client of clients) this.disconnectQuietly(client);
+        throw error;
+      } finally {
+        this.activeSubscriptions.delete(abortRace);
+        signal?.removeEventListener('abort', abortRace);
+      }
+      console.log('[islock-sub] Current block height:', currentHeight);
+      return this.subscribeOnMultipleNodes(
+        txid, bloomFilter, Math.max(1, currentHeight - 10), timeoutMs, nodes, clients, onProgress, signal
+      );
+    }
+
     const currentHeight: number = await this.dapiClient.core.getBestBlockHeight();
     console.log('[islock-sub] Current block height:', currentHeight);
     const fromBlockHeight = Math.max(1, currentHeight - 10);
@@ -153,31 +329,8 @@ export class DAPISubscriptionClient {
       }
 
       stream.on('data', (response: unknown) => {
-        try {
-          const islockMessages = (response as any).getInstantSendLockMessages?.();
-          const hasIslocks = !!islockMessages;
-          const hasMerkleBlock = !!(response as any).getRawMerkleBlock?.()?.length;
-          const hasRawTxs = !!(response as any).getRawTransactions?.()?.getTransactionsList?.()?.length;
-          console.log(`[islock-sub] stream data: islocks=${hasIslocks} merkleBlock=${hasMerkleBlock} rawTxs=${hasRawTxs}`);
-          if (!islockMessages) return;
-          const messages = islockMessages.getMessagesList_asU8?.() || islockMessages.getMessagesList?.();
-          if (!messages || messages.length === 0) return;
-          console.log(`[islock-sub] received ${messages.length} IS lock(s) in stream message`);
-          for (const msgBytes of messages) {
-            const bytes = msgBytes instanceof Uint8Array ? msgBytes : new Uint8Array(msgBytes);
-            const lockTxid = this.parseInstantLockTxid(bytes);
-            console.log(`[islock-sub] IS lock txid=${lockTxid} (want ${txid})`);
-            if (lockTxid === txid) {
-              onProgress?.('InstantSend lock received!');
-              const debug = describeIslock(bytes, 'dapi-subscription');
-              console.log('[islock-debug] IS lock received via gRPC subscription:', debug);
-              finish(() => resolve(bytes));
-              return;
-            }
-          }
-        } catch (error) {
-          console.warn('Error processing stream data:', error);
-        }
+        const bytes = this.findMatchingLock(response, txid, onProgress);
+        if (bytes) finish(() => resolve(bytes));
       });
 
       stream.on('error', (error: Error) => {
@@ -196,6 +349,203 @@ export class DAPISubscriptionClient {
     return { wait: () => lockPromise };
   }
 
+  /** Returns the bytes of the IS lock for `txid` carried by a stream message, if any. */
+  private findMatchingLock(
+    response: unknown,
+    txid: string,
+    onProgress?: (message: string) => void
+  ): Uint8Array | null {
+    try {
+      const islockMessages = (response as any).getInstantSendLockMessages?.();
+      const hasIslocks = !!islockMessages;
+      const hasMerkleBlock = !!(response as any).getRawMerkleBlock?.()?.length;
+      const hasRawTxs = !!(response as any).getRawTransactions?.()?.getTransactionsList?.()?.length;
+      console.log(`[islock-sub] stream data: islocks=${hasIslocks} merkleBlock=${hasMerkleBlock} rawTxs=${hasRawTxs}`);
+      if (!islockMessages) return null;
+      const messages = islockMessages.getMessagesList_asU8?.() || islockMessages.getMessagesList?.();
+      if (!messages || messages.length === 0) return null;
+      console.log(`[islock-sub] received ${messages.length} IS lock(s) in stream message`);
+      for (const msgBytes of messages) {
+        const bytes = msgBytes instanceof Uint8Array ? msgBytes : new Uint8Array(msgBytes);
+        const lockTxid = this.parseInstantLockTxid(bytes);
+        console.log(`[islock-sub] IS lock txid=${lockTxid} (want ${txid})`);
+        if (lockTxid === txid) {
+          onProgress?.('InstantSend lock received!');
+          const debug = describeIslock(bytes, 'dapi-subscription');
+          console.log('[islock-debug] IS lock received via gRPC subscription:', debug);
+          return bytes;
+        }
+      }
+    } catch (error) {
+      console.warn('Error processing stream data:', error);
+    }
+    return null;
+  }
+
+  /**
+   * Subscribe on several distinct evonodes at once and take the first matching
+   * IS lock. A single random node can be dead (the stream then errors ~12 s
+   * after connecting, long after the tx was broadcast) or can silently drop the
+   * lock, so each node gets its own one-address client: a shared client would
+   * pick nodes at random and could land on the same one twice.
+   *
+   * subscribeToTransactionsWithProofs resolves before any connection exists, so
+   * readiness is approximated: return once any stream delivers a message (the
+   * server replays recent blocks, usually within ~1 s) or after the readiness
+   * cap, whichever comes first. The remaining streams keep connecting. If every
+   * node attempt has already failed by then, this rejects instead of returning
+   * a handle, so nothing is broadcast without a listener.
+   */
+  private async subscribeOnMultipleNodes(
+    txid: string,
+    bloomFilter: ReturnType<DAPISubscriptionClient['createBloomFilter']>,
+    fromBlockHeight: number,
+    timeoutMs: number,
+    nodes: DapiAddress[],
+    // Clients already created for nodes[0..n) while fetching the height; the
+    // streams reuse them. Entries are undefined where creation threw.
+    initialClients: Array<any | undefined>,
+    onProgress?: (message: string) => void,
+    signal?: AbortSignal
+  ): Promise<{ wait: () => Promise<Uint8Array> }> {
+    const initialCount = initialClients.length;
+    const subscribedAt = Date.now();
+    const unadopted = new Set(initialClients.filter(Boolean));
+    onProgress?.(`Subscribing from block ${fromBlockHeight} on ${initialCount} nodes...`);
+
+    let markReady!: () => void;
+    const ready = new Promise<void>((resolve) => { markReady = resolve; });
+    const readyTimerId = setTimeout(markReady, ISLOCK_READINESS_CAP_MS);
+    // Set when every node attempt failed. Only read once, right after the
+    // readiness wait, to fail before the caller broadcasts.
+    let allFailed: Error | undefined;
+
+    const lockPromise = new Promise<Uint8Array>((resolve, reject) => {
+      const slots = new Set<NodeSlot>();
+      let settled = false;
+      // Streams opened so far; also the index of the next untried node.
+      let attempts = 0;
+
+      const cancelStream = (stream: any): void => {
+        try { stream?.cancel(); } catch { /* ignore */ }
+      };
+
+      const release = (slot: NodeSlot): void => {
+        slots.delete(slot);
+        cancelStream(slot.stream);
+        this.disconnectQuietly(slot.client);
+      };
+
+      const finish = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        clearTimeout(readyTimerId);
+        this.activeSubscriptions.delete(onAbort);
+        signal?.removeEventListener('abort', onAbort);
+        for (const slot of [...slots]) release(slot);
+        // Height-probe clients that never got a stream (aborted before opening).
+        for (const client of unadopted) this.disconnectQuietly(client);
+        unadopted.clear();
+        markReady();
+        fn();
+      };
+
+      const onAbort = (): void => {
+        finish(() => reject(new Error(`InstantSend lock subscription aborted for ${txid}`)));
+      };
+
+      const timeoutId = setTimeout(() => {
+        finish(() => reject(new Error(`Timeout waiting for InstantSend lock for ${txid} after ${timeoutMs}ms`)));
+      }, timeoutMs);
+
+      const openNode = (): void => {
+        const address = nodes[attempts++];
+        if (!address) return;
+        const slot: NodeSlot = { failed: false };
+        slots.add(slot);
+
+        const fail = (error: unknown): void => {
+          if (settled || slot.failed) return;
+          slot.failed = true;
+          release(slot);
+          if (attempts < nodes.length && attempts < ISLOCK_MAX_NODE_ATTEMPTS) {
+            openNode();
+          } else if (slots.size === 0) {
+            const reason = error instanceof Error ? error.message : String(error);
+            const exhausted = new Error(
+              `InstantSend lock subscription failed for ${txid}: ${attempts} nodes tried, last error: ${reason}`
+            );
+            allFailed = exhausted;
+            finish(() => reject(exhausted));
+          }
+        };
+
+        console.log(`[islock-sub] opening stream on ${address.host}:${address.port} (attempt ${attempts})`);
+        try {
+          slot.client = initialClients[attempts - 1] ?? this.createNodeClient(address);
+          unadopted.delete(slot.client);
+          Promise.resolve(
+            slot.client.core.subscribeToTransactionsWithProofs(bloomFilter, { fromBlockHeight, count: 0 })
+          ).then((stream: any) => {
+            if (settled || slot.failed) {
+              cancelStream(stream);
+              return;
+            }
+            slot.stream = stream;
+            stream.on('data', (response: unknown) => {
+              if (settled) return;
+              markReady();
+              const bytes = this.findMatchingLock(response, txid, onProgress);
+              if (!bytes) return;
+              console.log(
+                `[islock-sub] IS lock for ${txid} from ${address.host}:${address.port} after ${Date.now() - subscribedAt} ms since subscribe`
+              );
+              finish(() => resolve(bytes));
+            });
+            // Listeners stay attached after cancel(): Node gRPC streams emit
+            // 'error' on cancel, which would throw if nothing were listening.
+            // The browser build reports one failure through both 'error' and
+            // 'end'; slot.failed makes the second a no-op.
+            stream.on('error', (error: Error) => {
+              if (settled || slot.failed) return;
+              console.error(`[islock-sub] stream error on ${address.host}:${address.port}:`, error);
+              fail(error);
+            });
+            stream.on('end', () => {
+              if (settled || slot.failed) return;
+              console.warn(`[islock-sub] stream ended on ${address.host}:${address.port}`);
+              fail(new Error(`Stream ended before receiving InstantSend lock for ${txid}`));
+            });
+          }).catch(fail);
+        } catch (error) {
+          fail(error);
+        }
+      };
+
+      if (signal) {
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+      this.activeSubscriptions.add(onAbort);
+
+      for (let i = 0; i < initialCount && !settled; i++) openNode();
+    });
+
+    // Avoid unhandled-rejection warnings if the caller never awaits .wait()
+    lockPromise.catch(() => {});
+
+    await ready;
+    // The caller broadcasts the asset lock as soon as this returns, so a
+    // subscription with no live stream must stop the flow before funds are
+    // committed. Failures after this point surface through wait().
+    if (allFailed) throw allFailed;
+    return { wait: () => lockPromise };
+  }
+
   async waitForInstantSendLock(
     txid: string,
     publicKey: Uint8Array,
@@ -209,17 +559,19 @@ export class DAPISubscriptionClient {
   }
 
   async disconnect(): Promise<void> {
+    for (const abort of [...this.activeSubscriptions]) abort();
     try { await this.dapiClient.disconnect(); } catch { /* ignore */ }
   }
 
   /**
-   * Read the chain-locked Dash Core block height directly from Platform via
-   * gRPC (`platform.getStatus()` → `chain.coreChainLockedHeight`).
+   * Read the chain-locked Dash Core block height directly from Platform
+   * (`chain.coreChainLockedHeight` of the Platform status).
    *
-   * We go straight to dapi-client rather than `sdk.system.status()` because
-   * the wasm SDK in trusted mode returns testnet-cached values for this
-   * field on devnets, while this path is authoritative for whatever
-   * masternode the dapiAddresses point at.
+   * Devnets go straight to dapi-client (`platform.getStatus()`) rather than
+   * `sdk.system.status()` because the wasm SDK in trusted mode can return
+   * testnet-cached values there, while this path is authoritative for
+   * whatever masternode the dapiAddresses point at. Testnet uses the SDK;
+   * see {@link getPlatformStatus}.
    *
    * @returns the chain-locked height, or `undefined` if the masternode
    *   reports no chain-lock yet.
@@ -230,17 +582,42 @@ export class DAPISubscriptionClient {
   }
 
   /**
-   * Read Platform/Tenderdash status via gRPC `platform.getStatus()`. Surfaces
-   * the chain-locked Core height plus the latest Platform block height and its
-   * timestamp, which together let callers detect a stalled Platform consensus
-   * (Core advancing while Tenderdash is stuck). Fields are `undefined` when the
-   * masternode doesn't report them.
+   * Read Platform/Tenderdash status. Surfaces the chain-locked Core height
+   * plus the latest Platform block height and its timestamp, which together
+   * let callers detect a stalled Platform consensus (Core advancing while
+   * Tenderdash is stuck). Fields are `undefined` when the masternode doesn't
+   * report them.
+   *
+   * Testnet reads through the EvoSDK (see `fetchPlatformStatus` for why);
+   * every other network keeps the dapi-client gRPC call.
    */
-  async getPlatformStatus(): Promise<{
-    coreChainLockedHeight?: number;
-    latestBlockHeight?: number;
-    latestBlockTimeMs?: number;
-  }> {
+  async getPlatformStatus(): Promise<PlatformStatus> {
+    if (this.readsStatusViaSdk()) {
+      return fetchPlatformStatus(this.network);
+    }
+    return this.fetchStatusViaDapiClient();
+  }
+
+  /**
+   * Passive variant of {@link getPlatformStatus} for background health polling.
+   * On testnet it resolves `undefined`, without loading the EvoSDK, until a
+   * funding flow has started connecting it (and while that connect is in
+   * flight); from then on it reads, and failures reject. Other networks read
+   * exactly as getPlatformStatus does (dapi-client needs no SDK download).
+   */
+  async peekPlatformStatus(): Promise<PlatformStatus | undefined> {
+    if (this.readsStatusViaSdk()) {
+      return fetchPlatformStatusIfSdkReady(this.network);
+    }
+    return this.fetchStatusViaDapiClient();
+  }
+
+  /** By config type, not name: an unknown name falls back to the testnet config. */
+  private readsStatusViaSdk(): boolean {
+    return getNetwork(this.network).type === 'testnet';
+  }
+
+  private async fetchStatusViaDapiClient(): Promise<PlatformStatus> {
     const status = await this.dapiClient.platform.getStatus();
 
     const chain = status.getChainStatus?.() ?? status.chain;

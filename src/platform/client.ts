@@ -78,6 +78,39 @@ async function createPlatformSdk(network: PlatformNetwork): Promise<EvoSDK> {
   return EvoSDK.testnetTrusted(options);
 }
 
+// In-flight connects, so concurrent callers (background status polls, write
+// paths) share one SDK instead of each opening a connection and orphaning all
+// but the last.
+const pendingConnects = new Map<string, Promise<EvoSDK>>();
+// When something first started connecting the SDK, per network. Never cleared:
+// it separates "nobody wanted the SDK" (idle visitor) from "wanted it, and it is
+// connected, was evicted after a connection error, or failed to connect".
+const firstConnectStartedAt = new Map<string, number>();
+// Networks whose first connect has settled (success or failure).
+const firstConnectSettled = new Set<string>();
+// How long the very first connect (which includes the ~7 MB download) may be
+// shown as "not read yet" before a hung connect counts as a failure.
+const FIRST_CONNECT_GRACE_MS = 60_000;
+
+async function openPlatformSdk(
+  network: PlatformNetwork,
+  retryOptions?: RetryOptions
+): Promise<EvoSDK> {
+  if (!firstConnectStartedAt.has(network)) firstConnectStartedAt.set(network, Date.now());
+  try {
+    const sdk = await createPlatformSdk(network);
+
+    console.log(`Connecting to ${network}...`);
+    await withRetry(() => sdk.connect(), retryOptions);
+    console.log('Connected to Platform');
+
+    sdkCache.set(network, sdk);
+    return sdk;
+  } finally {
+    firstConnectSettled.add(network);
+  }
+}
+
 export async function connectPlatformSdk(
   network: PlatformNetwork,
   retryOptions?: RetryOptions
@@ -87,14 +120,33 @@ export async function connectPlatformSdk(
     return cached;
   }
 
-  const sdk = await createPlatformSdk(network);
+  let pending = pendingConnects.get(network);
+  if (!pending) {
+    pending = openPlatformSdk(network, retryOptions).finally(() => pendingConnects.delete(network));
+    pendingConnects.set(network, pending);
+  }
+  return pending;
+}
 
-  console.log(`Connecting to ${network}...`);
-  await withRetry(() => sdk.connect(), retryOptions);
-  console.log('Connected to Platform');
-
-  sdkCache.set(network, sdk);
-  return sdk;
+/**
+ * Whether reading Platform status through the SDK for `network` is appropriate:
+ * something has already asked for the SDK (so reading costs no new download),
+ * and it is not merely the first connect still within its grace period. Never
+ * loads or connects anything.
+ *
+ * The health poll uses it so idle visitors never fetch the multi-megabyte SDK
+ * and a first connect in progress reads as "not read yet". After that the poll
+ * always reads, and a failing read stays visible as degraded rather than
+ * disappearing: an SDK that was connected, failed, was evicted after a
+ * connection error, or is reconnecting (a read joins that connect and is
+ * bounded by its own timeout) all count. A first connect that hangs past the
+ * grace period counts too, so it cannot read as healthy indefinitely.
+ */
+export function isPlatformSdkReadable(network: PlatformNetwork): boolean {
+  const startedAt = firstConnectStartedAt.get(network);
+  if (startedAt === undefined) return false;
+  const firstConnectInFlight = !firstConnectSettled.has(network) && pendingConnects.has(network);
+  return !(firstConnectInFlight && Date.now() - startedAt < FIRST_CONNECT_GRACE_MS);
 }
 
 export function disconnectPlatformSdk(network: PlatformNetwork): void {
