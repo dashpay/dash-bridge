@@ -41,8 +41,8 @@ export async function fetchNetworkStatus(
   //   - testnet/devnets (no JSON-RPC): read full Platform status, which also
   //     yields Tenderdash block height + age. IslockService picks the path
   //     (EvoSDK on testnet, DAPI over explicit dapiAddresses on devnets). On
-  //     testnet this is passive: Platform is only read once the SDK is already
-  //     connected for another reason, so the poll never downloads it.
+  //     testnet this is passive: Platform is only read once a funding flow has
+  //     started connecting the SDK, so an idle page never downloads it.
   const useDapiPlatformStatus = !islock.supportsJsonRpc;
 
   // Bound the Insight retry so a flaky endpoint can't stretch one poll past the

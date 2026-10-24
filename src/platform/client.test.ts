@@ -53,19 +53,46 @@ describe('connectPlatformSdk', () => {
     expect(sdkState.connect).toHaveBeenCalledOnce();
   });
 
-  it('reports whether an SDK is connected without loading or connecting one', async () => {
-    const { hasConnectedPlatformSdk, disconnectPlatformSdk } = await import('./client.js');
+  describe('isPlatformSdkSettled', () => {
+    it('is false while nobody has asked for the SDK, and asking about it loads nothing', async () => {
+      const { isPlatformSdkSettled } = await import('./client.js');
 
-    expect(hasConnectedPlatformSdk('testnet')).toBe(false);
-    expect(sdkState.created).toBe(0);
+      expect(isPlatformSdkSettled('testnet')).toBe(false);
+      expect(sdkState.created).toBe(0);
+    });
 
-    await connectPlatformSdk('testnet', { maxAttempts: 1 });
-    expect(hasConnectedPlatformSdk('testnet')).toBe(true);
-    expect(hasConnectedPlatformSdk('mainnet')).toBe(false);
-    expect(sdkState.created).toBe(1);
+    it('is false while the first connect is in flight and true once it settles', async () => {
+      const { isPlatformSdkSettled } = await import('./client.js');
+      let finishConnect!: () => void;
+      sdkState.connect.mockReturnValue(new Promise<void>((resolve) => (finishConnect = resolve)));
 
-    disconnectPlatformSdk('testnet');
-    expect(hasConnectedPlatformSdk('testnet')).toBe(false);
+      const connecting = connectPlatformSdk('testnet', { maxAttempts: 1 });
+      await Promise.resolve();
+      expect(isPlatformSdkSettled('testnet')).toBe(false);
+
+      finishConnect();
+      await connecting;
+      expect(isPlatformSdkSettled('testnet')).toBe(true);
+      expect(isPlatformSdkSettled('mainnet')).toBe(false);
+    });
+
+    it('stays true after the SDK is evicted, so a later failure is not hidden', async () => {
+      const { isPlatformSdkSettled, disconnectPlatformSdk } = await import('./client.js');
+      await connectPlatformSdk('testnet', { maxAttempts: 1 });
+
+      disconnectPlatformSdk('testnet');
+
+      expect(isPlatformSdkSettled('testnet')).toBe(true);
+    });
+
+    it('is true after a failed connect', async () => {
+      const { isPlatformSdkSettled } = await import('./client.js');
+      sdkState.connect.mockRejectedValue(new Error('quorums unreachable'));
+
+      await expect(connectPlatformSdk('testnet', { maxAttempts: 1 })).rejects.toThrow('quorums');
+
+      expect(isPlatformSdkSettled('testnet')).toBe(true);
+    });
   });
 
   it('reuses the connected SDK on later calls', async () => {

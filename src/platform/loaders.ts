@@ -1,3 +1,5 @@
+import { getNetwork } from '../config.js';
+
 export function createCachedLoader<T>(load: () => Promise<T>): () => Promise<T> {
   let promise: Promise<T> | null = null;
   return () => {
@@ -29,4 +31,26 @@ export function warmDashModules(): Promise<PromiseSettledResult<unknown>[]> {
     loadFeeEstimatorModule(),
     loadIslockModule(),
   ]);
+}
+
+/**
+ * Start connecting the EvoSDK when the user enters a funding flow (create,
+ * top-up, send-to-address), before any funds can be committed. Registration
+ * needs the SDK anyway; connecting early means the health indicator can read
+ * real Platform status before the asset lock is broadcast. Idle visitors never
+ * reach a funding flow, so they still never download it.
+ *
+ * Testnet only: other networks keep their existing status sources (JSON-RPC on
+ * mainnet, dapi-client on devnets) and are not touched. Fire and forget: a
+ * failed connect is logged and later shows up as a degraded health verdict; it
+ * never blocks funding. Concurrent and repeated calls share one connect.
+ */
+export function warmPlatformSdkForFunding(network: string): Promise<void> {
+  if (getNetwork(network).type !== 'testnet') return Promise.resolve();
+  return loadPlatformClientModule()
+    .then(({ connectPlatformSdk }) => connectPlatformSdk(network))
+    .then(
+      () => undefined,
+      (error) => console.warn('Platform SDK warmup failed:', error)
+    );
 }

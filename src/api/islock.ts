@@ -186,9 +186,10 @@ export class IslockService {
   }
 
   /**
-   * Platform status for background polling: `undefined` means "not available
-   * without loading the EvoSDK" (testnet before something else connected it),
-   * which is not a failure. See DAPISubscriptionClient.peekPlatformStatus.
+   * Platform status for background polling: `undefined` means "not read yet"
+   * (testnet, before any funding flow started connecting the EvoSDK, or while
+   * that connect is in flight), which is not a failure. A failing read after
+   * that rejects. See DAPISubscriptionClient.peekPlatformStatus.
    */
   async peekPlatformStatus(): Promise<PlatformStatus | undefined> {
     return this.subscriptionClient.peekPlatformStatus();

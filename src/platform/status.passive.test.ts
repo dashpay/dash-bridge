@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
-  hasConnectedPlatformSdk: vi.fn(),
+  isPlatformSdkSettled: vi.fn(),
   loadSdk: vi.fn(),
   status: vi.fn(),
 }));
@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
 // Fake the client module wholesale: what matters here is that the passive
 // reader never calls into anything that would load or connect the SDK.
 vi.mock('./client.js', () => ({
-  hasConnectedPlatformSdk: mocks.hasConnectedPlatformSdk,
+  isPlatformSdkSettled: mocks.isPlatformSdkSettled,
   withConnectedPlatformSdk: async (_network: string, callback: (sdk: unknown) => Promise<unknown>) => {
     mocks.loadSdk();
     return callback({ system: { status: mocks.status } });
@@ -28,18 +28,18 @@ describe('fetchPlatformStatusIfSdkReady', () => {
     });
   });
 
-  it('resolves undefined without touching the SDK while it is not connected', async () => {
-    mocks.hasConnectedPlatformSdk.mockReturnValue(false);
+  it('resolves undefined without touching the SDK while nothing has started connecting it or the first connect is in flight', async () => {
+    mocks.isPlatformSdkSettled.mockReturnValue(false);
 
     await expect(fetchPlatformStatusIfSdkReady('testnet')).resolves.toBeUndefined();
 
-    expect(mocks.hasConnectedPlatformSdk).toHaveBeenCalledWith('testnet');
+    expect(mocks.isPlatformSdkSettled).toHaveBeenCalledWith('testnet');
     expect(mocks.loadSdk).not.toHaveBeenCalled();
     expect(mocks.status).not.toHaveBeenCalled();
   });
 
-  it('reads the status once the SDK is already connected', async () => {
-    mocks.hasConnectedPlatformSdk.mockReturnValue(true);
+  it('reads the status once a connect has settled', async () => {
+    mocks.isPlatformSdkSettled.mockReturnValue(true);
 
     await expect(fetchPlatformStatusIfSdkReady('testnet')).resolves.toEqual({
       coreChainLockedHeight: 1_578_300,

@@ -600,9 +600,10 @@ export class DAPISubscriptionClient {
 
   /**
    * Passive variant of {@link getPlatformStatus} for background health polling.
-   * On testnet it resolves `undefined`, without loading the EvoSDK, until the
-   * SDK is already connected for another reason; other networks read exactly
-   * as getPlatformStatus does (dapi-client needs no SDK download).
+   * On testnet it resolves `undefined`, without loading the EvoSDK, until a
+   * funding flow has started connecting it (and while that connect is in
+   * flight); from then on it reads, and failures reject. Other networks read
+   * exactly as getPlatformStatus does (dapi-client needs no SDK download).
    */
   async peekPlatformStatus(): Promise<PlatformStatus | undefined> {
     if (this.readsStatusViaSdk()) {

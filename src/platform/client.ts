@@ -82,11 +82,16 @@ async function createPlatformSdk(network: PlatformNetwork): Promise<EvoSDK> {
 // paths) share one SDK instead of each opening a connection and orphaning all
 // but the last.
 const pendingConnects = new Map<string, Promise<EvoSDK>>();
+// Networks where something has ever started connecting the SDK. Never cleared:
+// it separates "nobody wanted the SDK" (idle visitor) from "wanted it, and it is
+// connected, was evicted after a connection error, or failed to connect".
+const attemptedConnects = new Set<string>();
 
 async function openPlatformSdk(
   network: PlatformNetwork,
   retryOptions?: RetryOptions
 ): Promise<EvoSDK> {
+  attemptedConnects.add(network);
   const sdk = await createPlatformSdk(network);
 
   console.log(`Connecting to ${network}...`);
@@ -115,13 +120,15 @@ export async function connectPlatformSdk(
 }
 
 /**
- * Whether the SDK for `network` is already loaded and connected. Never loads
- * or connects anything, so passive readers (the health poll) can use an SDK
- * that something else brought up without triggering the multi-megabyte
- * download themselves.
+ * Whether something has already started connecting the SDK for `network` and no
+ * connect is still in flight, so reading through it costs no new download. Never
+ * loads or connects anything. The health poll uses it so idle visitors never
+ * fetch the multi-megabyte SDK, while an SDK that was brought up (or tried and
+ * failed, or was evicted after a connection error) keeps being read, and a
+ * failing read stays visible as degraded instead of silently disappearing.
  */
-export function hasConnectedPlatformSdk(network: PlatformNetwork): boolean {
-  return sdkCache.get(network)?.isConnected === true;
+export function isPlatformSdkSettled(network: PlatformNetwork): boolean {
+  return attemptedConnects.has(network) && !pendingConnects.has(network);
 }
 
 export function disconnectPlatformSdk(network: PlatformNetwork): void {

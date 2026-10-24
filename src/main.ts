@@ -209,6 +209,7 @@ import {
   loadPlatformModule,
   loadUsernameTransferModule,
   warmDashModules,
+  warmPlatformSdkForFunding,
 } from './platform/loaders.js';
 import {
   deriveCandidateKeys,
@@ -339,6 +340,15 @@ function preloadDashWarmup(): void {
   void ensureClients().catch((err) => console.warn('Dash warmup failed:', err));
 }
 
+/**
+ * Funding is about to start: begin connecting the SDK (testnet only), so the
+ * health indicator reads Platform before the asset lock is broadcast. Polls
+ * right after the connect settles instead of waiting for the next 30 s tick.
+ */
+function startPlatformSdkForFunding(): void {
+  void warmPlatformSdkForFunding(state.network).then(() => pollNetworkStatusNow?.());
+}
+
 // ── Network-status polling ──────────────────────────────────────────────────
 // Periodically compares Core (Insight) height against Platform (DAPI) status
 // so the header can warn when Platform consensus stalls while Core keeps
@@ -347,6 +357,7 @@ function preloadDashWarmup(): void {
 const NETWORK_STATUS_POLL_MS = 30_000;
 let networkStatusTimer: ReturnType<typeof setInterval> | undefined;
 let networkStatusGeneration = 0;
+let pollNetworkStatusNow: (() => void) | undefined;
 const networkStatusSync = createNetworkStatusSync({
   getState: () => state,
   setStateQuietly: (next) => {
@@ -363,6 +374,7 @@ function stopNetworkStatusPolling(): void {
   }
   // Bump the generation so any in-flight fetch result is ignored.
   networkStatusGeneration += 1;
+  pollNetworkStatusNow = undefined;
   networkStatusSync.reset();
 }
 
@@ -387,6 +399,7 @@ function startNetworkStatusPolling(): void {
   };
 
   void poll();
+  pollNetworkStatusNow = () => void poll();
   networkStatusTimer = setInterval(() => void poll(), NETWORK_STATUS_POLL_MS);
 }
 
@@ -2713,6 +2726,7 @@ async function startTopUp() {
 
     updateState(setStep(state, 'generating_keys'));
     await ensureClients();
+    startPlatformSdkForFunding();
     const islock = islockService!;
     const network = getNetwork(state.network);
 
@@ -2837,6 +2851,7 @@ async function startSendToAddress() {
   try {
     updateState(setStep(state, 'generating_keys'));
     await ensureClients();
+    startPlatformSdkForFunding();
     const islock = islockService!;
     const network = getNetwork(state.network);
 
@@ -3008,6 +3023,7 @@ async function startBridge() {
     // Step 1: Derive asset lock key from mnemonic (identity keys are pre-configured in state)
     updateState(setStep(state, 'generating_keys'));
     await ensureClients();
+    startPlatformSdkForFunding();
     const islock = islockService!;
 
     const { privateKey, publicKey } = deriveAssetLockKeyPair(state.mnemonic, state.network);

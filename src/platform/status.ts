@@ -1,5 +1,5 @@
 import {
-  hasConnectedPlatformSdk,
+  isPlatformSdkSettled,
   withConnectedPlatformSdk,
   withPlatformOperationTimeout,
 } from './client.js';
@@ -28,15 +28,22 @@ function positiveInteger(value: unknown): number | undefined {
 }
 
 /**
- * Like {@link fetchPlatformStatus}, but only when the SDK is already loaded
- * and connected; otherwise resolves `undefined` without loading it. For
+ * Like {@link fetchPlatformStatus}, but never starts the SDK download: resolves
+ * `undefined` ("not read yet", not a failure) while nothing has started
+ * connecting the SDK, or while that first connect is still in flight. For
  * background health polling, which must not pull the ~7 MB (gzip) SDK onto
  * every page load just to draw an indicator.
+ *
+ * Once a connect has been attempted, reads always go through it, and a failing
+ * read rejects: after a connection error the SDK is evicted from the cache, and
+ * the next poll reconnects (the module is already loaded) rather than falling
+ * back to "not read yet", so a Platform outage shows as degraded and a recovery
+ * shows as healthy again.
  */
 export async function fetchPlatformStatusIfSdkReady(
   network: string
 ): Promise<PlatformStatus | undefined> {
-  return hasConnectedPlatformSdk(network) ? fetchPlatformStatus(network) : undefined;
+  return isPlatformSdkSettled(network) ? fetchPlatformStatus(network) : undefined;
 }
 
 /**
