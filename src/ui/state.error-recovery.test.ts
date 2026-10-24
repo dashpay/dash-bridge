@@ -9,6 +9,8 @@ import {
 } from '../platform/identity-confirm.js';
 
 const importFailure = () => new ChunkLoadError('evo-sdk', 3, new TypeError('Importing a module script failed.'));
+/** What the SDK throws when the broadcast never reached Platform (seen in WebKit). */
+const transportFailure = () => new Error("Failed to create identity: Dapi client error: transport error: grpc error: code: 'Internal error', message: \"Failed to call gRPC service: JS API error: TypeError: Load failed\"");
 
 const instantProof: AssetLockProofData = {
   type: 'instant',
@@ -42,6 +44,7 @@ describe('getErrorRecovery after the InstantSend lock arrived', () => {
       canRetrySubmission: true,
       reloadSafe: false,
       failedChunk: 'evo-sdk',
+      downloadPromptSuspected: false,
     });
   });
 
@@ -50,7 +53,7 @@ describe('getErrorRecovery after the InstantSend lock arrived', () => {
       ['topup', 'topping_up', ErrorCodes.TOPUP],
       ['send_to_address', 'sending_to_address', ErrorCodes.SEND_ADDRESS],
     ] as const) {
-      const errored = setError(lockReceived({ mode, step }), new Error('platform reject'));
+      const errored = setError(lockReceived({ mode, step }), transportFailure());
       expect(errored.errorCode).toBe(code);
       expect(getErrorRecovery(errored)).toMatchObject({ lockReceived: true, canRetrySubmission: true });
     }
@@ -76,8 +79,14 @@ describe('getErrorRecovery after the InstantSend lock arrived', () => {
 
   it('does not call a chain proof an InstantSend lock', () => {
     const chainProof: AssetLockProofData = { type: 'chain', coreChainLockedHeight: 10, txid: 'ab'.repeat(32), vout: 0 };
-    const errored = setError(lockReceived({ assetLockProof: chainProof }), new Error('platform reject'));
+    const errored = setError(lockReceived({ assetLockProof: chainProof }), transportFailure());
     expect(getErrorRecovery(errored)).toMatchObject({ lockReceived: false, canRetrySubmission: true });
+  });
+
+  it('offers no retry when Platform rejected the transition (same proof, same verdict), only the chain lock proof', () => {
+    const errored = setError(lockReceived(), new Error('Failed to create identity: invalid instant asset lock proof signature'));
+    expect(errored.chainlockFallbackAvailable).toBe(true);
+    expect(getErrorRecovery(errored)).toMatchObject({ lockReceived: true, canRetrySubmission: false });
   });
 });
 
@@ -102,6 +111,7 @@ describe('component load failure while preparing a funding flow', () => {
       canRetrySubmission: false,
       reloadSafe: true,
       failedChunk: 'evo-sdk',
+      downloadPromptSuspected: false,
     });
   });
 

@@ -39,6 +39,7 @@ import {
   type IdentityRegistrationUnconfirmedError,
 } from '../platform/identity-confirm.js';
 import { ChunkLoadError } from '../platform/chunk-loader.js';
+import { isRetryableError } from '../utils/retry.js';
 import { shouldRecommendMobileApp } from './mobile-app.js';
 
 /**
@@ -617,6 +618,19 @@ function resolveErrorCode(state: BridgeState, error: Error): string {
   return StepErrorCodes[state.step] ?? ErrorCodes.UNKNOWN;
 }
 
+/**
+ * Whether resubmitting the same proof can help: the submission did not reach
+ * Platform or its outcome is unknown. A rejection by Platform is not retried:
+ * resubmitting the same transition gets the same verdict.
+ */
+function isTransientSubmissionError(error: Error | undefined): boolean {
+  if (!error) return false;
+  if (error instanceof ChunkLoadError || isIdentityRegistrationUnconfirmedError(error)) return true;
+  // The SDK wraps transport failures: "Dapi client error: transport error: …
+  // TypeError: Failed to fetch" (Chromium) / "Load failed" (WebKit).
+  return isRetryableError(error) || /transport error|failed to fetch|load failed|deadline exceeded|unavailable/i.test(error.message);
+}
+
 export interface ErrorRecovery {
   /**
    * The Platform submission failed while the InstantSend lock had arrived
@@ -629,6 +643,8 @@ export interface ErrorRecovery {
   reloadSafe: boolean;
   /** Name of the lazily loaded chunk that could not be downloaded, if that was the cause. */
   failedChunk?: string;
+  /** That chunk failed right after a file download started (a download prompt may have blocked it). */
+  downloadPromptSuspected: boolean;
 }
 
 /** What the error screen can offer for the current error. */
@@ -643,11 +659,13 @@ export function getErrorRecovery(state: BridgeState): ErrorRecovery {
       submissionFailed &&
       !!state.assetLockProof &&
       !!state.assetLockKeyPair &&
-      !isAssetLockConsumedElsewhereError(state.error),
+      !isAssetLockConsumedElsewhereError(state.error) &&
+      isTransientSubmissionError(state.error),
     // resolveErrorCode already implies no deposit address; re-checked because
     // a wrong "safe to reload" could lose track of funds in flight.
     reloadSafe: state.errorCode === ErrorCodes.COMPONENT_LOAD && !state.depositAddress && !state.txid,
     failedChunk: state.error instanceof ChunkLoadError ? state.error.chunk : undefined,
+    downloadPromptSuspected: state.error instanceof ChunkLoadError && state.error.downloadPromptSuspected,
   };
 }
 

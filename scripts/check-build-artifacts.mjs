@@ -78,6 +78,18 @@ for (const file of readdirSync(assetsDir).filter((f) => f.endsWith('.js') && f !
   }
 }
 
+// Cache-busted chunk retries (src/platform/chunk-loader.ts) import the URL
+// that virtual:chunk-url put in the entry: it must name an asset the entry
+// also loads with import(), or the retry would fetch something else.
+const chunkUrls = [...entryChunk.matchAll(/new URL\(["']([^"']+\.js)["'],\s*import\.meta\.url\)/g)].map((m) => m[1]);
+if (!chunkUrls.some((u) => u.startsWith('evo-sdk'))) {
+  fail('entry chunk has no virtual:chunk-url URL for the evo-sdk chunk');
+}
+for (const url of chunkUrls) {
+  if (!existsSync(join(assetsDir, url))) fail(`chunk URL ${url} in the entry names no file in dist/assets`);
+  if (!entryChunk.includes(`import("./${url}")`)) fail(`chunk URL ${url} is not a dynamic import() target of the entry`);
+}
+
 // The embeddable widget SDK (docs/widget.md) must ship, stay tiny, and never
 // pull in the Dash SDK or other heavy dependencies.
 const WIDGET_MAX_BYTES = 30 * 1024;

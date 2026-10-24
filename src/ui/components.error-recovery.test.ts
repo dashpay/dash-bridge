@@ -43,10 +43,15 @@ describe('error screen recovery copy', () => {
     expect(el.querySelector('.error-technical-content')?.textContent).toContain('Failed to load: evo-sdk');
   });
 
-  it('labels the retry for top-up', () => {
-    const el = renderError({ ...lockReceived, mode: 'topup', step: 'topping_up' }, new Error('platform reject'));
+  it('labels the retry for top-up and send', () => {
+    const el = renderError(
+      { ...lockReceived, mode: 'topup', step: 'topping_up' },
+      new Error('Dapi client error: transport error: grpc error: TypeError: Failed to fetch')
+    );
     expect(el.querySelector('#retry-registration-btn')?.textContent).toBe('Retry Top-up');
     expect(el.textContent).toContain('the Platform step failed');
+    const send = renderError({ ...lockReceived, mode: 'send_to_address', step: 'sending_to_address' }, importFailure());
+    expect(send.querySelector('#retry-registration-btn')?.textContent).toBe('Retry Send');
   });
 
   it('still says InstantSend did not go through when the lock never arrived', () => {
@@ -68,6 +73,16 @@ describe('error screen recovery copy', () => {
     expect(el.querySelector('#retry-registration-btn')).toBeNull();
     expect(el.querySelector('#chainlock-fallback-btn')).toBeNull();
     expect(el.querySelector('#download-keys-btn')).toBeNull();
+  });
+});
+
+describe('component failure right after a backup download started', () => {
+  it('points at the browser download prompt instead of the network', () => {
+    const error = new ChunkLoadError('evo-sdk', 6, new TypeError('Importing a module script failed.'), true);
+    const el = renderError({ ...createInitialState('testnet'), step: 'generating_keys' }, error);
+    expect(el.textContent).toContain('asking whether to download the key backup file: answer that prompt first');
+    expect(el.textContent).not.toContain('network interruption');
+    expect(el.querySelector('#reload-page-btn')).not.toBeNull();
   });
 });
 

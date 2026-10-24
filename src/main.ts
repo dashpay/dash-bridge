@@ -342,6 +342,35 @@ function preloadDashWarmup(): void {
   void ensureClients().catch((err) => console.warn('Dash warmup failed:', err));
 }
 
+/**
+ * The deposit-step key backup. Must run after preparePlatformForFunding: on
+ * iOS Safari the download raises "Do you want to download …?", which cancels
+ * the page's in-flight loads and fails new ones until answered. A chunk
+ * import cancelled that way stays failed for the page (that was the
+ * "Importing a module script failed." at registration). The testnet SDK
+ * connect may still be running past the gate's bounded wait and be cancelled
+ * too, so connect again once the page is back (focus) or after 15 s, for the
+ * health indicator; registration would reconnect anyway.
+ */
+function downloadFundingKeyBackup(backupState: BridgeState): void {
+  downloadKeyBackup(backupState);
+  if (isE2EMockMode()) return;
+  const network = backupState.network;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const rewarm = () => {
+    window.removeEventListener('focus', rewarm);
+    clearTimeout(timer);
+    if (state.network !== network) return;
+    void warmPlatformSdkForFunding(network).then((attempted) => {
+      if (attempted) pollNetworkStatusNow?.();
+    });
+  };
+  timer = setTimeout(rewarm, 15_000);
+  window.addEventListener('focus', rewarm);
+}
+
+/** A stalled SDK download (it is several MB) ends in the Reload error instead of "Preparing…" forever. */
+const FUNDING_PREPARE_TIMEOUT_MS = 120_000;
 /** How long a funding flow waits for the testnet SDK connect before showing its deposit address anyway. */
 const FUNDING_SDK_CONNECT_WAIT_MS = 5000;
 
@@ -364,7 +393,21 @@ async function preparePlatformForFunding(): Promise<void> {
     await loadE2EMockSdk();
     return;
   }
-  await loadPlatformForFunding();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new ChunkLoadError(
+      'evo-sdk',
+      1,
+      new Error(`still loading after ${FUNDING_PREPARE_TIMEOUT_MS / 1000} s`)
+    )), FUNDING_PREPARE_TIMEOUT_MS);
+  });
+  try {
+    await Promise.race([loadPlatformForFunding(), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+  // Connected before the deposit-step backup download, whose iOS prompt would
+  // cancel a connect still in flight (see downloadFundingKeyBackup).
   const connect = warmPlatformSdkForFunding(state.network).then((attempted) => {
     if (attempted) pollNetworkStatusNow?.();
   });
@@ -2816,7 +2859,8 @@ async function startTopUp() {
 
     // Auto-download key backup immediately for safety
     // CRITICAL: User must have this to recover funds if something goes wrong
-    downloadKeyBackup(stateWithKeys);
+    // (after preparePlatformForFunding: see downloadFundingKeyBackup)
+    downloadFundingKeyBackup(stateWithKeys);
 
     // Step 2: Wait for deposit
     updateState(setStep(stateWithKeys, 'detecting_deposit'));
@@ -2940,7 +2984,7 @@ async function startSendToAddress() {
     updateState(stateWithKeys);
 
     // Auto-download key backup for safety
-    downloadKeyBackup(stateWithKeys);
+    downloadFundingKeyBackup(stateWithKeys);
 
     // Step 2: Wait for deposit
     updateState(setStep(stateWithKeys, 'detecting_deposit'));
@@ -3114,7 +3158,7 @@ async function startBridge() {
 
     // Auto-download key backup immediately for safety
     // This ensures users can recover funds if they reload the page
-    downloadKeyBackup(state);
+    downloadFundingKeyBackup(state);
 
     // Step 2: Wait for deposit
     updateState(setStep(state, 'detecting_deposit'));
@@ -3204,15 +3248,7 @@ async function startBridge() {
       state.network
     );
 
-    updateState(setIdentityRegistered(state, result.identityId));
-
-    // Auto-download final key backup on "Save your keys" page
-    // This backup includes the identity ID in the filename
-    // (Earlier download at deposit step used pending filename)
-    downloadKeyBackup(state);
-
-    // Auto-publish contract if this identity was created for contract registration
-    if (await autoPublishContractIfNeeded(result.identityId)) return;
+    await completeIdentityCreation(result.identityId);
 
   } catch (error) {
     if (isE2EMockMode()) {
@@ -3347,12 +3383,7 @@ async function recheckDeposit() {
         state.identityKeys,
         state.network
       );
-      updateState(setIdentityRegistered(state, result.identityId));
-      // Auto-download final key backup on "Save your keys" page
-      downloadKeyBackup(state);
-
-      // Auto-publish contract if applicable
-      if (await autoPublishContractIfNeeded(result.identityId)) return;
+      await completeIdentityCreation(result.identityId);
     } else {
       throw new Error(`recheckDeposit: unexpected mode '${state.mode}'`);
     }
@@ -3383,9 +3414,19 @@ async function runPlatformSubmission(
   assetLockPrivateKeyWif: string
 ): Promise<void> {
   if (isE2EMockMode()) {
-    updateState(setStep(state, state.mode === 'topup' ? 'topping_up' : 'registering_identity'));
-    await runE2EMockSubmission();
-    updateState(state.mode === 'topup' ? setTopUpComplete(state) : setIdentityRegistered(state, E2E_MOCK_IDENTITY_ID));
+    if (state.mode === 'topup') {
+      updateState(setStep(state, 'topping_up'));
+      await runE2EMockSubmission();
+      updateState(setTopUpComplete(state));
+    } else if (state.mode === 'send_to_address') {
+      updateState(setStep(state, 'sending_to_address'));
+      await runE2EMockSubmission();
+      updateState(setSendToAddressComplete(state));
+    } else {
+      updateState(setStep(state, 'registering_identity'));
+      await runE2EMockSubmission();
+      updateState(setIdentityRegistered(state, E2E_MOCK_IDENTITY_ID));
+    }
     return;
   }
 
@@ -3424,10 +3465,7 @@ async function runPlatformSubmission(
       state.identityKeys,
       state.network
     );
-    updateState(setIdentityRegistered(state, result.identityId));
-    downloadKeyBackup(state);
-
-    if (await autoPublishContractIfNeeded(result.identityId)) return;
+    await completeIdentityCreation(result.identityId);
     return;
   }
 
@@ -3593,6 +3631,22 @@ async function startChainlockFallback(): Promise<void> {
  * for contract registration. Finds the first suitable auth key and publishes.
  * Returns true if contract publishing was initiated, false otherwise.
  */
+/**
+ * Identity registered: show it, publish the contract it was created for (if
+ * any), then download the final key backup (its filename has the identity
+ * ID; the deposit-step backup already holds the keys). The download goes
+ * last: on iOS Safari it raises a prompt that makes the page's requests fail
+ * until answered, which would fail the contract publish.
+ */
+async function completeIdentityCreation(identityId: string): Promise<void> {
+  updateState(setIdentityRegistered(state, identityId));
+  try {
+    await autoPublishContractIfNeeded(identityId);
+  } finally {
+    downloadKeyBackup(state);
+  }
+}
+
 async function autoPublishContractIfNeeded(identityId: string): Promise<boolean> {
   if (!state.contractFromIdentityCreation || !state.contractJson) return false;
 

@@ -31,6 +31,7 @@ import { bytesToHex } from '../utils/hex.js';
 import { getNetwork, getAvailableNetworks } from '../config.js';
 import { getAssetLockDerivationPath } from '../crypto/hd.js';
 import { formatAge } from '../api/network-status.js';
+import { noteDownloadStarted } from '../platform/chunk-loader.js';
 
 /** Dot color + label for each network-health verdict. */
 const NETWORK_HEALTH_META: Record<
@@ -1889,6 +1890,12 @@ function chunkLabel(recovery: ErrorRecovery): string {
   return recovery.failedChunk ? ` "${recovery.failedChunk}"` : '';
 }
 
+function chunkFailureCause(recovery: ErrorRecovery): string {
+  return recovery.downloadPromptSuspected
+    ? 'most likely your browser was asking whether to download the key backup file: answer that prompt first'
+    : 'most likely a network interruption';
+}
+
 function chainlockFallbackHint(state: BridgeState, recovery: ErrorRecovery): string {
   if (recovery.lockReceived) {
     return 'If Platform keeps rejecting the InstantSend proof, you can wait for a chain lock and submit a chain-based proof instead.';
@@ -1914,7 +1921,7 @@ function retrySubmissionHint(state: BridgeState, recovery: ErrorRecovery): strin
     return 'Platform may still be processing your registration. Wait a minute, then retry — it is safe and cannot spend your deposit twice.';
   }
   if (recovery.lockReceived && recovery.failedChunk) {
-    return `Your deposit is safe: the InstantSend lock arrived, but the page could not load the${chunkLabel(recovery)} component needed to submit it to Platform (most likely a network interruption). Retry once you are back online — it reuses the same lock and cannot spend your deposit twice.`;
+    return `Your deposit is safe: the InstantSend lock arrived, but the page could not load the${chunkLabel(recovery)} component needed to submit it to Platform (${chunkFailureCause(recovery)}). Retry once that is resolved — it reuses the same lock and cannot spend your deposit twice.`;
   }
   if (recovery.lockReceived) {
     return 'Your deposit is safe: the InstantSend lock arrived, but the Platform step failed. Retrying reuses the same lock and cannot spend your deposit twice.';
@@ -1961,7 +1968,7 @@ function renderErrorStep(state: BridgeState): HTMLElement {
   const reloadHtml = recovery.reloadSafe
     ? `
       <div class="error-fallback">
-        <p class="error-fallback-hint">The page failed to load a required component${escapeHtml(chunkLabel(recovery))} (most likely a network interruption). No funds have been sent. Reload the page to try again.</p>
+        <p class="error-fallback-hint">The page failed to load a required component${escapeHtml(chunkLabel(recovery))} (${escapeHtml(chunkFailureCause(recovery))}). No funds have been sent. Reload the page to try again.</p>
         <button id="reload-page-btn" class="primary-btn">Reload</button>
       </div>
     `
@@ -2127,9 +2134,12 @@ export function downloadKeyBackup(state: BridgeState): void {
   a.href = url;
   a.download = filename;
   document.body.appendChild(a);
+  noteDownloadStarted();
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  // iOS Safari reads the blob only once the user answers its download
+  // prompt, which can take a while.
+  setTimeout(() => URL.revokeObjectURL(url), 5 * 60_000);
 }
 
 // ============================================================================

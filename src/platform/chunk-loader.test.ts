@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ChunkLoadError, cacheBustedUrl, createChunkLoader } from './chunk-loader.js';
+import { ChunkLoadError, cacheBustedUrl, createChunkLoader, noteDownloadStarted } from './chunk-loader.js';
 
 const noSleep = { sleep: async () => {} };
 
@@ -68,6 +68,42 @@ describe('createChunkLoader', () => {
     expect(url.searchParams.get('retry')).toMatch(/^1\./);
   });
 
+  it('never reuses a failed URL in a later round, as the browser would answer it from its module map', async () => {
+    const failed = new Set<string>();
+    let networkUp = false;
+    const requests: string[] = [];
+    const importUrl = async (url: string) => {
+      if (failed.has(url)) throw new TypeError('Importing a module script failed.'); // no request
+      requests.push(url);
+      if (!networkUp) {
+        failed.add(url);
+        throw new TypeError('Importing a module script failed.');
+      }
+      return { url };
+    };
+    const chunkUrl = 'https://bridge.example/assets/evo-sdk.module-abc.js';
+    const loader = createChunkLoader('evo-sdk', chunkUrl, () => importUrl(chunkUrl), { ...noSleep, importUrl });
+
+    await expect(loader()).rejects.toBeInstanceOf(ChunkLoadError);
+    expect(requests).toHaveLength(3);
+    networkUp = true;
+    await expect(loader()).resolves.toBeTruthy();
+    expect(requests).toHaveLength(4);
+    expect(new Set(requests).size).toBe(4);
+  });
+
+  it('does not retry an error that is not a failed download', async () => {
+    let calls = 0;
+    const loader = createChunkLoader('x', 'https://h.example/x.js', async () => {
+      calls += 1;
+      throw new SyntaxError('Unexpected token');
+    }, noSleep);
+    const error = (await loader().catch((e: unknown) => e)) as ChunkLoadError;
+    expect(error).toBeInstanceOf(ChunkLoadError);
+    expect(error.attempts).toBe(1);
+    expect(calls).toBe(1);
+  });
+
   it('gives up after 3 attempts with a ChunkLoadError naming the chunk, logs each failure, then lets a later call start over', async () => {
     let calls = 0;
     const loader = createChunkLoader('evo-sdk', null, async () => {
@@ -90,6 +126,56 @@ describe('createChunkLoader', () => {
 
     await expect(loader()).resolves.toBe('recovered');
     expect(calls).toBe(4);
+  });
+});
+
+describe('createChunkLoader right after a file download started', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    noteDownloadStarted(0); // long ago: outside the prompt window again
+    vi.restoreAllMocks();
+  });
+
+  it('keeps retrying for about a minute, since an open download prompt fails every load until answered', async () => {
+    noteDownloadStarted();
+    const sleeps: number[] = [];
+    let calls = 0;
+    const loader = createChunkLoader('evo-sdk', null, async () => {
+      calls += 1;
+      if (calls < 5) throw new TypeError('Importing a module script failed.');
+      return 'loaded';
+    }, { sleep: async (ms) => { sleeps.push(ms); } });
+
+    await expect(loader()).resolves.toBe('loaded');
+    expect(sleeps).toEqual([2000, 5000, 10000, 15000]);
+    expect(String(vi.mocked(console.warn).mock.calls[0][0])).toContain('its prompt may be blocking loads');
+  });
+
+  it('flags the download prompt on the error when it never clears', async () => {
+    noteDownloadStarted();
+    const loader = createChunkLoader('evo-sdk', null, async () => {
+      throw new TypeError('Importing a module script failed.');
+    }, noSleep);
+
+    const error = (await loader().catch((e: unknown) => e)) as ChunkLoadError;
+    expect(error).toBeInstanceOf(ChunkLoadError);
+    expect(error.attempts).toBe(6);
+    expect(error.downloadPromptSuspected).toBe(true);
+  });
+
+  it('uses the short backoff once the download is long past', async () => {
+    noteDownloadStarted(Date.now() - 61_000);
+    const sleeps: number[] = [];
+    const loader = createChunkLoader('x', null, async () => {
+      throw new TypeError('Importing a module script failed.');
+    }, { sleep: async (ms) => { sleeps.push(ms); } });
+
+    const error = (await loader().catch((e: unknown) => e)) as ChunkLoadError;
+    expect(sleeps).toEqual([500, 1500]);
+    expect(error.downloadPromptSuspected).toBe(false);
   });
 });
 
