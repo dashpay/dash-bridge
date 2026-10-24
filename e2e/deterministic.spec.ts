@@ -13,6 +13,41 @@ import {
 const MOCK_QUERY = '/?network=testnet&e2e=mock';
 
 test.describe('Deterministic UI E2E (mock mode)', () => {
+  test('testnet discovers evonodes from the quorum service and never calls a digitalcash.dev host', async ({ page }) => {
+    const digitalcashRequests: string[] = [];
+    page.on('request', (request) => {
+      if (/(^|\.)digitalcash\.dev$/.test(new URL(request.url()).hostname)) {
+        digitalcashRequests.push(request.url());
+      }
+    });
+    await page.route('https://quorums.testnet.networks.dash.org/masternodes', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        headers: { 'access-control-allow-origin': '*' },
+        body: JSON.stringify({
+          success: true,
+          data: [1, 2, 3].map((n) => ({
+            address: `203.0.113.${n}:19999`,
+            status: 'ENABLED',
+            versionCheck: 'success',
+          })),
+        }),
+      })
+    );
+
+    // Client init (warmup) fetches the evonode list and starts network-status polling.
+    const evonodeRequest = page.waitForRequest('https://quorums.testnet.networks.dash.org/masternodes', {
+      timeout: 15000,
+    });
+    await page.goto(MOCK_QUERY);
+    await evonodeRequest;
+    // Let the first network-status poll (Insight + Platform status) go out.
+    await page.waitForTimeout(2000);
+
+    expect(digitalcashRequests).toEqual([]);
+  });
+
   test('create identity flow transitions to completion and DPNS registration', async ({ page }) => {
     await page.goto(MOCK_QUERY);
 

@@ -158,10 +158,11 @@ export class IslockService {
   }
 
   /**
-   * Whether a JSON-RPC endpoint is configured (mainnet/testnet). Devnets have
-   * none and must read Platform status over DAPI instead. The network-status
-   * poller uses this to avoid the dapi-client seed/SML address resolution,
-   * which can't complete in a browser on mainnet/testnet.
+   * Whether a JSON-RPC endpoint is configured (mainnet, or a devnet with an
+   * rpcUrl). Testnet and other devnets have none and read Platform status
+   * instead. The network-status poller uses this to avoid the dapi-client
+   * seed/SML address resolution, which can't complete in a browser on
+   * mainnet.
    */
   get supportsJsonRpc(): boolean {
     return this.hasJsonRpc;

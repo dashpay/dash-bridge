@@ -3332,8 +3332,8 @@ function cancelChainlockFallback(): void {
 
 /**
  * Begin the chainlock fallback flow: poll Insight for the asset-lock tx's
- * confirming block, poll Platform (with DAPI JSON-RPC as backup) for the
- * chain-locked tip, and once `coreChainLockedHeight >= blockHeight` build a
+ * confirming block, poll for the chain-locked tip (JSON-RPC on mainnet,
+ * Platform status elsewhere), and once `coreChainLockedHeight >= blockHeight` build a
  * chain asset lock proof and resubmit the original Platform operation.
  */
 async function startChainlockFallback(): Promise<void> {

@@ -9,8 +9,8 @@ type ChainLock = Awaited<ReturnType<IslockService['getBestChainLock']>>;
 
 /**
  * Build stub clients. `platform` selects the DAPI path (devnet:
- * supportsJsonRpc=false); `chainLock` selects the JSON-RPC path
- * (mainnet/testnet: supportsJsonRpc=true).
+ * supportsJsonRpc=false; testnet also takes it, via the SDK); `chainLock`
+ * selects the JSON-RPC path (mainnet: supportsJsonRpc=true).
  */
 function makeClients(opts: {
   coreHeight?: number | Error;
@@ -121,7 +121,7 @@ describe('fetchNetworkStatus (DAPI / devnet path)', () => {
   });
 });
 
-describe('fetchNetworkStatus (JSON-RPC / mainnet-testnet path)', () => {
+describe('fetchNetworkStatus (JSON-RPC / mainnet path)', () => {
   it('reports healthy when Core chain-lock tracks the tip', async () => {
     const { insight, islock } = makeClients({
       coreHeight: 10_700,
