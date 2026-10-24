@@ -44,13 +44,18 @@ export function warmDashModules(): Promise<PromiseSettledResult<unknown>[]> {
  * mainnet, dapi-client on devnets) and are not touched. Fire and forget: a
  * failed connect is logged and later shows up as a degraded health verdict; it
  * never blocks funding. Concurrent and repeated calls share one connect.
+ * Resolves true once a connect was attempted (settled either way), false when
+ * the network is not testnet and nothing was started.
  */
-export function warmPlatformSdkForFunding(network: string): Promise<void> {
-  if (getNetwork(network).type !== 'testnet') return Promise.resolve();
+export function warmPlatformSdkForFunding(network: string): Promise<boolean> {
+  if (getNetwork(network).type !== 'testnet') return Promise.resolve(false);
   return loadPlatformClientModule()
     .then(({ connectPlatformSdk }) => connectPlatformSdk(network))
     .then(
-      () => undefined,
-      (error) => console.warn('Platform SDK warmup failed:', error)
+      () => true,
+      (error) => {
+        console.warn('Platform SDK warmup failed:', error);
+        return true;
+      }
     );
 }

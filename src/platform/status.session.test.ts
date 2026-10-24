@@ -83,14 +83,14 @@ describe('Platform status across an SDK session', () => {
 
   describe('warmPlatformSdkForFunding', () => {
     it('connects the testnet SDK when a funding flow starts', async () => {
-      await warmPlatformSdkForFunding('testnet');
+      await expect(warmPlatformSdkForFunding('testnet')).resolves.toBe(true);
 
       expect(sdk.created).toEqual(['testnet']);
       expect(sdk.connect).toHaveBeenCalledOnce();
     });
 
     it.each(['mainnet', 'devnet-moutai'])('does nothing on %s', async (network) => {
-      await warmPlatformSdkForFunding(network);
+      await expect(warmPlatformSdkForFunding(network)).resolves.toBe(false);
 
       expect(sdk.created).toEqual([]);
       expect(sdk.connect).not.toHaveBeenCalled();
@@ -109,7 +109,7 @@ describe('Platform status across an SDK session', () => {
     it('never rejects when the connect fails, and the failure then shows as degraded', async () => {
       sdk.connect.mockRejectedValue(new Error('quorums unreachable'));
 
-      await expect(warmPlatformSdkForFunding('testnet')).resolves.toBeUndefined();
+      await expect(warmPlatformSdkForFunding('testnet')).resolves.toBe(true);
 
       const result = await testnetStatus(); // retries the connect, which still fails
       expect(result.health).toBe('degraded');
@@ -173,6 +173,53 @@ describe('Platform status across an SDK session', () => {
 
     expect(failing.health).toBe('degraded');
     expect((await testnetStatus()).health).toBe('healthy');
+    expect(sdk.created).toEqual(['testnet']); // a timeout does not evict the SDK
+  });
+
+  it('does not flap back to healthy while a reconnect after an outage is still pending', async () => {
+    vi.useFakeTimers();
+    try {
+      await warmPlatformSdkForFunding('testnet');
+      sdk.status.mockRejectedValueOnce(new Error('transport error: connection refused'));
+      expect((await testnetStatus()).health).toBe('degraded'); // evicts the SDK
+
+      // The reconnect started by the next poll never finishes.
+      sdk.connect.mockReturnValue(new Promise<void>(() => {}));
+      const second = testnetStatus();
+      await vi.advanceTimersByTimeAsync(20_000); // the poll's own timeout
+      const secondResult = await second;
+      expect(secondResult.health).toBe('degraded');
+
+      // The next poll joins that same pending connect: still degraded, not "not read yet".
+      const third = testnetStatus();
+      await vi.advanceTimersByTimeAsync(20_000);
+      const thirdResult = await third;
+      expect(thirdResult.health).toBe('degraded');
+      expect(thirdResult.platformChecked).toBeUndefined();
+      expect(sdk.created.length).toBe(2); // one reconnect, shared
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('turns a hung first connect into degraded once the grace period has passed', async () => {
+    vi.useFakeTimers();
+    try {
+      sdk.connect.mockReturnValue(new Promise<void>(() => {}));
+      void warmPlatformSdkForFunding('testnet');
+      await vi.advanceTimersByTimeAsync(0);
+
+      const early = await testnetStatus();
+      expect(early.health).toBe('healthy');
+      expect(early.platformChecked).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      const late = testnetStatus();
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect((await late).health).toBe('degraded');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('still flags a genuinely stalled Platform once connected', async () => {

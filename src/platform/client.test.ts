@@ -53,45 +53,66 @@ describe('connectPlatformSdk', () => {
     expect(sdkState.connect).toHaveBeenCalledOnce();
   });
 
-  describe('isPlatformSdkSettled', () => {
+  describe('isPlatformSdkReadable', () => {
     it('is false while nobody has asked for the SDK, and asking about it loads nothing', async () => {
-      const { isPlatformSdkSettled } = await import('./client.js');
+      const { isPlatformSdkReadable } = await import('./client.js');
 
-      expect(isPlatformSdkSettled('testnet')).toBe(false);
+      expect(isPlatformSdkReadable('testnet')).toBe(false);
       expect(sdkState.created).toBe(0);
     });
 
     it('is false while the first connect is in flight and true once it settles', async () => {
-      const { isPlatformSdkSettled } = await import('./client.js');
+      const { isPlatformSdkReadable } = await import('./client.js');
       let finishConnect!: () => void;
       sdkState.connect.mockReturnValue(new Promise<void>((resolve) => (finishConnect = resolve)));
 
       const connecting = connectPlatformSdk('testnet', { maxAttempts: 1 });
       await Promise.resolve();
-      expect(isPlatformSdkSettled('testnet')).toBe(false);
+      expect(isPlatformSdkReadable('testnet')).toBe(false);
 
       finishConnect();
       await connecting;
-      expect(isPlatformSdkSettled('testnet')).toBe(true);
-      expect(isPlatformSdkSettled('mainnet')).toBe(false);
+      expect(isPlatformSdkReadable('testnet')).toBe(true);
+      expect(isPlatformSdkReadable('mainnet')).toBe(false);
     });
 
-    it('stays true after the SDK is evicted, so a later failure is not hidden', async () => {
-      const { isPlatformSdkSettled, disconnectPlatformSdk } = await import('./client.js');
+    it('turns true when the first connect hangs past the grace period', async () => {
+      vi.useFakeTimers();
+      try {
+        const { isPlatformSdkReadable } = await import('./client.js');
+        sdkState.connect.mockReturnValue(new Promise<void>(() => {}));
+
+        void connectPlatformSdk('testnet', { maxAttempts: 1 }).catch(() => {});
+        await vi.advanceTimersByTimeAsync(59_000);
+        expect(isPlatformSdkReadable('testnet')).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(isPlatformSdkReadable('testnet')).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('stays true after eviction, including while a reconnect is in flight', async () => {
+      const { isPlatformSdkReadable, disconnectPlatformSdk } = await import('./client.js');
       await connectPlatformSdk('testnet', { maxAttempts: 1 });
 
       disconnectPlatformSdk('testnet');
+      expect(isPlatformSdkReadable('testnet')).toBe(true);
 
-      expect(isPlatformSdkSettled('testnet')).toBe(true);
+      sdkState.connect.mockReturnValue(new Promise<void>(() => {}));
+      void connectPlatformSdk('testnet', { maxAttempts: 1 }).catch(() => {});
+      await Promise.resolve();
+      expect(isPlatformSdkReadable('testnet')).toBe(true);
     });
 
     it('is true after a failed connect', async () => {
-      const { isPlatformSdkSettled } = await import('./client.js');
+      const { isPlatformSdkReadable } = await import('./client.js');
       sdkState.connect.mockRejectedValue(new Error('quorums unreachable'));
 
       await expect(connectPlatformSdk('testnet', { maxAttempts: 1 })).rejects.toThrow('quorums');
 
-      expect(isPlatformSdkSettled('testnet')).toBe(true);
+      expect(isPlatformSdkReadable('testnet')).toBe(true);
     });
   });
 

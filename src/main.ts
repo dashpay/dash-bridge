@@ -346,7 +346,11 @@ function preloadDashWarmup(): void {
  * right after the connect settles instead of waiting for the next 30 s tick.
  */
 function startPlatformSdkForFunding(): void {
-  void warmPlatformSdkForFunding(state.network).then(() => pollNetworkStatusNow?.());
+  // Mock-mode flows must not touch the network.
+  if (isE2EMockMode()) return;
+  void warmPlatformSdkForFunding(state.network).then((attempted) => {
+    if (attempted) pollNetworkStatusNow?.();
+  });
 }
 
 // ── Network-status polling ──────────────────────────────────────────────────
@@ -386,11 +390,19 @@ function startNetworkStatusPolling(): void {
   const islock = islockService;
   const network = state.network;
 
+  // Polls can overlap (the extra poll after the SDK connects); a slower, older
+  // one must not overwrite the result of a newer one.
+  let issued = 0;
+  let applied = 0;
+
   const poll = async (): Promise<void> => {
+    const sequence = ++issued;
     try {
       const status = await fetchNetworkStatus(insight, islock);
       // Ignore results from a superseded network/client.
       if (generation !== networkStatusGeneration) return;
+      if (sequence < applied) return;
+      applied = sequence;
 
       networkStatusSync.apply(network, status);
     } catch (err) {

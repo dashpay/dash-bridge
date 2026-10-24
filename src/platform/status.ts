@@ -1,5 +1,5 @@
 import {
-  isPlatformSdkSettled,
+  isPlatformSdkReadable,
   withConnectedPlatformSdk,
   withPlatformOperationTimeout,
 } from './client.js';
@@ -30,20 +30,20 @@ function positiveInteger(value: unknown): number | undefined {
 /**
  * Like {@link fetchPlatformStatus}, but never starts the SDK download: resolves
  * `undefined` ("not read yet", not a failure) while nothing has started
- * connecting the SDK, or while that first connect is still in flight. For
- * background health polling, which must not pull the ~7 MB (gzip) SDK onto
- * every page load just to draw an indicator.
+ * connecting the SDK, or while that first connect is still within its grace
+ * period. For background health polling, which must not pull the ~7 MB (gzip)
+ * SDK onto every page load just to draw an indicator.
  *
- * Once a connect has been attempted, reads always go through it, and a failing
- * read rejects: after a connection error the SDK is evicted from the cache, and
- * the next poll reconnects (the module is already loaded) rather than falling
- * back to "not read yet", so a Platform outage shows as degraded and a recovery
- * shows as healthy again.
+ * Afterwards reads always go through the SDK and a failing read rejects: after
+ * a connection error the SDK is evicted from the cache, and the next poll
+ * reconnects (the module is already loaded) rather than falling back to "not
+ * read yet", so a Platform outage shows as degraded and a recovery shows as
+ * healthy again. See {@link isPlatformSdkReadable}.
  */
 export async function fetchPlatformStatusIfSdkReady(
   network: string
 ): Promise<PlatformStatus | undefined> {
-  return isPlatformSdkSettled(network) ? fetchPlatformStatus(network) : undefined;
+  return isPlatformSdkReadable(network) ? fetchPlatformStatus(network) : undefined;
 }
 
 /**
@@ -71,8 +71,10 @@ export async function fetchPlatformStatus(network: string): Promise<PlatformStat
           latestBlockHeight: positiveInteger(chain?.latest_block_height),
           latestBlockTimeMs: positiveInteger(status?.time?.block),
         };
-      },
-      { maxAttempts: 1 }
+      }
+      // Default retry options: when a poll's reconnect is joined by a write path
+      // (connects are shared), that path keeps its normal resilience. The 20 s
+      // timeout below bounds the poll itself.
     ),
     'reading Platform status',
     PLATFORM_STATUS_TIMEOUT_MS
