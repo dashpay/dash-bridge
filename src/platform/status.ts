@@ -19,7 +19,6 @@ function positiveInteger(value: unknown): number | undefined {
   if (typeof value !== 'number' && typeof value !== 'bigint' && typeof value !== 'string') {
     return undefined;
   }
-  if (value === '') return undefined;
   const number = Number(value);
   return Number.isSafeInteger(number) && number > 0 ? number : undefined;
 }
@@ -42,9 +41,11 @@ export async function fetchPlatformStatus(network: string): Promise<PlatformStat
       network,
       async (sdk) => {
         const status = await sdk.system.status();
+        // wasm getters build a new object per access, so read `chain` once.
+        const chain = status?.chain;
         return {
-          coreChainLockedHeight: positiveInteger(status?.chain?.core_chain_locked_height),
-          latestBlockHeight: positiveInteger(status?.chain?.latest_block_height),
+          coreChainLockedHeight: positiveInteger(chain?.core_chain_locked_height),
+          latestBlockHeight: positiveInteger(chain?.latest_block_height),
           latestBlockTimeMs: positiveInteger(status?.time?.block),
         };
       },

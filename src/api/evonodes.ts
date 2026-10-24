@@ -9,7 +9,7 @@ import { fetchJson } from '../utils/fetch-json.js';
  */
 export const TESTNET_MASTERNODES_URL = 'https://quorums.testnet.networks.dash.org/masternodes';
 
-export const EVONODE_FETCH_TIMEOUT_MS = 5000;
+const EVONODE_FETCH_TIMEOUT_MS = 5000;
 
 /** Below this many live nodes the fetched list is not trusted on its own. */
 export const MIN_DYNAMIC_EVONODES = 3;
@@ -37,7 +37,15 @@ export function parseEvonodeAddresses(payload: unknown): string[] {
     // `address` is the Core P2P endpoint (host:19999); only the host is reused.
     const host = address.replace(/:\d+$/, '');
     if (!HOST_PATTERN.test(host)) continue;
-    endpoints.add(`https://${host}:${DAPI_HTTPS_PORT}`);
+    const endpoint = `https://${host}:${DAPI_HTTPS_PORT}`;
+    // The regex alone admits non-URLs such as 999.1.1.1, and one of those
+    // would make the DAPI client constructor throw for the whole list.
+    try {
+      new URL(endpoint);
+    } catch {
+      continue;
+    }
+    endpoints.add(endpoint);
   }
   return [...endpoints];
 }
@@ -50,12 +58,13 @@ export function parseEvonodeAddresses(payload: unknown): string[] {
  * fewer than {@link MIN_DYNAMIC_EVONODES} nodes.
  */
 export async function resolveTestnetDapiAddresses(
-  staticAddresses: readonly string[],
-  timeoutMs: number = EVONODE_FETCH_TIMEOUT_MS
+  staticAddresses: readonly string[]
 ): Promise<string[]> {
   let live: string[] = [];
   try {
-    live = parseEvonodeAddresses(await fetchJson(TESTNET_MASTERNODES_URL, {}, timeoutMs));
+    live = parseEvonodeAddresses(
+      await fetchJson(TESTNET_MASTERNODES_URL, {}, EVONODE_FETCH_TIMEOUT_MS)
+    );
   } catch (error) {
     console.warn('Could not fetch the testnet evonode list; using the built-in list:', error);
   }

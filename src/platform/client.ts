@@ -78,6 +78,25 @@ async function createPlatformSdk(network: PlatformNetwork): Promise<EvoSDK> {
   return EvoSDK.testnetTrusted(options);
 }
 
+// In-flight connects, so concurrent callers (background status polls, write
+// paths) share one SDK instead of each opening a connection and orphaning all
+// but the last.
+const pendingConnects = new Map<string, Promise<EvoSDK>>();
+
+async function openPlatformSdk(
+  network: PlatformNetwork,
+  retryOptions?: RetryOptions
+): Promise<EvoSDK> {
+  const sdk = await createPlatformSdk(network);
+
+  console.log(`Connecting to ${network}...`);
+  await withRetry(() => sdk.connect(), retryOptions);
+  console.log('Connected to Platform');
+
+  sdkCache.set(network, sdk);
+  return sdk;
+}
+
 export async function connectPlatformSdk(
   network: PlatformNetwork,
   retryOptions?: RetryOptions
@@ -87,14 +106,12 @@ export async function connectPlatformSdk(
     return cached;
   }
 
-  const sdk = await createPlatformSdk(network);
-
-  console.log(`Connecting to ${network}...`);
-  await withRetry(() => sdk.connect(), retryOptions);
-  console.log('Connected to Platform');
-
-  sdkCache.set(network, sdk);
-  return sdk;
+  let pending = pendingConnects.get(network);
+  if (!pending) {
+    pending = openPlatformSdk(network, retryOptions).finally(() => pendingConnects.delete(network));
+    pendingConnects.set(network, pending);
+  }
+  return pending;
 }
 
 export function disconnectPlatformSdk(network: PlatformNetwork): void {

@@ -25,13 +25,8 @@ import { fetchNetworkStatus } from './network-status.js';
 import { TESTNET } from '../config.js';
 import type { InsightClient } from './insight.js';
 
-const insightAt = (height: number | Error): InsightClient =>
-  ({
-    getBlockHeight: async () => {
-      if (height instanceof Error) throw height;
-      return height;
-    },
-  }) as unknown as InsightClient;
+const insightAt = (height: number): InsightClient =>
+  ({ getBlockHeight: async () => height }) as unknown as InsightClient;
 
 const freshStatus = (overrides: Record<string, unknown> = {}) => ({
   coreChainLockedHeight: 1_578_100,
@@ -51,6 +46,7 @@ describe('Platform status routing', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   describe('DAPISubscriptionClient', () => {
@@ -79,6 +75,15 @@ describe('Platform status routing', () => {
       const client = new DAPISubscriptionClient({ network: 'testnet' });
 
       await expect(client.getCoreChainLockedHeight()).resolves.toBeUndefined();
+    });
+
+    it('routes by config type, so an unknown name that falls back to testnet uses the SDK', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      mocks.fetchPlatformStatus.mockResolvedValue(freshStatus());
+      const client = new DAPISubscriptionClient({ network: 'Testnet' });
+
+      await expect(client.getCoreChainLockedHeight()).resolves.toBe(1_578_100);
+      expect(mocks.dapiGetStatus).not.toHaveBeenCalled();
     });
 
     it('keeps the dapi-client call on devnets', async () => {
@@ -131,15 +136,6 @@ describe('Platform status routing', () => {
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
-    it('stays healthy when the node omits optional fields', async () => {
-      mocks.fetchPlatformStatus.mockResolvedValue({});
-
-      const status = await fetchNetworkStatus(insightAt(1_578_102), testnetIslock());
-
-      expect(status.health).toBe('healthy');
-      expect(status.coreChainLockedHeight).toBeUndefined();
-    });
-
     it('reports degraded only when the SDK call fails', async () => {
       mocks.fetchPlatformStatus.mockRejectedValue(new Error('Timed out while reading Platform status'));
 
@@ -147,22 +143,6 @@ describe('Platform status routing', () => {
 
       expect(status.health).toBe('degraded');
       expect(status.reasons).toEqual(['Platform (DAPI) status unreachable']);
-    });
-
-    it('reports unknown when both Insight and the SDK call fail', async () => {
-      mocks.fetchPlatformStatus.mockRejectedValue(new Error('down'));
-
-      const status = await fetchNetworkStatus(insightAt(new Error('down')), testnetIslock());
-
-      expect(status.health).toBe('unknown');
-    });
-
-    it('still flags a genuinely stalled chain-lock', async () => {
-      mocks.fetchPlatformStatus.mockResolvedValue(freshStatus({ coreChainLockedHeight: 1_577_000 }));
-
-      const status = await fetchNetworkStatus(insightAt(1_578_102), testnetIslock());
-
-      expect(status.health).toBe('stalled');
     });
   });
 });

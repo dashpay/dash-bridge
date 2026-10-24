@@ -39,9 +39,8 @@ export async function fetchNetworkStatus(
   //     in a browser there (seed/SML resolution fails on bad certs + CORS), so
   //     we deliberately avoid it.
   //   - testnet/devnets (no JSON-RPC): read full Platform status, which also
-  //     yields Tenderdash block height + age. Testnet goes through the EvoSDK
-  //     (dapi-client's status decoder throws on testnet nodes); devnets use
-  //     DAPI over their explicit dapiAddresses. IslockService picks the path.
+  //     yields Tenderdash block height + age. IslockService picks the path
+  //     (EvoSDK on testnet, DAPI over explicit dapiAddresses on devnets).
   const useDapiPlatformStatus = !islock.supportsJsonRpc;
 
   // Bound the Insight retry so a flaky endpoint can't stretch one poll past the

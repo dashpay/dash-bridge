@@ -2,6 +2,7 @@
 
 import DAPIClientModule from '@dashevo/dapi-client';
 import dashcoreLib from '@dashevo/dashcore-lib';
+import { getNetwork } from '../config.js';
 import { hash160 } from '../crypto/hash.js';
 import { describeIslock } from '../utils/islock-debug.js';
 import { fetchPlatformStatus, type PlatformStatus } from '../platform/status.js';
@@ -437,13 +438,12 @@ export class DAPISubscriptionClient {
    * Tenderdash is stuck). Fields are `undefined` when the masternode doesn't
    * report them.
    *
-   * Testnet reads through the EvoSDK: every testnet node omits the optional
-   * `state_sync` message that dapi-client's `platform.getStatus()` decoder
-   * dereferences unconditionally, so that call always throws there. Devnets
-   * keep the dapi-client gRPC call (see getCoreChainLockedHeight).
+   * Testnet reads through the EvoSDK (see `fetchPlatformStatus` for why);
+   * every other network keeps the dapi-client gRPC call.
    */
   async getPlatformStatus(): Promise<PlatformStatus> {
-    if (this.network === 'testnet') {
+    // By config type, not name: an unknown name falls back to the testnet config.
+    if (getNetwork(this.network).type === 'testnet') {
       return fetchPlatformStatus(this.network);
     }
 

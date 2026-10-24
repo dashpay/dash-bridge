@@ -52,6 +52,8 @@ describe('parseEvonodeAddresses', () => {
         node('x', { address: 'user@evil.example:19999' }),
         node('x', { address: 'host/path:19999' }),
         node('x', { address: '[::1]:19999' }),
+        node('999.1.1.1'),
+        node('1.2.3.4.5'),
         node('x', { address: '' }),
         node('x', { address: 42 }),
         null,
@@ -185,7 +187,7 @@ describe('resolveTestnetDapiAddresses', () => {
         })
     );
 
-    const result = resolveTestnetDapiAddresses(FALLBACK, 5000);
+    const result = resolveTestnetDapiAddresses(FALLBACK);
     await vi.advanceTimersByTimeAsync(5000);
 
     await expect(result).resolves.toEqual(FALLBACK);

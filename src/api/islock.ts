@@ -149,9 +149,8 @@ export class IslockService {
   }
 
   /**
-   * Read of the Platform chain-locked Dash Core height. Used by the
-   * chainlock fallback; testnet reads it through the EvoSDK and devnets over
-   * direct gRPC — see DAPISubscriptionClient for why.
+   * Platform's chain-locked Dash Core height, for the chainlock fallback.
+   * See DAPISubscriptionClient.getCoreChainLockedHeight for how it is read.
    */
   async getCoreChainLockedHeight(): Promise<number | undefined> {
     return this.subscriptionClient.getCoreChainLockedHeight();
@@ -180,8 +179,7 @@ export class IslockService {
   /**
    * Read Platform/Tenderdash status (chain-locked Core height, latest Platform
    * block height + timestamp). Used by the network-health indicator on
-   * testnet (via the EvoSDK) and devnets (via DAPI over their explicit
-   * dapiAddresses).
+   * testnet and devnets; see DAPISubscriptionClient.getPlatformStatus.
    */
   async getPlatformStatus(): Promise<PlatformStatus> {
     return this.subscriptionClient.getPlatformStatus();
