@@ -5,6 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({
   clients: [] as any[],
   deadHosts: new Set<string>(),
+  // Hosts whose best-block-height call hangs forever / rejects.
+  hungHeightHosts: new Set<string>(),
+  failedHeightHosts: new Set<string>(),
   // Hosts whose subscribe call stays pending until releaseSlow() is called.
   slowHosts: new Set<string>(),
   slowWaiters: [] as Array<() => void>,
@@ -26,7 +29,13 @@ vi.mock('@dashevo/dapi-client', () => {
       this.options = options;
       state.clients.push(this);
       this.core = {
-        getBestBlockHeight: vi.fn(async () => state.height),
+        getBestBlockHeight: vi.fn(async () => {
+          const only = options.dapiAddresses?.length === 1 ? options.dapiAddresses[0].host : undefined;
+          // A blackholed node never answers (the real transport gives up after ~75 s).
+          if (only && state.hungHeightHosts.has(only)) return new Promise<number>(() => {});
+          if (only && state.failedHeightHosts.has(only)) throw new Error('GrpcError: height refused');
+          return state.height;
+        }),
         subscribeToTransactionsWithProofs: vi.fn(async (_filter: unknown, _opts: unknown) => {
           if (options.dapiAddresses?.length === 1 && state.deadHosts.has(options.dapiAddresses[0].host)) {
             throw new Error('GrpcError: Response closed without headers');
@@ -72,6 +81,7 @@ import {
   DAPISubscriptionClient,
   ISLOCK_CONCURRENT_NODES,
   ISLOCK_MAX_NODE_ATTEMPTS,
+  ISLOCK_HEIGHT_TIMEOUT_MS,
   ISLOCK_READINESS_CAP_MS,
 } from './dapi-subscription.js';
 
@@ -112,6 +122,8 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
     vi.useFakeTimers();
     state.clients.length = 0;
     state.deadHosts.clear();
+    state.hungHeightHosts.clear();
+    state.failedHeightHosts.clear();
     state.slowHosts.clear();
     state.slowWaiters.length = 0;
     state.height = 100;
@@ -137,11 +149,12 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
     for (const host of hosts) expect(all.map((a) => new URL(a).hostname)).toContain(host);
     expect(nodes[0].options.dapiAddresses[0]).toMatchObject({ protocol: 'https', port: 1443 });
 
-    // Height comes from the shared failover client, once, and every stream starts from height - 10.
+    // Height is asked of the same per-node clients (not the shared random-pick
+    // client), once each, and every stream starts from height - 10.
     const shared = state.clients.find((c) => c.options.dapiAddresses?.length === 5);
-    expect(shared.core.getBestBlockHeight).toHaveBeenCalledTimes(1);
+    expect(shared.core.getBestBlockHeight).not.toHaveBeenCalled();
     for (const node of nodes) {
-      expect(node.core.getBestBlockHeight).not.toHaveBeenCalled();
+      expect(node.core.getBestBlockHeight).toHaveBeenCalledTimes(1);
       expect(node.core.subscribeToTransactionsWithProofs).toHaveBeenCalledTimes(1);
       expect(node.core.subscribeToTransactionsWithProofs.mock.calls[0][1]).toEqual({
         fromBlockHeight: 90,
@@ -224,6 +237,80 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
     liveStreams()[1].emit('data', lockMessage(TXID));
     const bytes = await sub.wait();
     expect(new TextDecoder().decode(bytes)).toBe(TXID);
+  });
+
+  describe('block height race', () => {
+    it('is not delayed by a node whose height request hangs', async () => {
+      state.hungHeightHosts.add('node0.test');
+      const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(3) });
+      const sub = await startReady(client); // no timers advanced: far below the 8 s deadline
+
+      expect(liveStreams()).toHaveLength(3);
+      for (const node of nodeClients()) {
+        expect(node.core.subscribeToTransactionsWithProofs.mock.calls[0][1]).toEqual({
+          fromBlockHeight: 90,
+          count: 0,
+        });
+      }
+      liveStreams()[1].emit('data', lockMessage(TXID));
+      await sub.wait();
+    });
+
+    it('survives nodes whose height request fails as long as one answers', async () => {
+      state.failedHeightHosts.add('node0.test');
+      state.hungHeightHosts.add('node1.test');
+      state.height = 500; // only node2 answers
+      const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(3) });
+      const sub = await startReady(client);
+
+      for (const node of nodeClients()) {
+        expect(node.core.subscribeToTransactionsWithProofs.mock.calls[0][1].fromBlockHeight).toBe(490);
+      }
+      liveStreams()[0].emit('data', lockMessage(TXID));
+      await sub.wait();
+    });
+
+    it('rejects within the per-request deadline, naming the nodes tried, when every node hangs', async () => {
+      for (const host of ['node0.test', 'node1.test', 'node2.test']) state.hungHeightHosts.add(host);
+      const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(3) });
+      const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT);
+      const outcome = expect(pending).rejects.toThrow(
+        new RegExp(`failed for ${TXID}: 3 nodes tried, last error: getBestBlockHeight timed out after ${ISLOCK_HEIGHT_TIMEOUT_MS}ms`)
+      );
+
+      await vi.advanceTimersByTimeAsync(ISLOCK_HEIGHT_TIMEOUT_MS - 1);
+      expect(nodeClients().flatMap((c) => c.streams)).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      await outcome;
+
+      // Nothing was opened and every probe client was cleaned up.
+      expect(liveStreams()).toHaveLength(0);
+      for (const node of nodeClients()) {
+        expect(node.core.subscribeToTransactionsWithProofs).not.toHaveBeenCalled();
+        expect(node.disconnect).toHaveBeenCalled();
+      }
+    });
+
+    it('rejects at once when every node fails its height request', async () => {
+      for (const host of ['node0.test', 'node1.test', 'node2.test']) state.failedHeightHosts.add(host);
+      const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(3) });
+      const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT);
+      const outcome = expect(pending).rejects.toThrow(/3 nodes tried.*height refused/);
+      await flush();
+      await outcome;
+    });
+
+    it('stops waiting for heights when the caller aborts', async () => {
+      for (const host of ['node0.test', 'node1.test', 'node2.test']) state.hungHeightHosts.add(host);
+      const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(3) });
+      const controller = new AbortController();
+      const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT, undefined, controller.signal);
+      const outcome = expect(pending).rejects.toThrow(`InstantSend lock subscription aborted for ${TXID}`);
+      await flush();
+      controller.abort();
+      await outcome;
+      for (const node of nodeClients()) expect(node.disconnect).toHaveBeenCalled();
+    });
   });
 
   it('rejects wait() naming the nodes tried and the last error when every node fails after readiness', async () => {

@@ -35,6 +35,8 @@ export interface DAPISubscriptionConfig {
 export const ISLOCK_CONCURRENT_NODES = 3;
 /** Total streams opened per subscription, initial ones plus replacements for failed ones. */
 export const ISLOCK_MAX_NODE_ATTEMPTS = ISLOCK_CONCURRENT_NODES + 6;
+/** Deadline for each node's best-block-height answer before the stream starts. */
+export const ISLOCK_HEIGHT_TIMEOUT_MS = 8000;
 /** Longest subscribeForInstantSendLock waits for a first stream message before returning. */
 export const ISLOCK_READINESS_CAP_MS = 3000;
 
@@ -92,6 +94,101 @@ export class DAPISubscriptionClient {
       options.network = config.network === 'mainnet' ? 'mainnet' : 'testnet';
     }
     this.dapiClient = new DAPIClientClass(options);
+  }
+
+  /** A client pinned to one node, so streams and height probes can't land on the same node twice. */
+  private createNodeClient(address: DapiAddress): any {
+    return new DAPIClientClass({ ...CLIENT_OPTIONS, dapiAddresses: [address] });
+  }
+
+  private tryCreateNodeClient(address: DapiAddress): any | undefined {
+    try {
+      return this.createNodeClient(address);
+    } catch (error) {
+      console.warn(`[islock-sub] could not create client for ${address.host}:${address.port}:`, error);
+      return undefined;
+    }
+  }
+
+  private disconnectQuietly(client: any | undefined): void {
+    if (!client) return;
+    try {
+      Promise.resolve(client.disconnect()).catch(() => {});
+    } catch { /* ignore */ }
+  }
+
+  /**
+   * Ask every client for the best block height at once and take the first
+   * success. Each request has its own deadline because a blackholed node never
+   * answers and the transport only gives up after ~75 s. Rejects only when
+   * every node failed (same message shape as a failed stream subscription), or
+   * when `signal` aborts.
+   */
+  private raceBestBlockHeight(
+    txid: string,
+    clients: Array<any | undefined>,
+    signal?: AbortSignal
+  ): Promise<number> {
+    return new Promise<number>((resolve, reject) => {
+      let done = false;
+      let failures = 0;
+      const timers = new Set<ReturnType<typeof setTimeout>>();
+
+      const settle = (fn: () => void): void => {
+        if (done) return;
+        done = true;
+        for (const timer of timers) clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        fn();
+      };
+      const onAbort = (): void => {
+        settle(() => reject(new Error(`InstantSend lock subscription aborted for ${txid}`)));
+      };
+      const failOne = (error: unknown): void => {
+        if (done) return;
+        console.warn('[islock-sub] block height request failed:', error);
+        if (++failures < clients.length) return;
+        const reason = error instanceof Error ? error.message : String(error);
+        settle(() => reject(new Error(
+          `InstantSend lock subscription failed for ${txid}: ${clients.length} nodes tried, last error: ${reason}`
+        )));
+      };
+
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      for (const client of clients) {
+        if (!client) {
+          failOne(new Error('Could not create a client for the node'));
+          continue;
+        }
+        let answered = false;
+        const timer = setTimeout(() => {
+          if (answered) return;
+          answered = true;
+          failOne(new Error(`getBestBlockHeight timed out after ${ISLOCK_HEIGHT_TIMEOUT_MS}ms`));
+        }, ISLOCK_HEIGHT_TIMEOUT_MS);
+        timers.add(timer);
+        Promise.resolve()
+          .then(() => client.core.getBestBlockHeight())
+          .then((height: unknown) => {
+            if (answered) return;
+            answered = true;
+            if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) {
+              failOne(new Error(`Invalid block height ${String(height)}`));
+              return;
+            }
+            settle(() => resolve(height));
+          }, (error: unknown) => {
+            if (answered) return;
+            answered = true;
+            failOne(error);
+          });
+      }
+    });
   }
 
   private createBloomFilter(
@@ -155,15 +252,30 @@ export class DAPISubscriptionClient {
     const bloomFilter = this.createBloomFilter(hash160(publicKey), utxo);
 
     onProgress?.('Getting current block height...');
+    if (this.nodeAddresses.length >= 2) {
+      // The shared client picks one random node and waits out its full connect
+      // timeout (~75 s in browsers) when that node is unreachable, with nothing
+      // broadcast meanwhile. Ask the nodes the streams will use, all at once.
+      const nodes = shuffled(this.nodeAddresses);
+      const clients = nodes
+        .slice(0, ISLOCK_CONCURRENT_NODES)
+        .map((address) => this.tryCreateNodeClient(address));
+      let currentHeight: number;
+      try {
+        currentHeight = await this.raceBestBlockHeight(txid, clients, signal);
+      } catch (error) {
+        for (const client of clients) this.disconnectQuietly(client);
+        throw error;
+      }
+      console.log('[islock-sub] Current block height:', currentHeight);
+      return this.subscribeOnMultipleNodes(
+        txid, bloomFilter, Math.max(1, currentHeight - 10), timeoutMs, nodes, clients, onProgress, signal
+      );
+    }
+
     const currentHeight: number = await this.dapiClient.core.getBestBlockHeight();
     console.log('[islock-sub] Current block height:', currentHeight);
     const fromBlockHeight = Math.max(1, currentHeight - 10);
-
-    if (this.nodeAddresses.length >= 2) {
-      return this.subscribeOnMultipleNodes(
-        txid, bloomFilter, fromBlockHeight, timeoutMs, onProgress, signal
-      );
-    }
 
     onProgress?.(`Subscribing from block ${fromBlockHeight}...`);
     const stream = await this.dapiClient.core.subscribeToTransactionsWithProofs(
@@ -271,11 +383,15 @@ export class DAPISubscriptionClient {
     bloomFilter: ReturnType<DAPISubscriptionClient['createBloomFilter']>,
     fromBlockHeight: number,
     timeoutMs: number,
+    nodes: DapiAddress[],
+    // Clients already created for nodes[0..n) while fetching the height; the
+    // streams reuse them. Entries are undefined where creation threw.
+    initialClients: Array<any | undefined>,
     onProgress?: (message: string) => void,
     signal?: AbortSignal
   ): Promise<{ wait: () => Promise<Uint8Array> }> {
-    const nodes = shuffled(this.nodeAddresses);
-    const initialCount = Math.min(ISLOCK_CONCURRENT_NODES, nodes.length);
+    const initialCount = initialClients.length;
+    const unadopted = new Set(initialClients.filter(Boolean));
     onProgress?.(`Subscribing from block ${fromBlockHeight} on ${initialCount} nodes...`);
 
     let markReady!: () => void;
@@ -298,11 +414,7 @@ export class DAPISubscriptionClient {
       const release = (slot: NodeSlot): void => {
         slots.delete(slot);
         cancelStream(slot.stream);
-        const client = slot.client;
-        if (!client) return;
-        try {
-          Promise.resolve(client.disconnect()).catch(() => {});
-        } catch { /* ignore */ }
+        this.disconnectQuietly(slot.client);
       };
 
       const finish = (fn: () => void): void => {
@@ -313,6 +425,9 @@ export class DAPISubscriptionClient {
         this.activeSubscriptions.delete(onAbort);
         signal?.removeEventListener('abort', onAbort);
         for (const slot of [...slots]) release(slot);
+        // Height-probe clients that never got a stream (aborted before opening).
+        for (const client of unadopted) this.disconnectQuietly(client);
+        unadopted.clear();
         markReady();
         fn();
       };
@@ -349,7 +464,8 @@ export class DAPISubscriptionClient {
 
         console.log(`[islock-sub] opening stream on ${address.host}:${address.port} (attempt ${attempts})`);
         try {
-          slot.client = new DAPIClientClass({ ...CLIENT_OPTIONS, dapiAddresses: [address] });
+          slot.client = initialClients[attempts - 1] ?? this.createNodeClient(address);
+          unadopted.delete(slot.client);
           Promise.resolve(
             slot.client.core.subscribeToTransactionsWithProofs(bloomFilter, { fromBlockHeight, count: 0 })
           ).then((stream: any) => {
