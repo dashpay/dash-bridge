@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 // Guard the Lighthouse fix: the initial page must not preload or statically
@@ -60,6 +60,34 @@ const staticImportPattern = new RegExp(
 
 if (staticImportPattern.test(entryChunk)) {
   fail('entry chunk statically imports a heavy Dash chunk');
+}
+
+// Lazy chunks may statically import only the entry chunk, which is already
+// loaded. A shared dependency chunk can fail to download on its own, and
+// WebKit keeps that failure across reloads, which would make every lazy chunk
+// importing it unloadable (see experimentalMinChunkSize in vite.config.ts).
+const entryFile = entryRelativePath.replace(/^assets\//, '');
+const assetsDir = join(distDir.pathname, 'assets');
+for (const file of readdirSync(assetsDir).filter((f) => f.endsWith('.js') && f !== entryFile)) {
+  const code = readFileSync(join(assetsDir, file), 'utf8');
+  const staticDeps = [...code.matchAll(/(?:^|[;}\s])import\s*(?:[\w*{}\s,$]+from\s*)?["']\.\/([^"']+)["']/g)]
+    .map((m) => m[1])
+    .filter((dep) => dep !== entryFile);
+  if (staticDeps.length > 0) {
+    fail(`assets/${file} statically imports ${staticDeps.join(', ')}; lazy chunks may only import the entry chunk`);
+  }
+}
+
+// Cache-busted chunk retries (src/platform/chunk-loader.ts) import the URL
+// that virtual:chunk-url put in the entry: it must name an asset the entry
+// also loads with import(), or the retry would fetch something else.
+const chunkUrls = [...entryChunk.matchAll(/new URL\(["']([^"']+\.js)["'],\s*import\.meta\.url\)/g)].map((m) => m[1]);
+if (!chunkUrls.some((u) => u.startsWith('evo-sdk'))) {
+  fail('entry chunk has no virtual:chunk-url URL for the evo-sdk chunk');
+}
+for (const url of chunkUrls) {
+  if (!existsSync(join(assetsDir, url))) fail(`chunk URL ${url} in the entry names no file in dist/assets`);
+  if (!entryChunk.includes(`import("./${url}")`)) fail(`chunk URL ${url} is not a dynamic import() target of the entry`);
 }
 
 // The embeddable widget SDK (docs/widget.md) must ship, stay tiny, and never

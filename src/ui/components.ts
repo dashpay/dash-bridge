@@ -1,6 +1,6 @@
 import type { BridgeState, KeyType, KeyPurpose, SecurityLevel, NetworkHealth, NetworkStatus, EmbedNotice, NearIntentsState, NearIntentsSwap } from '../types.js';
 import { canCancel } from '../embed/bridge.js';
-import { getStepProgress, getStepDescription, ErrorCodes, ErrorCodeLabels } from './state.js';
+import { getStepProgress, getStepDescription, getErrorRecovery, ErrorCodes, ErrorCodeLabels, type ErrorRecovery } from './state.js';
 import {
   formatUnits,
   formatUnitsShort,
@@ -31,6 +31,7 @@ import { bytesToHex } from '../utils/hex.js';
 import { getNetwork, getAvailableNetworks } from '../config.js';
 import { getAssetLockDerivationPath } from '../crypto/hd.js';
 import { formatAge } from '../api/network-status.js';
+import { noteDownloadStarted } from '../platform/chunk-loader.js';
 
 /** Dot color + label for each network-health verdict. */
 const NETWORK_HEALTH_META: Record<
@@ -272,6 +273,10 @@ export function render(state: BridgeState, container: HTMLElement): void {
 
     case 'enter_recipient_address':
       content.appendChild(renderEnterRecipientAddressStep(state));
+      break;
+
+    case 'generating_keys':
+      content.appendChild(renderPreparingStep());
       break;
 
     case 'awaiting_deposit':
@@ -1557,6 +1562,21 @@ function renderNearSwap(swap: NearIntentsSwap): HTMLElement {
   return el;
 }
 
+/**
+ * Shown while a funding flow loads the Platform components it needs before
+ * showing a deposit address (the SDK is several MB, slow on mobile networks).
+ */
+function renderPreparingStep(): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'processing-step preparing-step';
+  div.innerHTML = `
+    <h2 class="processing-headline">Preparing…</h2>
+    <p class="processing-subtitle">Loading the Dash Platform components needed to finish. Your deposit address appears next.</p>
+    <div class="spinner large"></div>
+  `;
+  return div;
+}
+
 function renderProcessingStep(state: BridgeState): HTMLElement {
   const div = document.createElement('div');
   div.className = 'processing-step';
@@ -1794,6 +1814,8 @@ function buildErrorDiagnostics(state: BridgeState): Record<string, unknown> {
     mode: state.mode,
     timestamp: new Date().toISOString(),
   };
+  const { failedChunk } = getErrorRecovery(state);
+  if (failedChunk) diag.failedChunk = failedChunk;
 
   // Transaction context — critical for tracking on-chain state
   // NOTE: signedTxHex is intentionally excluded — if the error occurred before
@@ -1863,6 +1885,50 @@ function buildErrorDiagnostics(state: BridgeState): Record<string, unknown> {
   return diag;
 }
 
+/** ` "evo-sdk"` (leading space) when a chunk failed to load, else empty. */
+function chunkLabel(recovery: ErrorRecovery): string {
+  return recovery.failedChunk ? ` "${recovery.failedChunk}"` : '';
+}
+
+function chunkFailureCause(recovery: ErrorRecovery): string {
+  return recovery.downloadPromptSuspected
+    ? 'most likely your browser was asking whether to download the key backup file: answer that prompt first'
+    : 'most likely a network interruption';
+}
+
+function chainlockFallbackHint(state: BridgeState, recovery: ErrorRecovery): string {
+  if (recovery.lockReceived) {
+    return 'If Platform keeps rejecting the InstantSend proof, you can wait for a chain lock and submit a chain-based proof instead.';
+  }
+  if (state.errorCode === ErrorCodes.ISLOCK) {
+    return "InstantSend didn't go through. You can wait for a chain lock and try again with a chain-based proof instead.";
+  }
+  return 'You can wait for a chain lock and try again with a chain-based proof instead.';
+}
+
+function retrySubmissionLabel(mode: BridgeState['mode']): string {
+  switch (mode) {
+    case 'topup': return 'Retry Top-up';
+    case 'send_to_address': return 'Retry Send';
+    default: return 'Retry Registration';
+  }
+}
+
+// The asset lock can be consumed only once and the identity ID is derived
+// from it, so resubmitting the proof in state cannot spend the deposit twice.
+function retrySubmissionHint(state: BridgeState, recovery: ErrorRecovery): string {
+  if (isIdentityRegistrationUnconfirmedError(state.error)) {
+    return 'Platform may still be processing your registration. Wait a minute, then retry — it is safe and cannot spend your deposit twice.';
+  }
+  if (recovery.lockReceived && recovery.failedChunk) {
+    return `Your deposit is safe: the InstantSend lock arrived, but the page could not load the${chunkLabel(recovery)} component needed to submit it to Platform (${chunkFailureCause(recovery)}). Retry once that is resolved — it reuses the same lock and cannot spend your deposit twice.`;
+  }
+  if (recovery.lockReceived) {
+    return 'Your deposit is safe: the InstantSend lock arrived, but the Platform step failed. Retrying reuses the same lock and cannot spend your deposit twice.';
+  }
+  return 'Retrying reuses the same asset lock proof and cannot spend your deposit twice.';
+}
+
 function renderErrorStep(state: BridgeState): HTMLElement {
   const div = document.createElement('div');
   div.className = 'error-step';
@@ -1880,6 +1946,7 @@ function renderErrorStep(state: BridgeState): HTMLElement {
   // Build a concise technical summary from the diagnostic object
   const techLines: string[] = [];
   if (diag.errorStep) techLines.push(`Step: ${diag.errorStep}`);
+  if (diag.failedChunk) techLines.push(`Failed to load: ${diag.failedChunk}`);
   if (diag.depositAddress) techLines.push(`Deposit: ${diag.depositAddress}`);
   if (diag.txid) techLines.push(`TxID: ${diag.txid}`);
   if (diag.identityId) techLines.push(`Identity: ${diag.identityId}`);
@@ -1895,29 +1962,36 @@ function renderErrorStep(state: BridgeState): HTMLElement {
     </details>
   ` : '';
 
+  const recovery = getErrorRecovery(state);
+
+  // Failed while preparing, before any deposit address: nothing is at risk.
+  const reloadHtml = recovery.reloadSafe
+    ? `
+      <div class="error-fallback">
+        <p class="error-fallback-hint">The page failed to load a required component${escapeHtml(chunkLabel(recovery))} (${escapeHtml(chunkFailureCause(recovery))}). No funds have been sent. Reload the page to try again.</p>
+        <button id="reload-page-btn" class="primary-btn">Reload</button>
+      </div>
+    `
+    : '';
+
   const chainlockFallbackHtml = state.chainlockFallbackAvailable
     ? `
       <div class="error-fallback">
-        <p class="error-fallback-hint">InstantSend didn't go through. You can wait for a chain lock and try again with a chain-based proof instead.</p>
+        <p class="error-fallback-hint">${escapeHtml(chainlockFallbackHint(state, recovery))}</p>
         <button id="chainlock-fallback-btn" class="primary-btn">Use chain lock proof instead</button>
       </div>
     `
     : '';
 
-  // An identity registration that was submitted but not confirmed can be
-  // resubmitted safely with the same asset lock proof.
-  const retryRegistrationHtml =
-    state.mode === 'create' &&
-    isIdentityRegistrationUnconfirmedError(state.error) &&
-    state.assetLockProof &&
-    state.assetLockKeyPair
-      ? `
+  // The DOM id predates top-up/send retries; kept for main.ts and the tests.
+  const retrySubmissionHtml = recovery.canRetrySubmission
+    ? `
       <div class="error-fallback">
-        <p class="error-fallback-hint">Platform may still be processing your registration. Wait a minute, then retry — it is safe and cannot spend your deposit twice.</p>
-        <button id="retry-registration-btn" class="primary-btn">Retry Registration</button>
+        <p class="error-fallback-hint">${escapeHtml(retrySubmissionHint(state, recovery))}</p>
+        <button id="retry-registration-btn" class="primary-btn">${retrySubmissionLabel(state.mode)}</button>
       </div>
     `
-      : '';
+    : '';
 
   // Once an asset lock key exists, funds may be in flight: keep the
   // recovery backup one click away on every error screen.
@@ -1938,7 +2012,8 @@ function renderErrorStep(state: BridgeState): HTMLElement {
     ${failedStepHtml}
     <p class="error-message">${escapeHtml(errorMessage)}</p>
     ${techDetailsHtml}
-    ${retryRegistrationHtml}
+    ${reloadHtml}
+    ${retrySubmissionHtml}
     ${chainlockFallbackHtml}
     ${keyBackupHtml}
     <div class="error-actions">
@@ -2059,9 +2134,16 @@ export function downloadKeyBackup(state: BridgeState): void {
   a.href = url;
   a.download = filename;
   document.body.appendChild(a);
+  // Only iOS browsers (all WebKit) ask before downloading, and block the
+  // page's loads while they ask; elsewhere a chunk failure is not the prompt.
+  if (getCurrentMobilePlatform() === 'ios') noteDownloadStarted();
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  // iOS Safari reads the blob only when the user answers its download prompt,
+  // which can be minutes later; revoking now would make that download fail.
+  // 5 min bounds how long the backup stays in memory; a later answer gets
+  // nothing, and the error screens keep a Download Key Backup button.
+  setTimeout(() => URL.revokeObjectURL(url), 5 * 60_000);
 }
 
 // ============================================================================

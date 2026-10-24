@@ -207,10 +207,12 @@ import {
   loadIslockModule,
   loadPlatformClientModule,
   loadPlatformModule,
+  loadPlatformForFunding,
   loadUsernameTransferModule,
   warmDashModules,
   warmPlatformSdkForFunding,
 } from './platform/loaders.js';
+import { DEFAULT_CHUNK_LOAD_ATTEMPTS, ChunkLoadError, createChunkLoader } from './platform/chunk-loader.js';
 import {
   deriveCandidateKeys,
   explainKeyIneligibility,
@@ -341,16 +343,64 @@ function preloadDashWarmup(): void {
 }
 
 /**
- * Funding is about to start: begin connecting the SDK (testnet only), so the
- * health indicator reads Platform before the asset lock is broadcast. Polls
- * right after the connect settles instead of waiting for the next 30 s tick.
+ * The deposit-step key backup. Must run after preparePlatformForFunding: on
+ * iOS Safari the download raises "Do you want to download …?", which cancels
+ * the page's in-flight loads and fails new ones until answered. A chunk
+ * import cancelled that way stays failed for the page (that was the
+ * "Importing a module script failed." at registration). The testnet SDK
+ * connect may still be running past the gate's bounded wait and be cancelled
+ * too, so connect again once the page is back (focus) or after 15 s, for the
+ * health indicator; registration would reconnect anyway.
  */
-function startPlatformSdkForFunding(): void {
-  // Mock-mode flows must not touch the network.
+function downloadFundingKeyBackup(backupState: BridgeState): void {
+  downloadKeyBackup(backupState);
   if (isE2EMockMode()) return;
-  void warmPlatformSdkForFunding(state.network).then((attempted) => {
+  const network = backupState.network;
+  const rewarm = () => {
+    window.removeEventListener('focus', rewarm);
+    clearTimeout(timer);
+    if (state.network === network) void warmFundingConnect(network);
+  };
+  const timer = setTimeout(rewarm, 15_000);
+  window.addEventListener('focus', rewarm);
+}
+
+/**
+ * Testnet: connect the SDK (shared with any connect in flight) and poll the
+ * health indicator as soon as it settles. Other networks: nothing.
+ */
+function warmFundingConnect(network: string): Promise<void> {
+  return warmPlatformSdkForFunding(network).then((attempted) => {
     if (attempted) pollNetworkStatusNow?.();
   });
+}
+
+/** How long a funding flow waits for the testnet SDK connect before showing its deposit address anyway. */
+const FUNDING_SDK_CONNECT_WAIT_MS = 5000;
+
+/**
+ * Gate in front of every funding flow's deposit address (shown as "Preparing
+ * Dash Platform..."). Loads the chunks the Platform submission needs, with
+ * retries, so that once funds are committed nothing depends on a download;
+ * when they still fail (or stall for 5 min) this throws a ChunkLoadError
+ * while nothing is at risk (error screen with Reload).
+ *
+ * Testnet also starts connecting the SDK, so the health indicator reads
+ * Platform before the asset lock is broadcast (polls right after the connect
+ * settles instead of waiting for the next 30 s tick). The flow waits for that
+ * connect at most FUNDING_SDK_CONNECT_WAIT_MS; it continues in the background
+ * and a failure stays a health-indicator matter, as before.
+ */
+async function preparePlatformForFunding(): Promise<void> {
+  // Mock-mode flows must not touch the network.
+  if (isE2EMockMode()) {
+    await loadE2EMockSdk();
+    return;
+  }
+  await loadPlatformForFunding();
+  // Connected before the deposit-step backup download, whose iOS prompt would
+  // cancel a connect still in flight (see downloadFundingKeyBackup).
+  await Promise.race([warmFundingConnect(state.network), delay(FUNDING_SDK_CONNECT_WAIT_MS)]);
 }
 
 // ── Network-status polling ──────────────────────────────────────────────────
@@ -514,6 +564,59 @@ function isE2EMockMode(): boolean {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Failure injection for mock-mode e2e tests, set with page.addInitScript as
+ * window.__e2eMockFailures: `sdkLoadFailures` failed SDK chunk loads before
+ * the gate's loader succeeds (DEFAULT_CHUNK_LOAD_ATTEMPTS or more exhausts its
+ * retries), `submissionFailures` failed Platform submissions after the
+ * InstantSend lock arrived.
+ */
+interface E2EMockFailures {
+  sdkLoadFailures?: number;
+  submissionFailures?: number;
+}
+
+/** Use up one injected failure of this kind; true if there was one left. */
+function consumeE2EMockFailure(kind: keyof E2EMockFailures): boolean {
+  const failures = (window as typeof window & { __e2eMockFailures?: E2EMockFailures }).__e2eMockFailures;
+  const remaining = failures?.[kind] ?? 0;
+  if (!failures || remaining <= 0) return false;
+  failures[kind] = remaining - 1;
+  return true;
+}
+
+function mockImportFailure(): TypeError {
+  return new TypeError('Importing a module script failed.');
+}
+
+// The real retrying loader around a fake SDK import, so the e2e suite
+// exercises its retries and error.
+const loadE2EMockSdk = createChunkLoader('evo-sdk', null, async () => {
+  if (consumeE2EMockFailure('sdkLoadFailures')) throw mockImportFailure();
+  return {};
+});
+
+function e2eMockSubmissionSteps(mode: BridgeState['mode']): {
+  step: BridgeStep;
+  complete: (s: BridgeState) => BridgeState;
+} {
+  switch (mode) {
+    case 'topup':
+      return { step: 'topping_up', complete: setTopUpComplete };
+    case 'send_to_address':
+      return { step: 'sending_to_address', complete: setSendToAddressComplete };
+    default:
+      return { step: 'registering_identity', complete: (s) => setIdentityRegistered(s, E2E_MOCK_IDENTITY_ID) };
+  }
+}
+
+async function runE2EMockSubmission(): Promise<void> {
+  await delay(120);
+  if (consumeE2EMockFailure('submissionFailures')) {
+    throw new ChunkLoadError('evo-sdk', DEFAULT_CHUNK_LOAD_ATTEMPTS, mockImportFailure());
+  }
 }
 
 function createE2EMockUtxo(): UTXO {
@@ -1126,14 +1229,20 @@ function setupEventListeners(container: HTMLElement) {
     });
   }
 
-  // Retry registration (offered on the error screen when an identity
-  // registration was submitted but could not be confirmed)
-  const retryRegistrationBtn = container.querySelector('#retry-registration-btn');
-  if (retryRegistrationBtn) {
-    retryRegistrationBtn.addEventListener('click', () => {
-      void retryIdentityRegistration();
+  // Retry the Platform submission with the lock already received (offered on
+  // the error screen when the submission failed after the lock arrived)
+  const retrySubmissionBtn = container.querySelector('#retry-registration-btn');
+  if (retrySubmissionBtn) {
+    retrySubmissionBtn.addEventListener('click', () => {
+      void retryPlatformSubmission();
     });
   }
+
+  // Reload (offered when a required chunk failed to load before any deposit
+  // address was shown, so nothing is lost by reloading)
+  container.querySelector('#reload-page-btn')?.addEventListener('click', () => {
+    window.location.reload();
+  });
 
   // Chainlock fallback button (offered on the error screen when applicable)
   const chainlockFallbackBtn = container.querySelector('#chainlock-fallback-btn');
@@ -2714,7 +2823,9 @@ async function startTopUp() {
 
       updateState(setStep(state, 'generating_keys'));
       await delay(120);
+      await preparePlatformForFunding();
       updateState(setOneTimeKeyPair(state, assetLockKeyPair, depositAddress));
+      downloadFundingKeyBackup(state);
       updateState(setStep(state, 'detecting_deposit'));
       clearE2EMockAdvanceHook();
       await waitForE2EMockAdvance();
@@ -2731,14 +2842,14 @@ async function startTopUp() {
         outputIndex: 0,
       }));
       updateState(setStep(state, 'topping_up'));
-      await delay(120);
+      await runE2EMockSubmission();
       updateState(setTopUpComplete(state));
       return;
     }
 
     updateState(setStep(state, 'generating_keys'));
     await ensureClients();
-    startPlatformSdkForFunding();
+    await preparePlatformForFunding();
     const islock = islockService!;
     const network = getNetwork(state.network);
 
@@ -2752,7 +2863,8 @@ async function startTopUp() {
 
     // Auto-download key backup immediately for safety
     // CRITICAL: User must have this to recover funds if something goes wrong
-    downloadKeyBackup(stateWithKeys);
+    // (after preparePlatformForFunding: see downloadFundingKeyBackup)
+    downloadFundingKeyBackup(stateWithKeys);
 
     // Step 2: Wait for deposit
     updateState(setStep(stateWithKeys, 'detecting_deposit'));
@@ -2863,7 +2975,7 @@ async function startSendToAddress() {
   try {
     updateState(setStep(state, 'generating_keys'));
     await ensureClients();
-    startPlatformSdkForFunding();
+    await preparePlatformForFunding();
     const islock = islockService!;
     const network = getNetwork(state.network);
 
@@ -2876,7 +2988,7 @@ async function startSendToAddress() {
     updateState(stateWithKeys);
 
     // Auto-download key backup for safety
-    downloadKeyBackup(stateWithKeys);
+    downloadFundingKeyBackup(stateWithKeys);
 
     // Step 2: Wait for deposit
     updateState(setStep(stateWithKeys, 'detecting_deposit'));
@@ -2970,14 +3082,15 @@ async function startSendToAddress() {
 }
 
 /**
- * Resubmit identity registration with the asset lock proof already in
- * state. Offered on the error screen after an unconfirmed submission: the
- * asset lock can only be consumed once and the identity ID is
- * deterministic, so resubmitting can't create a second identity.
+ * Resubmit the Platform operation (registration, top-up or send) with the
+ * asset lock proof already in state. Offered on the error screen when the
+ * submission failed after the lock arrived: the asset lock can only be
+ * consumed once and the identity ID is deterministic, so resubmitting can't
+ * spend the deposit twice or create a second identity.
  */
-async function retryIdentityRegistration(): Promise<void> {
+async function retryPlatformSubmission(): Promise<void> {
   if (!state.assetLockProof || !state.assetLockKeyPair) {
-    console.error('Retry registration unavailable: missing asset lock proof or key');
+    console.error('Retry submission unavailable: missing asset lock proof or key');
     return;
   }
   try {
@@ -2987,7 +3100,7 @@ async function retryIdentityRegistration(): Promise<void> {
     );
     await runPlatformSubmission(state.assetLockProof, assetLockPrivateKeyWif);
   } catch (error) {
-    console.error('Retry registration error:', error);
+    console.error('Retry submission error:', error);
     updateState(setError(state, toError(error)));
   }
 }
@@ -3005,7 +3118,9 @@ async function startBridge() {
       clearE2EMockAdvanceHook();
       updateState(setStep(state, 'generating_keys'));
       await delay(120);
+      await preparePlatformForFunding();
       updateState(setKeyPairs(state, assetLockKeyPair, depositAddress));
+      downloadFundingKeyBackup(state);
       updateState(setStep(state, 'detecting_deposit'));
       await waitForE2EMockAdvance();
       updateState(setUtxoDetected(state, createE2EMockUtxo()));
@@ -3020,7 +3135,7 @@ async function startBridge() {
         instantLockBytes: new Uint8Array([5, 6, 7, 8]),
         outputIndex: 0,
       }));
-      await delay(120);
+      await runE2EMockSubmission();
       updateState(setIdentityRegistered(state, E2E_MOCK_IDENTITY_ID));
       return;
     }
@@ -3035,7 +3150,7 @@ async function startBridge() {
     // Step 1: Derive asset lock key from mnemonic (identity keys are pre-configured in state)
     updateState(setStep(state, 'generating_keys'));
     await ensureClients();
-    startPlatformSdkForFunding();
+    await preparePlatformForFunding();
     const islock = islockService!;
 
     const { privateKey, publicKey } = deriveAssetLockKeyPair(state.mnemonic, state.network);
@@ -3048,7 +3163,7 @@ async function startBridge() {
 
     // Auto-download key backup immediately for safety
     // This ensures users can recover funds if they reload the page
-    downloadKeyBackup(state);
+    downloadFundingKeyBackup(state);
 
     // Step 2: Wait for deposit
     updateState(setStep(state, 'detecting_deposit'));
@@ -3138,15 +3253,7 @@ async function startBridge() {
       state.network
     );
 
-    updateState(setIdentityRegistered(state, result.identityId));
-
-    // Auto-download final key backup on "Save your keys" page
-    // This backup includes the identity ID in the filename
-    // (Earlier download at deposit step used pending filename)
-    downloadKeyBackup(state);
-
-    // Auto-publish contract if this identity was created for contract registration
-    if (await autoPublishContractIfNeeded(result.identityId)) return;
+    await completeIdentityCreation(result.identityId);
 
   } catch (error) {
     if (isE2EMockMode()) {
@@ -3281,12 +3388,7 @@ async function recheckDeposit() {
         state.identityKeys,
         state.network
       );
-      updateState(setIdentityRegistered(state, result.identityId));
-      // Auto-download final key backup on "Save your keys" page
-      downloadKeyBackup(state);
-
-      // Auto-publish contract if applicable
-      if (await autoPublishContractIfNeeded(result.identityId)) return;
+      await completeIdentityCreation(result.identityId);
     } else {
       throw new Error(`recheckDeposit: unexpected mode '${state.mode}'`);
     }
@@ -3316,6 +3418,14 @@ async function runPlatformSubmission(
   assetLockProof: AssetLockProofData,
   assetLockPrivateKeyWif: string
 ): Promise<void> {
+  if (isE2EMockMode()) {
+    const { step, complete } = e2eMockSubmissionSteps(state.mode);
+    updateState(setStep(state, step));
+    await runE2EMockSubmission();
+    updateState(complete(state));
+    return;
+  }
+
   if (state.mode === 'topup') {
     updateState(setStep(state, 'topping_up'));
     const { topUpIdentity } = await loadPlatformModule();
@@ -3351,10 +3461,7 @@ async function runPlatformSubmission(
       state.identityKeys,
       state.network
     );
-    updateState(setIdentityRegistered(state, result.identityId));
-    downloadKeyBackup(state);
-
-    if (await autoPublishContractIfNeeded(result.identityId)) return;
+    await completeIdentityCreation(result.identityId);
     return;
   }
 
@@ -3514,6 +3621,22 @@ async function startChainlockFallback(): Promise<void> {
 // ============================================================================
 // Contract Registration Functions
 // ============================================================================
+
+/**
+ * Identity registered: show it, publish the contract it was created for (if
+ * any), then download the final key backup (its filename has the identity
+ * ID; the deposit-step backup already holds the keys). The download goes
+ * last: on iOS Safari it raises a prompt that makes the page's requests fail
+ * until answered, which would fail the contract publish.
+ */
+async function completeIdentityCreation(identityId: string): Promise<void> {
+  updateState(setIdentityRegistered(state, identityId));
+  try {
+    await autoPublishContractIfNeeded(identityId);
+  } finally {
+    downloadKeyBackup(state);
+  }
+}
 
 /**
  * Auto-publish contract after identity creation if the identity was created
