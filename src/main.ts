@@ -212,7 +212,7 @@ import {
   warmDashModules,
   warmPlatformSdkForFunding,
 } from './platform/loaders.js';
-import { ChunkLoadError, createChunkLoader } from './platform/chunk-loader.js';
+import { CHUNK_LOAD_ATTEMPTS, ChunkLoadError, createChunkLoader } from './platform/chunk-loader.js';
 import {
   deriveCandidateKeys,
   explainKeyIneligibility,
@@ -361,7 +361,7 @@ const FUNDING_SDK_CONNECT_WAIT_MS = 5000;
 async function preparePlatformForFunding(): Promise<void> {
   // Mock-mode flows must not touch the network.
   if (isE2EMockMode()) {
-    await loadE2EMockPlatform();
+    await loadE2EMockSdk();
     return;
   }
   await loadPlatformForFunding();
@@ -535,41 +535,41 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * Failure injection for mock-mode e2e tests, set with page.addInitScript:
- * `sdkLoadFailures` failed SDK chunk loads before the gate's loader succeeds
- * (3 or more exhausts its retries), `submissionFailures` failed Platform
- * submissions after the InstantSend lock arrived.
+ * Failure injection for mock-mode e2e tests, set with page.addInitScript as
+ * window.__e2eMockFailures: `sdkLoadFailures` failed SDK chunk loads before
+ * the gate's loader succeeds (CHUNK_LOAD_ATTEMPTS or more exhausts its
+ * retries), `submissionFailures` failed Platform submissions after the
+ * InstantSend lock arrived.
  */
 interface E2EMockFailures {
   sdkLoadFailures?: number;
   submissionFailures?: number;
 }
 
-function e2eMockFailures(): E2EMockFailures {
-  const w = window as typeof window & { __e2eMockFailures?: E2EMockFailures };
-  w.__e2eMockFailures ??= {};
-  return w.__e2eMockFailures;
+/** Use up one injected failure of this kind; true if there was one left. */
+function consumeE2EMockFailure(kind: keyof E2EMockFailures): boolean {
+  const failures = (window as typeof window & { __e2eMockFailures?: E2EMockFailures }).__e2eMockFailures;
+  const remaining = failures?.[kind] ?? 0;
+  if (!failures || remaining <= 0) return false;
+  failures[kind] = remaining - 1;
+  return true;
 }
 
-const mockImportFailure = () => new TypeError('Importing a module script failed.');
+function mockImportFailure(): TypeError {
+  return new TypeError('Importing a module script failed.');
+}
 
-// The real retrying loader around a fake import, so the e2e suite exercises
-// its retries and error.
-const loadE2EMockPlatform = createChunkLoader('evo-sdk', null, async () => {
-  const failures = e2eMockFailures();
-  if ((failures.sdkLoadFailures ?? 0) > 0) {
-    failures.sdkLoadFailures! -= 1;
-    throw mockImportFailure();
-  }
+// The real retrying loader around a fake SDK import, so the e2e suite
+// exercises its retries and error.
+const loadE2EMockSdk = createChunkLoader('evo-sdk', null, async () => {
+  if (consumeE2EMockFailure('sdkLoadFailures')) throw mockImportFailure();
   return {};
 });
 
 async function runE2EMockSubmission(): Promise<void> {
   await delay(120);
-  const failures = e2eMockFailures();
-  if ((failures.submissionFailures ?? 0) > 0) {
-    failures.submissionFailures! -= 1;
-    throw new ChunkLoadError('evo-sdk', 3, mockImportFailure());
+  if (consumeE2EMockFailure('submissionFailures')) {
+    throw new ChunkLoadError('evo-sdk', CHUNK_LOAD_ATTEMPTS, mockImportFailure());
   }
 }
 
@@ -1185,9 +1185,9 @@ function setupEventListeners(container: HTMLElement) {
 
   // Retry the Platform submission with the lock already received (offered on
   // the error screen when the submission failed after the lock arrived)
-  const retryRegistrationBtn = container.querySelector('#retry-registration-btn');
-  if (retryRegistrationBtn) {
-    retryRegistrationBtn.addEventListener('click', () => {
+  const retrySubmissionBtn = container.querySelector('#retry-registration-btn');
+  if (retrySubmissionBtn) {
+    retrySubmissionBtn.addEventListener('click', () => {
       void retryPlatformSubmission();
     });
   }

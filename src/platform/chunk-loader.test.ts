@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ChunkLoadError, cacheBustedUrl, createChunkLoader, isChunkLoadError } from './chunk-loader.js';
+import { ChunkLoadError, cacheBustedUrl, createChunkLoader } from './chunk-loader.js';
 
 const noSleep = { sleep: async () => {} };
 
@@ -77,7 +77,6 @@ describe('createChunkLoader', () => {
     }, noSleep);
 
     const error = await loader().catch((e: unknown) => e);
-    expect(isChunkLoadError(error)).toBe(true);
     expect(error).toBeInstanceOf(ChunkLoadError);
     expect((error as ChunkLoadError).chunk).toBe('evo-sdk');
     expect((error as ChunkLoadError).attempts).toBe(3);

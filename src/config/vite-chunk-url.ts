@@ -16,8 +16,8 @@ import type { Plugin } from 'vite';
  * module that is statically imported elsewhere would be split out of the
  * chunk it lives in now.
  */
-export const CHUNK_URL_PREFIX = 'virtual:chunk-url:';
-const RESOLVED_PREFIX = '\0virtual:chunk-url:';
+const CHUNK_URL_PREFIX = 'virtual:chunk-url:';
+const RESOLVED_PREFIX = '\0' + CHUNK_URL_PREFIX;
 // The dev server and vitest serve modules unbundled: there is no chunk to
 // name. One id for all, which also keeps target paths out of dev request URLs.
 const RESOLVED_DEV_ID = '\0virtual:chunk-url-dev';

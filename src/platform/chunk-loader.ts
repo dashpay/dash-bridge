@@ -24,19 +24,16 @@ export class ChunkLoadError extends Error {
   }
 }
 
-export function isChunkLoadError(error: unknown): error is ChunkLoadError {
-  return error instanceof ChunkLoadError;
-}
-
-export interface ChunkLoaderOptions {
-  /** Delay before each retry; its length + 1 is the attempt count. */
-  retryDelaysMs?: readonly number[];
+interface ChunkLoaderOptions {
+  /** Overridable for tests. */
   sleep?: (ms: number) => Promise<void>;
   /** Imports a URL (overridable for tests). */
   importUrl?: (url: string) => Promise<unknown>;
 }
 
-export const CHUNK_RETRY_DELAYS_MS = [500, 1500] as const;
+/** Delay before each retry. */
+const RETRY_DELAYS_MS = [500, 1500] as const;
+export const CHUNK_LOAD_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const defaultImportUrl = (url: string) => import(/* @vite-ignore */ url);
@@ -66,25 +63,22 @@ export function createChunkLoader<T>(
   load: () => Promise<T>,
   options: ChunkLoaderOptions = {}
 ): () => Promise<T> {
-  const retryDelays = options.retryDelaysMs ?? CHUNK_RETRY_DELAYS_MS;
   const sleep = options.sleep ?? defaultSleep;
   const importUrl = options.importUrl ?? defaultImportUrl;
-  const attempts = retryDelays.length + 1;
 
   const loadWithRetries = async (): Promise<T> => {
-    let lastError: unknown;
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      if (attempt > 0) await sleep(retryDelays[attempt - 1]);
+    for (let attempt = 0; ; attempt++) {
       try {
         if (attempt === 0 || !chunkUrl) return await load();
         return (await importUrl(cacheBustedUrl(chunkUrl, attempt))) as T;
       } catch (error) {
-        lastError = error;
-        const next = attempt + 1 < attempts ? `; retrying in ${retryDelays[attempt]} ms` : '';
-        console.warn(`Chunk "${chunk}" failed to load (attempt ${attempt + 1}/${attempts})${next}:`, error);
+        const retryDelay: number | undefined = RETRY_DELAYS_MS[attempt];
+        const retrying = retryDelay === undefined ? '' : `; retrying in ${retryDelay} ms`;
+        console.warn(`Chunk "${chunk}" failed to load (attempt ${attempt + 1}/${CHUNK_LOAD_ATTEMPTS})${retrying}:`, error);
+        if (retryDelay === undefined) throw new ChunkLoadError(chunk, CHUNK_LOAD_ATTEMPTS, error);
+        await sleep(retryDelay);
       }
     }
-    throw new ChunkLoadError(chunk, attempts, lastError);
   };
 
   let promise: Promise<T> | null = null;

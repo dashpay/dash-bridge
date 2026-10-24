@@ -39,14 +39,9 @@ export function warmDashModules(): Promise<PromiseSettledResult<unknown>[]> {
 }
 
 /**
- * Load everything a Platform submission needs (the EvoSDK chunk and the
- * platform operations chunk) before a funding flow shows its deposit address.
- * Once funds are committed the submission must not depend on a download, which
- * can fail (e.g. iOS suspends a backgrounded tab's network while the user pays
- * from a wallet app) and, once failed, is remembered by the browser.
- *
- * Every network: registration needs the SDK everywhere. Rejects with a
- * ChunkLoadError when a chunk still fails after the loaders' retries.
+ * Load the chunks a Platform submission needs (EvoSDK and platform
+ * operations), for the funding gate in main.ts. Rejects with a ChunkLoadError
+ * when a chunk still fails after the loaders' retries.
  */
 export async function loadPlatformForFunding(): Promise<void> {
   await Promise.all([loadSdkModule(), loadPlatformModule()]);

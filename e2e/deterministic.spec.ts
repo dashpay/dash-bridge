@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { bech32m } from '@scure/base';
 import {
   E2E_MOCK_DPNS_WIF,
@@ -11,6 +11,21 @@ import {
 } from '../src/e2e-mock-constants';
 
 const MOCK_QUERY = '/?network=testnet&e2e=mock';
+
+/** Failure injection read by the mock flows (E2EMockFailures in src/main.ts). */
+function injectMockFailures(page: Page, failures: { sdkLoadFailures?: number; submissionFailures?: number }) {
+  return page.addInitScript((f) => {
+    (window as { __e2eMockFailures?: typeof f }).__e2eMockFailures = f;
+  }, failures);
+}
+
+/** Pretend the deposit arrived (the mock flows wait for this hook). */
+async function advanceMockDeposit(page: Page) {
+  await expect.poll(async () => {
+    return page.evaluate(() => typeof (window as { __e2eMockAdvance?: () => void }).__e2eMockAdvance);
+  }).toBe('function');
+  await page.evaluate(() => (window as { __e2eMockAdvance?: () => void }).__e2eMockAdvance?.());
+}
 
 test.describe('Deterministic UI E2E (mock mode)', () => {
   test('testnet discovers evonodes from the quorum service, never calls digitalcash.dev and does not load the SDK for the health poll', async ({ page }) => {
@@ -88,23 +103,12 @@ test.describe('Deterministic UI E2E (mock mode)', () => {
   });
 
   test.describe('Platform component gate before funding', () => {
-    const injectFailures = (page: import('@playwright/test').Page, failures: Record<string, number>) =>
-      page.addInitScript((f) => {
-        (window as { __e2eMockFailures?: Record<string, number> }).__e2eMockFailures = f;
-      }, failures);
-    const advance = async (page: import('@playwright/test').Page) => {
-      await expect.poll(async () => {
-        return page.evaluate(() => typeof (window as { __e2eMockAdvance?: () => void }).__e2eMockAdvance);
-      }).toBe('function');
-      await page.evaluate(() => (window as { __e2eMockAdvance?: () => void }).__e2eMockAdvance?.());
-    };
-
     test('a dropped SDK download is retried and the flow reaches the deposit address', async ({ page }) => {
       const warnings: string[] = [];
       page.on('console', (msg) => {
         if (msg.type() === 'warning') warnings.push(msg.text());
       });
-      await injectFailures(page, { sdkLoadFailures: 2 });
+      await injectMockFailures(page, { sdkLoadFailures: 2 });
       await page.goto(MOCK_QUERY);
       await page.click('#mode-create-btn');
       await page.click('#continue-btn');
@@ -117,7 +121,7 @@ test.describe('Deterministic UI E2E (mock mode)', () => {
 
     for (const flow of ['create', 'topup'] as const) {
       test(`${flow}: an SDK that cannot load stops the flow before any deposit address, with Reload`, async ({ page }) => {
-        await injectFailures(page, { sdkLoadFailures: 3 });
+        await injectMockFailures(page, { sdkLoadFailures: 3 });
         await page.goto(MOCK_QUERY);
         if (flow === 'create') {
           await page.click('#mode-create-btn');
@@ -144,12 +148,12 @@ test.describe('Deterministic UI E2E (mock mode)', () => {
     }
 
     test('registration failing after the lock arrived says so, and Retry Registration completes it', async ({ page }) => {
-      await injectFailures(page, { submissionFailures: 1 });
+      await injectMockFailures(page, { submissionFailures: 1 });
       await page.goto(MOCK_QUERY);
       await page.click('#mode-create-btn');
       await page.click('#continue-btn');
       await expect(page.locator('.deposit-headline')).toBeVisible();
-      await advance(page);
+      await advanceMockDeposit(page);
 
       const errorStep = page.locator('.error-step');
       await expect(page.locator('.error-code-badge')).toHaveText('ERR-1006');
@@ -163,14 +167,14 @@ test.describe('Deterministic UI E2E (mock mode)', () => {
     });
 
     test('top-up failing after the lock arrived offers Retry Top-up, which completes it', async ({ page }) => {
-      await injectFailures(page, { submissionFailures: 1 });
+      await injectMockFailures(page, { submissionFailures: 1 });
       await page.goto(MOCK_QUERY);
       await page.click('#mode-manage-btn');
       await page.click('#manage-action-topup-btn');
       await page.fill('#identity-id-input', E2E_MOCK_IDENTITY_ID);
       await page.click('#continue-topup-btn');
       await expect(page.locator('.deposit-headline')).toBeVisible();
-      await advance(page);
+      await advanceMockDeposit(page);
 
       await expect(page.locator('.error-code-badge')).toHaveText('ERR-1007');
       await expect(page.locator('#retry-registration-btn')).toHaveText('Retry Top-up');
