@@ -395,6 +395,7 @@ export class DAPISubscriptionClient {
     signal?: AbortSignal
   ): Promise<{ wait: () => Promise<Uint8Array> }> {
     const initialCount = initialClients.length;
+    const subscribedAt = Date.now();
     const unadopted = new Set(initialClients.filter(Boolean));
     onProgress?.(`Subscribing from block ${fromBlockHeight} on ${initialCount} nodes...`);
 
@@ -482,7 +483,11 @@ export class DAPISubscriptionClient {
               if (settled) return;
               markReady();
               const bytes = this.findMatchingLock(response, txid, onProgress);
-              if (bytes) finish(() => resolve(bytes));
+              if (!bytes) return;
+              console.log(
+                `[islock-sub] IS lock for ${txid} from ${address.host}:${address.port} after ${Date.now() - subscribedAt} ms since subscribe`
+              );
+              finish(() => resolve(bytes));
             });
             // Listeners stay attached after cancel(): Node gRPC streams emit
             // 'error' on cancel, which would throw if nothing were listening.

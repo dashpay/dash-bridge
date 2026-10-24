@@ -214,6 +214,23 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
     for (const node of nodes) expect(node.disconnect).toHaveBeenCalled();
   });
 
+  it('logs which node delivered the lock and how long it took', async () => {
+    const log = vi.spyOn(console, 'log');
+    const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(3) });
+    const sub = await startReady(client);
+    await vi.advanceTimersByTimeAsync(250);
+
+    const winner = nodeClients()[1];
+    winner.streams[0].emit('data', lockMessage(TXID));
+    await sub.wait();
+
+    const host = winner.options.dapiAddresses[0].host;
+    const lines = log.mock.calls.map((call) => String(call[0]));
+    expect(lines.filter((line) => line.startsWith('[islock-sub] IS lock for'))).toEqual([
+      `[islock-sub] IS lock for ${TXID} from ${host}:1443 after 250 ms since subscribe`,
+    ]);
+  });
+
   it('treats a stream ending before a lock as a failure and replaces it', async () => {
     const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(4) });
     const sub = await startReady(client);
