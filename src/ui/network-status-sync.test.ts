@@ -145,12 +145,28 @@ describe('createNetworkStatusSync', () => {
     });
   });
 
-  it('after reset(), the next poll renders even with an unchanged verdict', () => {
-    ctx.sync.apply('testnet', status());
-    ctx.sync.reset();
-    ctx.updateState.mockClear();
+  it('ignores a poll result for a network the user already left', () => {
+    ctx.state = { ...createInitialState('mainnet'), networkStatus: undefined };
 
+    ctx.sync.apply('testnet', status({ health: 'stalled', reasons: ['Latest Platform block is 20m old'] }));
+
+    expect(ctx.updateState).not.toHaveBeenCalled();
+    expect(ctx.refreshTooltip).not.toHaveBeenCalled();
+    expect(ctx.state.networkStatus).toBeUndefined();
+    expect(ctx.sync.carryOver(createInitialState('mainnet')).networkStatus).toBeUndefined();
+  });
+
+  it('compares with the verdict on screen, so a state replaced with a stale status gets corrected', () => {
     ctx.sync.apply('testnet', status());
+    const degraded = status({ health: 'degraded', reasons: ['Insight (Core) unreachable'] });
+    ctx.sync.apply('testnet', degraded);
+    ctx.updateState.mockClear();
+    // A flow captured the state before the verdict changed and writes it back.
+    ctx.state = { ...ctx.state, networkStatus: status() };
+
+    ctx.sync.apply('testnet', degraded);
+
     expect(ctx.updateState).toHaveBeenCalledOnce();
+    expect(ctx.state.networkStatus).toBe(degraded);
   });
 });

@@ -395,7 +395,10 @@ function switchNetwork(network: string): void {
   if (islockService) {
     islockService.disconnect().catch((err) => console.warn('Error disconnecting IslockService:', err));
   }
-  updateState(setNetwork(state, network));
+  // The previous network's health snapshot must not sit under the new network's
+  // badge until the next poll; the old poller's late results are ignored (see
+  // createNetworkStatusSync.apply).
+  updateState({ ...setNetwork(state, network), networkStatus: undefined });
   syncSmartAppBanner(document, network);
   clientInitPromise = undefined;
   warmupScheduled = false;

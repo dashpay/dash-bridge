@@ -171,6 +171,7 @@ export async function fetchNetworkStatus(
     platformBlockTimeMs,
     chainLockLag,
     platformBlockAgeMs,
+    ...(platformNotChecked ? { platformChecked: false as const } : {}),
     reasons,
     checkedAtMs,
   };

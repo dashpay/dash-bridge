@@ -53,6 +53,7 @@ function networkStatusTooltip(status: NetworkStatus): string {
     tip.push(`Platform block: ${status.platformBlockHeight}`);
   if (status.platformBlockAgeMs !== undefined)
     tip.push(`Platform block age: ${formatAge(status.platformBlockAgeMs)}`);
+  if (status.platformChecked === false) tip.push('Platform status: not read yet');
   if (status.reasons.length) tip.push('', ...status.reasons);
   return tip.join('\n');
 }

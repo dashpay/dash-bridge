@@ -37,18 +37,18 @@ function verdictKey(status: NetworkStatus): string {
  */
 export function createNetworkStatusSync(deps: NetworkStatusSyncDeps): NetworkStatusSync {
   let last: { network: string; status: NetworkStatus } | undefined;
-  let lastKey: string | undefined;
 
   return {
     apply(network, status) {
-      last = { network, status };
-      const key = verdictKey(status);
-      const verdictChanged = key !== lastKey;
-      lastKey = key;
-
       const state = deps.getState();
-      // Also render when the state has no status at all: nothing is on screen to patch.
-      if (verdictChanged || !state.networkStatus) {
+      // A poller of a network the user already left must not write into the new one.
+      if (network !== state.network) return;
+      last = { network, status };
+
+      // Compare with what is on screen (the state), not with the previous poll:
+      // the state may have been replaced in between.
+      const shown = state.networkStatus;
+      if (!shown || verdictKey(shown) !== verdictKey(status)) {
         deps.updateState({ ...state, networkStatus: status });
         return;
       }
@@ -63,7 +63,6 @@ export function createNetworkStatusSync(deps: NetworkStatusSyncDeps): NetworkSta
 
     reset() {
       last = undefined;
-      lastKey = undefined;
     },
   };
 }

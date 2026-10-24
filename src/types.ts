@@ -322,6 +322,11 @@ export interface NetworkStatus {
   chainLockLag?: number;
   /** now − platformBlockTimeMs, when known. */
   platformBlockAgeMs?: number;
+  /**
+   * `false` when Platform status was deliberately not read (testnet, EvoSDK not
+   * loaded yet), so the verdict covers Core only. Absent when it was read.
+   */
+  platformChecked?: false;
   /** Human-readable explanations for a degraded/stalled verdict. */
   reasons: string[];
   /** When this snapshot was taken, ms since epoch. */

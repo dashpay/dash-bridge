@@ -155,6 +155,10 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
     expect(shared.core.getBestBlockHeight).not.toHaveBeenCalled();
     for (const node of nodes) {
       expect(node.core.getBestBlockHeight).toHaveBeenCalledTimes(1);
+      expect(node.core.getBestBlockHeight).toHaveBeenCalledWith({
+        retries: 0,
+        timeout: ISLOCK_HEIGHT_TIMEOUT_MS,
+      });
       expect(node.core.subscribeToTransactionsWithProofs).toHaveBeenCalledTimes(1);
       expect(node.core.subscribeToTransactionsWithProofs.mock.calls[0][1]).toEqual({
         fromBlockHeight: 90,
@@ -315,6 +319,19 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
       const outcome = expect(pending).rejects.toThrow(/3 nodes tried.*height refused/);
       await flush();
       await outcome;
+    });
+
+    it('stops waiting for heights when the client is disconnected', async () => {
+      for (const host of ['node0.test', 'node1.test', 'node2.test']) state.hungHeightHosts.add(host);
+      const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(3) });
+      const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT);
+      const outcome = expect(pending).rejects.toThrow(`InstantSend lock subscription aborted for ${TXID}`);
+      await flush();
+
+      await client.disconnect(); // e.g. switchNetwork while the height is still pending
+      await outcome;
+      expect(liveStreams()).toHaveLength(0); // no stream opened on the network being left
+      for (const node of nodeClients()) expect(node.disconnect).toHaveBeenCalled();
     });
 
     it('stops waiting for heights when the caller aborts', async () => {

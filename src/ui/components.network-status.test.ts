@@ -35,13 +35,29 @@ describe('network status indicator', () => {
 
   it('shows only the Core height when Platform was not read', () => {
     const container = renderWith(
-      status({ coreChainLockedHeight: undefined, platformBlockHeight: undefined, platformBlockAgeMs: undefined })
+      status({
+        coreChainLockedHeight: undefined,
+        platformBlockHeight: undefined,
+        platformBlockAgeMs: undefined,
+        platformChecked: false,
+      })
     );
 
     const indicator = container.querySelector('.net-status')!;
-    expect(indicator.getAttribute('title')).toBe('Core height: 1578205');
+    expect(indicator.getAttribute('title')).toBe(
+      'Core height: 1578205\nPlatform status: not read yet'
+    );
     expect(indicator.textContent).toContain('Network healthy');
     expect(container.querySelector('.net-status-banner')).toBeNull();
+  });
+
+  it('drops the "not read yet" line once Platform has been read', () => {
+    const container = renderWith(status({ platformChecked: false }));
+    expect(container.querySelector('.net-status')!.getAttribute('title')).toContain('not read yet');
+
+    refreshNetworkStatusTooltip(container, status());
+
+    expect(container.querySelector('.net-status')!.getAttribute('title')).not.toContain('not read yet');
   });
 
   it('refreshNetworkStatusTooltip updates the numbers in place, leaving the element and label alone', () => {

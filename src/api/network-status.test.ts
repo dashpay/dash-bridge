@@ -63,6 +63,7 @@ describe('fetchNetworkStatus (DAPI / devnet path)', () => {
     expect(status.health).toBe('healthy');
     expect(status.chainLockLag).toBe(2);
     expect(status.reasons).toHaveLength(0);
+    expect(status.platformChecked).toBeUndefined();
   });
 
   it('flags stalled when chain-lock lags Core far behind', async () => {
@@ -136,6 +137,7 @@ describe('fetchNetworkStatus (Platform status not read yet)', () => {
     expect(status.coreChainLockedHeight).toBeUndefined();
     expect(status.platformBlockHeight).toBeUndefined();
     expect(status.chainLockLag).toBeUndefined();
+    expect(status.platformChecked).toBe(false);
   });
 
   it('is unknown, not degraded, when Insight fails too', async () => {

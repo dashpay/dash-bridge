@@ -177,7 +177,11 @@ export class DAPISubscriptionClient {
         }, ISLOCK_HEIGHT_TIMEOUT_MS);
         timers.add(timer);
         Promise.resolve()
-          .then(() => client.core.getBestBlockHeight())
+          .then(() =>
+            // retries 0 + a gRPC deadline: no hidden background retries after our own
+            // deadline has already counted this node as failed.
+            client.core.getBestBlockHeight({ retries: 0, timeout: ISLOCK_HEIGHT_TIMEOUT_MS })
+          )
           .then((height: unknown) => {
             if (answered) return;
             answered = true;
@@ -264,12 +268,22 @@ export class DAPISubscriptionClient {
       const clients = nodes
         .slice(0, ISLOCK_CONCURRENT_NODES)
         .map((address) => this.tryCreateNodeClient(address));
+      // disconnect() (e.g. a network switch) must also stop this wait, or the
+      // streams below would open on the network being left.
+      const raceAbort = new AbortController();
+      const abortRace = (): void => raceAbort.abort();
+      if (signal?.aborted) abortRace();
+      signal?.addEventListener('abort', abortRace, { once: true });
+      this.activeSubscriptions.add(abortRace);
       let currentHeight: number;
       try {
-        currentHeight = await this.raceBestBlockHeight(txid, clients, signal);
+        currentHeight = await this.raceBestBlockHeight(txid, clients, raceAbort.signal);
       } catch (error) {
         for (const client of clients) this.disconnectQuietly(client);
         throw error;
+      } finally {
+        this.activeSubscriptions.delete(abortRace);
+        signal?.removeEventListener('abort', abortRace);
       }
       console.log('[islock-sub] Current block height:', currentHeight);
       return this.subscribeOnMultipleNodes(
