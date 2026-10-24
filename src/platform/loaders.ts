@@ -1,25 +1,30 @@
+import platformChunkUrl from 'virtual:chunk-url:./index.js';
+import dpnsChunkUrl from 'virtual:chunk-url:./dpns.js';
+import contractChunkUrl from 'virtual:chunk-url:./contract.js';
+import usernameTransferChunkUrl from 'virtual:chunk-url:./username-transfer.js';
+import feeEstimatorChunkUrl from 'virtual:chunk-url:dash-contract-fee-estimator';
+import islockChunkUrl from 'virtual:chunk-url:../api/islock.js';
 import { getNetwork } from '../config.js';
+import { createChunkLoader } from './chunk-loader.js';
+import { loadSdkModule } from './sdkModule.js';
 
-export function createCachedLoader<T>(load: () => Promise<T>): () => Promise<T> {
-  let promise: Promise<T> | null = null;
-  return () => {
-    if (!promise) {
-      promise = load().catch((err) => {
-        promise = null;
-        throw err;
-      });
-    }
-    return promise;
-  };
-}
-
-export const loadPlatformModule = createCachedLoader(() => import('./index.js'));
-export const loadDpnsModule = createCachedLoader(() => import('./dpns.js'));
-export const loadContractModule = createCachedLoader(() => import('./contract.js'));
-export const loadUsernameTransferModule = createCachedLoader(() => import('./username-transfer.js'));
-export const loadPlatformClientModule = createCachedLoader(() => import('./client.js'));
-export const loadFeeEstimatorModule = createCachedLoader(() => import('dash-contract-fee-estimator'));
-export const loadIslockModule = createCachedLoader(() => import('../api/islock.js'));
+export const loadPlatformModule = createChunkLoader('platform', platformChunkUrl, () => import('./index.js'));
+export const loadDpnsModule = createChunkLoader('dpns', dpnsChunkUrl, () => import('./dpns.js'));
+export const loadContractModule = createChunkLoader('contract', contractChunkUrl, () => import('./contract.js'));
+export const loadUsernameTransferModule = createChunkLoader(
+  'username-transfer',
+  usernameTransferChunkUrl,
+  () => import('./username-transfer.js')
+);
+// client.ts is statically imported by other platform modules, so it lives in
+// the main chunk and this import never fetches anything: no chunk URL needed.
+export const loadPlatformClientModule = createChunkLoader('platform-client', null, () => import('./client.js'));
+export const loadFeeEstimatorModule = createChunkLoader(
+  'fee-estimator',
+  feeEstimatorChunkUrl,
+  () => import('dash-contract-fee-estimator')
+);
+export const loadIslockModule = createChunkLoader('islock', islockChunkUrl, () => import('../api/islock.js'));
 
 export function warmDashModules(): Promise<PromiseSettledResult<unknown>[]> {
   return Promise.allSettled([
@@ -31,6 +36,20 @@ export function warmDashModules(): Promise<PromiseSettledResult<unknown>[]> {
     loadFeeEstimatorModule(),
     loadIslockModule(),
   ]);
+}
+
+/**
+ * Load everything a Platform submission needs (the EvoSDK chunk and the
+ * platform operations chunk) before a funding flow shows its deposit address.
+ * Once funds are committed the submission must not depend on a download, which
+ * can fail (e.g. iOS suspends a backgrounded tab's network while the user pays
+ * from a wallet app) and, once failed, is remembered by the browser.
+ *
+ * Every network: registration needs the SDK everywhere. Rejects with a
+ * ChunkLoadError when a chunk still fails after the loaders' retries.
+ */
+export async function loadPlatformForFunding(): Promise<void> {
+  await Promise.all([loadSdkModule(), loadPlatformModule()]);
 }
 
 /**
