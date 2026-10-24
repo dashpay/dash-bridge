@@ -87,6 +87,98 @@ test.describe('Deterministic UI E2E (mock mode)', () => {
     await expect(page.getByText('Registration Complete!')).toBeVisible();
   });
 
+  test.describe('Platform component gate before funding', () => {
+    const injectFailures = (page: import('@playwright/test').Page, failures: Record<string, number>) =>
+      page.addInitScript((f) => {
+        (window as { __e2eMockFailures?: Record<string, number> }).__e2eMockFailures = f;
+      }, failures);
+    const advance = async (page: import('@playwright/test').Page) => {
+      await expect.poll(async () => {
+        return page.evaluate(() => typeof (window as { __e2eMockAdvance?: () => void }).__e2eMockAdvance);
+      }).toBe('function');
+      await page.evaluate(() => (window as { __e2eMockAdvance?: () => void }).__e2eMockAdvance?.());
+    };
+
+    test('a dropped SDK download is retried and the flow reaches the deposit address', async ({ page }) => {
+      const warnings: string[] = [];
+      page.on('console', (msg) => {
+        if (msg.type() === 'warning') warnings.push(msg.text());
+      });
+      await injectFailures(page, { sdkLoadFailures: 2 });
+      await page.goto(MOCK_QUERY);
+      await page.click('#mode-create-btn');
+      await page.click('#continue-btn');
+
+      // The retries' backoff (0.5 + 1.5 s) keeps the gate on screen.
+      await expect(page.locator('.preparing-step')).toContainText('Preparing…');
+      await expect(page.locator('.deposit-headline')).toBeVisible();
+      expect(warnings.filter((w) => w.includes('Chunk "evo-sdk" failed to load'))).toHaveLength(2);
+    });
+
+    for (const flow of ['create', 'topup'] as const) {
+      test(`${flow}: an SDK that cannot load stops the flow before any deposit address, with Reload`, async ({ page }) => {
+        await injectFailures(page, { sdkLoadFailures: 3 });
+        await page.goto(MOCK_QUERY);
+        if (flow === 'create') {
+          await page.click('#mode-create-btn');
+          await page.click('#continue-btn');
+        } else {
+          await page.click('#mode-manage-btn');
+          await page.click('#manage-action-topup-btn');
+          await page.fill('#identity-id-input', E2E_MOCK_IDENTITY_ID);
+          await page.click('#continue-topup-btn');
+        }
+
+        await expect(page.locator('.error-code-badge')).toHaveText('ERR-1017');
+        await expect(page.locator('.error-step')).toContainText('The page failed to load a required component "evo-sdk"');
+        await expect(page.locator('.error-step')).toContainText('No funds have been sent');
+        await expect(page.locator('.deposit-headline')).toHaveCount(0);
+        await expect(page.locator('#download-keys-btn')).toHaveCount(0);
+        await page.locator('.error-technical summary').click();
+        await expect(page.locator('.error-technical-content')).toContainText('Failed to load: evo-sdk');
+
+        // Reload is safe here: nothing was funded. The reloaded page starts over.
+        await page.click('#reload-page-btn');
+        await expect(page.locator('#mode-create-btn')).toBeVisible();
+      });
+    }
+
+    test('registration failing after the lock arrived says so, and Retry Registration completes it', async ({ page }) => {
+      await injectFailures(page, { submissionFailures: 1 });
+      await page.goto(MOCK_QUERY);
+      await page.click('#mode-create-btn');
+      await page.click('#continue-btn');
+      await expect(page.locator('.deposit-headline')).toBeVisible();
+      await advance(page);
+
+      const errorStep = page.locator('.error-step');
+      await expect(page.locator('.error-code-badge')).toHaveText('ERR-1006');
+      await expect(errorStep).toContainText('the InstantSend lock arrived');
+      await expect(errorStep).not.toContainText("InstantSend didn't go through");
+      await expect(page.locator('#download-keys-btn')).toBeVisible();
+
+      await page.click('#retry-registration-btn');
+      await expect(page.getByText('Save your keys')).toBeVisible();
+      await expect(page.locator('.contract-id-section', { hasText: 'Your Identity ID' }).locator('.identity-id')).toHaveText(E2E_MOCK_IDENTITY_ID);
+    });
+
+    test('top-up failing after the lock arrived offers Retry Top-up, which completes it', async ({ page }) => {
+      await injectFailures(page, { submissionFailures: 1 });
+      await page.goto(MOCK_QUERY);
+      await page.click('#mode-manage-btn');
+      await page.click('#manage-action-topup-btn');
+      await page.fill('#identity-id-input', E2E_MOCK_IDENTITY_ID);
+      await page.click('#continue-topup-btn');
+      await expect(page.locator('.deposit-headline')).toBeVisible();
+      await advance(page);
+
+      await expect(page.locator('.error-code-badge')).toHaveText('ERR-1007');
+      await expect(page.locator('#retry-registration-btn')).toHaveText('Retry Top-up');
+      await page.click('#retry-registration-btn');
+      await expect(page.getByText('Top-up complete!')).toBeVisible();
+    });
+  });
+
   test('top up flow validates identity input and reaches completion', async ({ page }) => {
     await page.goto(MOCK_QUERY);
 

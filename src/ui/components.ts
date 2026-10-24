@@ -1,6 +1,6 @@
 import type { BridgeState, KeyType, KeyPurpose, SecurityLevel, NetworkHealth, NetworkStatus, EmbedNotice, NearIntentsState, NearIntentsSwap } from '../types.js';
 import { canCancel } from '../embed/bridge.js';
-import { getStepProgress, getStepDescription, ErrorCodes, ErrorCodeLabels } from './state.js';
+import { getStepProgress, getStepDescription, getErrorRecovery, ErrorCodes, ErrorCodeLabels } from './state.js';
 import {
   formatUnits,
   formatUnitsShort,
@@ -272,6 +272,10 @@ export function render(state: BridgeState, container: HTMLElement): void {
 
     case 'enter_recipient_address':
       content.appendChild(renderEnterRecipientAddressStep(state));
+      break;
+
+    case 'generating_keys':
+      content.appendChild(renderPreparingStep());
       break;
 
     case 'awaiting_deposit':
@@ -1557,6 +1561,21 @@ function renderNearSwap(swap: NearIntentsSwap): HTMLElement {
   return el;
 }
 
+/**
+ * Shown while a funding flow loads the Platform components it needs before
+ * showing a deposit address (the SDK is several MB, slow on mobile networks).
+ */
+function renderPreparingStep(): HTMLElement {
+  const div = document.createElement('div');
+  div.className = 'processing-step preparing-step';
+  div.innerHTML = `
+    <h2 class="processing-headline">Preparing…</h2>
+    <p class="processing-subtitle">Loading the Dash Platform components needed to finish. Your deposit address appears next.</p>
+    <div class="spinner large"></div>
+  `;
+  return div;
+}
+
 function renderProcessingStep(state: BridgeState): HTMLElement {
   const div = document.createElement('div');
   div.className = 'processing-step';
@@ -1794,6 +1813,8 @@ function buildErrorDiagnostics(state: BridgeState): Record<string, unknown> {
     mode: state.mode,
     timestamp: new Date().toISOString(),
   };
+  const { failedChunk } = getErrorRecovery(state);
+  if (failedChunk) diag.failedChunk = failedChunk;
 
   // Transaction context — critical for tracking on-chain state
   // NOTE: signedTxHex is intentionally excluded — if the error occurred before
@@ -1880,6 +1901,7 @@ function renderErrorStep(state: BridgeState): HTMLElement {
   // Build a concise technical summary from the diagnostic object
   const techLines: string[] = [];
   if (diag.errorStep) techLines.push(`Step: ${diag.errorStep}`);
+  if (diag.failedChunk) techLines.push(`Failed to load: ${diag.failedChunk}`);
   if (diag.depositAddress) techLines.push(`Deposit: ${diag.depositAddress}`);
   if (diag.txid) techLines.push(`TxID: ${diag.txid}`);
   if (diag.identityId) techLines.push(`Identity: ${diag.identityId}`);
@@ -1895,29 +1917,52 @@ function renderErrorStep(state: BridgeState): HTMLElement {
     </details>
   ` : '';
 
+  const recovery = getErrorRecovery(state);
+  const chunkName = recovery.failedChunk ? `"${recovery.failedChunk}" ` : '';
+
+  // Failed while preparing, before any deposit address: nothing is at risk.
+  const reloadHtml = recovery.reloadSafe
+    ? `
+      <div class="error-fallback">
+        <p class="error-fallback-hint">The page failed to load a required component ${escapeHtml(chunkName)}(most likely a network interruption). No funds have been sent. Reload the page to try again.</p>
+        <button id="reload-page-btn" class="primary-btn">Reload</button>
+      </div>
+    `
+    : '';
+
+  const chainlockFallbackHint = recovery.lockReceived
+    ? 'If Platform keeps rejecting the InstantSend proof, you can wait for a chain lock and submit a chain-based proof instead.'
+    : state.errorCode === ErrorCodes.ISLOCK
+      ? "InstantSend didn't go through. You can wait for a chain lock and try again with a chain-based proof instead."
+      : 'You can wait for a chain lock and try again with a chain-based proof instead.';
   const chainlockFallbackHtml = state.chainlockFallbackAvailable
     ? `
       <div class="error-fallback">
-        <p class="error-fallback-hint">InstantSend didn't go through. You can wait for a chain lock and try again with a chain-based proof instead.</p>
+        <p class="error-fallback-hint">${escapeHtml(chainlockFallbackHint)}</p>
         <button id="chainlock-fallback-btn" class="primary-btn">Use chain lock proof instead</button>
       </div>
     `
     : '';
 
-  // An identity registration that was submitted but not confirmed can be
-  // resubmitted safely with the same asset lock proof.
-  const retryRegistrationHtml =
-    state.mode === 'create' &&
-    isIdentityRegistrationUnconfirmedError(state.error) &&
-    state.assetLockProof &&
-    state.assetLockKeyPair
-      ? `
+  // The asset lock can be consumed only once and the identity ID is derived
+  // from it, so resubmitting the proof in state cannot spend the deposit twice.
+  const retryLabel =
+    state.mode === 'topup' ? 'Retry Top-up' : state.mode === 'send_to_address' ? 'Retry Send' : 'Retry Registration';
+  const retryHint = isIdentityRegistrationUnconfirmedError(state.error)
+    ? 'Platform may still be processing your registration. Wait a minute, then retry — it is safe and cannot spend your deposit twice.'
+    : recovery.lockReceived && recovery.failedChunk
+      ? `Your deposit is safe: the InstantSend lock arrived, but the page could not load the ${chunkName}component needed to submit it to Platform (most likely a network interruption). Retry once you are back online — it reuses the same lock and cannot spend your deposit twice.`
+      : recovery.lockReceived
+        ? 'Your deposit is safe: the InstantSend lock arrived, but the Platform step failed. Retrying reuses the same lock and cannot spend your deposit twice.'
+        : 'Retrying reuses the same asset lock proof and cannot spend your deposit twice.';
+  const retryRegistrationHtml = recovery.canRetrySubmission
+    ? `
       <div class="error-fallback">
-        <p class="error-fallback-hint">Platform may still be processing your registration. Wait a minute, then retry — it is safe and cannot spend your deposit twice.</p>
-        <button id="retry-registration-btn" class="primary-btn">Retry Registration</button>
+        <p class="error-fallback-hint">${escapeHtml(retryHint)}</p>
+        <button id="retry-registration-btn" class="primary-btn">${retryLabel}</button>
       </div>
     `
-      : '';
+    : '';
 
   // Once an asset lock key exists, funds may be in flight: keep the
   // recovery backup one click away on every error screen.
@@ -1938,6 +1983,7 @@ function renderErrorStep(state: BridgeState): HTMLElement {
     ${failedStepHtml}
     <p class="error-message">${escapeHtml(errorMessage)}</p>
     ${techDetailsHtml}
+    ${reloadHtml}
     ${retryRegistrationHtml}
     ${chainlockFallbackHtml}
     ${keyBackupHtml}

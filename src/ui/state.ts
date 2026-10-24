@@ -38,6 +38,7 @@ import {
   isIdentityRegistrationUnconfirmedError,
   type IdentityRegistrationUnconfirmedError,
 } from '../platform/identity-confirm.js';
+import { isChunkLoadError } from '../platform/chunk-loader.js';
 import { shouldRecommendMobileApp } from './mobile-app.js';
 
 /**
@@ -63,6 +64,7 @@ export const ErrorCodes = {
   CHAINLOCK:        'ERR-1014',
   WITHDRAW:         'ERR-1015',
   USERNAME_TRANSFER: 'ERR-1016',
+  COMPONENT_LOAD:   'ERR-1017',
 } as const;
 
 /** Human-readable labels for error codes */
@@ -84,6 +86,7 @@ export const ErrorCodeLabels: Record<string, string> = {
   [ErrorCodes.CHAINLOCK]:        'Chain lock fallback failed',
   [ErrorCodes.WITHDRAW]:         'Credit withdrawal failed',
   [ErrorCodes.USERNAME_TRANSFER]: 'Username transfer failed',
+  [ErrorCodes.COMPONENT_LOAD]:   'A required component failed to load',
 };
 
 /** Map a processing step to its error code */
@@ -596,8 +599,58 @@ function computeChainlockFallbackAvailable(
   return false;
 }
 
+/** Error codes of the Platform submission that spends the asset lock. */
+const SUBMISSION_ERROR_CODES: readonly string[] = [
+  ErrorCodes.REGISTER,
+  ErrorCodes.TOPUP,
+  ErrorCodes.SEND_ADDRESS,
+];
+
+/**
+ * A chunk that failed while a funding flow was still preparing (before its
+ * deposit address) gets its own code: nothing is at risk and reloading is safe.
+ */
+function resolveErrorCode(state: BridgeState, error: Error): string {
+  if (isChunkLoadError(error) && state.step === 'generating_keys' && !state.depositAddress) {
+    return ErrorCodes.COMPONENT_LOAD;
+  }
+  return StepErrorCodes[state.step] ?? ErrorCodes.UNKNOWN;
+}
+
+export interface ErrorRecovery {
+  /**
+   * The Platform submission failed while the InstantSend lock had arrived
+   * (its proof is in state): the error screen must not claim InstantSend failed.
+   */
+  lockReceived: boolean;
+  /** The submission can be resubmitted with the asset lock proof in state. */
+  canRetrySubmission: boolean;
+  /** Failed before any deposit address was shown, so reloading the page is safe. */
+  reloadSafe: boolean;
+  /** Name of the lazily loaded chunk that could not be downloaded, if that was the cause. */
+  failedChunk?: string;
+}
+
+/** What the error screen can offer for the current error. */
+export function getErrorRecovery(state: BridgeState): ErrorRecovery {
+  const submissionFailed = SUBMISSION_ERROR_CODES.includes(state.errorCode ?? '');
+  return {
+    lockReceived: submissionFailed && state.assetLockProof?.type === 'instant',
+    // Resubmitting is safe: the asset lock can be consumed only once and the
+    // identity ID is derived from it. Once Platform has consumed it elsewhere
+    // there is nothing left to retry.
+    canRetrySubmission:
+      submissionFailed &&
+      !!state.assetLockProof &&
+      !!state.assetLockKeyPair &&
+      !isAssetLockConsumedElsewhereError(state.error),
+    reloadSafe: state.errorCode === ErrorCodes.COMPONENT_LOAD && !state.depositAddress && !state.txid,
+    failedChunk: isChunkLoadError(state.error) ? state.error.chunk : undefined,
+  };
+}
+
 export function setError(state: BridgeState, error: Error, errorCode?: string): BridgeState {
-  const resolvedCode = errorCode ?? StepErrorCodes[state.step] ?? ErrorCodes.UNKNOWN;
+  const resolvedCode = errorCode ?? resolveErrorCode(state, error);
   const unconfirmed = isIdentityRegistrationUnconfirmedError(error);
   return {
     ...state,
@@ -606,10 +659,8 @@ export function setError(state: BridgeState, error: Error, errorCode?: string): 
     errorCode: resolvedCode,
     errorStep: state.step,
     // Both errors mean the deposit's asset lock already reached Platform, so
-    // a chain-lock proof for the same asset lock can't change the outcome
-    // (and the fallback's "InstantSend didn't go through" hint would be
-    // wrong). Unconfirmed → Retry Registration; consumed elsewhere → nothing
-    // to retry.
+    // a chain-lock proof for the same asset lock can't change the outcome.
+    // Unconfirmed → Retry Registration; consumed elsewhere → nothing to retry.
     chainlockFallbackAvailable:
       !unconfirmed &&
       !isAssetLockConsumedElsewhereError(error) &&
