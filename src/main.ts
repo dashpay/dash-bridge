@@ -47,11 +47,11 @@ import {
   setDepositTimedOut,
   setDepositVerificationFailed,
   setNetwork,
-  setNetworkStatus,
   updateIdentityKey,
   addIdentityKey,
   removeIdentityKey,
   render,
+  refreshNetworkStatusTooltip,
   renderEmbedNotice,
   downloadKeyBackup,
   // DPNS state functions
@@ -190,6 +190,7 @@ import {
   type NearQuoteRequest,
 } from './api/near-intents.js';
 import { pollNearSwap } from './ui/near-swap-poll.js';
+import { createNetworkStatusSync } from './ui/network-status-sync.js';
 import { isContestedUsername } from './platform/dpns.js';
 import {
   findMatchingKeyIndex,
@@ -346,7 +347,14 @@ function preloadDashWarmup(): void {
 const NETWORK_STATUS_POLL_MS = 30_000;
 let networkStatusTimer: ReturnType<typeof setInterval> | undefined;
 let networkStatusGeneration = 0;
-let lastNetworkStatusKey: string | undefined;
+const networkStatusSync = createNetworkStatusSync({
+  getState: () => state,
+  setStateQuietly: (next) => {
+    state = next;
+  },
+  updateState: (next) => updateState(next),
+  refreshTooltip: (status) => refreshNetworkStatusTooltip(document, status),
+});
 
 function stopNetworkStatusPolling(): void {
   if (networkStatusTimer !== undefined) {
@@ -355,7 +363,7 @@ function stopNetworkStatusPolling(): void {
   }
   // Bump the generation so any in-flight fetch result is ignored.
   networkStatusGeneration += 1;
-  lastNetworkStatusKey = undefined;
+  networkStatusSync.reset();
 }
 
 function startNetworkStatusPolling(): void {
@@ -364,6 +372,7 @@ function startNetworkStatusPolling(): void {
   const generation = networkStatusGeneration;
   const insight = insightClient;
   const islock = islockService;
+  const network = state.network;
 
   const poll = async (): Promise<void> => {
     try {
@@ -371,10 +380,7 @@ function startNetworkStatusPolling(): void {
       // Ignore results from a superseded network/client.
       if (generation !== networkStatusGeneration) return;
 
-      const key = `${status.health}|${status.reasons.join('|')}`;
-      if (key === lastNetworkStatusKey) return;
-      lastNetworkStatusKey = key;
-      updateState(setNetworkStatus(state, status));
+      networkStatusSync.apply(network, status);
     } catch (err) {
       console.warn('Network status poll failed:', err);
     }
@@ -719,7 +725,8 @@ async function parseAndEstimateContract(json: unknown) {
 function updateState(newState: BridgeState) {
   const prevState = state;
   const previousStep = prevState?.step;
-  state = applyEmbed(newState);
+  // A flow reset builds a fresh state without the health snapshot; keep the last one.
+  state = applyEmbed(networkStatusSync.carryOver(newState));
   const container = document.getElementById('app');
   // Embed request cancelled or expired: the flow UI stays replaced.
   if (embedSession?.notice) {

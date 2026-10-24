@@ -1,4 +1,4 @@
-import type { BridgeState, KeyType, KeyPurpose, SecurityLevel, NetworkHealth, EmbedNotice, NearIntentsState, NearIntentsSwap } from '../types.js';
+import type { BridgeState, KeyType, KeyPurpose, SecurityLevel, NetworkHealth, NetworkStatus, EmbedNotice, NearIntentsState, NearIntentsSwap } from '../types.js';
 import { canCancel } from '../embed/bridge.js';
 import { getStepProgress, getStepDescription, ErrorCodes, ErrorCodeLabels } from './state.js';
 import {
@@ -43,6 +43,28 @@ const NETWORK_HEALTH_META: Record<
   unknown: { label: 'Status unknown', dotClass: 'unknown' },
 };
 
+/** The indicator's `title` tooltip: the numbers behind the verdict. */
+function networkStatusTooltip(status: NetworkStatus): string {
+  const tip: string[] = [];
+  if (status.coreHeight !== undefined) tip.push(`Core height: ${status.coreHeight}`);
+  if (status.coreChainLockedHeight !== undefined)
+    tip.push(`Platform chain-locked: ${status.coreChainLockedHeight}`);
+  if (status.platformBlockHeight !== undefined)
+    tip.push(`Platform block: ${status.platformBlockHeight}`);
+  if (status.platformBlockAgeMs !== undefined)
+    tip.push(`Platform block age: ${formatAge(status.platformBlockAgeMs)}`);
+  if (status.reasons.length) tip.push('', ...status.reasons);
+  return tip.join('\n');
+}
+
+/**
+ * Update the indicator's tooltip numbers without re-rendering the page. Only
+ * valid while the verdict (dot color, label) is unchanged.
+ */
+export function refreshNetworkStatusTooltip(root: ParentNode, status: NetworkStatus): void {
+  root.querySelector('.net-status')?.setAttribute('title', networkStatusTooltip(status));
+}
+
 /**
  * Compact header indicator: a colored dot + short label reflecting overall
  * network health. Hidden until the first status snapshot arrives. The full
@@ -53,17 +75,7 @@ function renderNetworkStatusIndicator(state: BridgeState): string {
   if (!status) return '';
   const meta = NETWORK_HEALTH_META[status.health];
 
-  const tip: string[] = [];
-  if (status.coreHeight !== undefined) tip.push(`Core height: ${status.coreHeight}`);
-  if (status.coreChainLockedHeight !== undefined)
-    tip.push(`Platform chain-locked: ${status.coreChainLockedHeight}`);
-  if (status.platformBlockHeight !== undefined)
-    tip.push(`Platform block: ${status.platformBlockHeight}`);
-  if (status.platformBlockAgeMs !== undefined)
-    tip.push(`Platform block age: ${formatAge(status.platformBlockAgeMs)}`);
-  if (status.reasons.length) tip.push('', ...status.reasons);
-
-  return `<span class="net-status ${meta.dotClass}" title="${escapeAttr(tip.join('\n'))}">
+  return `<span class="net-status ${meta.dotClass}" title="${escapeAttr(networkStatusTooltip(status))}">
     <span class="net-status-dot"></span>${escapeHtml(meta.label)}
   </span>`;
 }

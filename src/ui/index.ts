@@ -164,6 +164,7 @@ export { generateQRCodeDataUrl, createQRCodeElement, renderQRCodeToCanvas } from
 
 export {
   render,
+  refreshNetworkStatusTooltip,
   renderEmbedNotice,
   nearChainName,
   createKeyBackup,
