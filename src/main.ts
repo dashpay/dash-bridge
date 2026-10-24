@@ -14,6 +14,7 @@ import { InsightClient, isAmbiguousBroadcastError } from './api/insight.js';
 import type { IslockService } from './api/islock.js';
 import { fetchNetworkStatus } from './api/network-status.js';
 import { DAPIClient } from './api/dapi.js';
+import { resolveDapiAddresses } from './api/evonodes.js';
 import { buildInstantAssetLockProof, buildChainAssetLockProof } from './proof/index.js';
 import { bech32m } from '@scure/base';
 import { privateKeyToWif, bytesToHex, abortableSleep } from './utils/index.js';
@@ -286,11 +287,16 @@ let warmupStarted = false;
 async function initClients(network: string): Promise<void> {
   const config = getNetwork(network);
   insightClient = new InsightClient(config);
-  const { IslockService } = await loadIslockModule();
+  // Testnet evonodes (and their certificates) rotate within days, so use the
+  // live list; the static one in config.ts is the fallback.
+  const [{ IslockService }, dapiAddresses] = await Promise.all([
+    loadIslockModule(),
+    resolveDapiAddresses(config),
+  ]);
   islockService = new IslockService({
     network,
     rpcUrl: config.rpcUrl,
-    dapiAddresses: config.dapiAddresses,
+    dapiAddresses,
   });
   startNetworkStatusPolling();
 }

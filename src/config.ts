@@ -47,9 +47,15 @@ export const TESTNET: NetworkConfig = {
   // No rpcUrl: trpc.digitalcash.dev is stuck on Core v23 and has no IS locks
   // past the V24 fork (block 1,578,000). IS locks come from the DAPI bloom
   // stream instead. Explicit addresses skip dapi-client's seed/SML discovery,
-  // which can't parse V24 CbTx v4 coinbases. Snapshot (2026-10-23) of ENABLED
-  // evonodes whose DAPI version check passed, with an IP-valid TLS cert and a
-  // CORS preflight that reflects the request origin.
+  // which can't parse V24 CbTx v4 coinbases.
+  //
+  // This list is only the FALLBACK: at client init the app fetches the live
+  // evonode list from the quorum service (see api/evonodes.ts) because nodes
+  // and their certificates rotate within days. Snapshot (2026-10-23) of
+  // ENABLED evonodes whose DAPI version check passed, each with an IP-valid
+  // TLS cert and a CORS preflight that reflects the request origin. To
+  // regenerate (candidates still need the cert/CORS check above):
+  //   curl -s https://quorums.testnet.networks.dash.org/masternodes | jq -r '.data | map(select(.status=="ENABLED" and .versionCheck=="success") | .address | sub(":[0-9]+$"; "")) | .[]'
   dapiAddresses: [
     'https://68.67.122.1:1443',
     'https://68.67.122.2:1443',
@@ -65,7 +71,12 @@ export const TESTNET: NetworkConfig = {
     'https://68.67.122.12:1443',
     'https://85.209.243.1:1443',
     'https://85.209.243.2:1443',
-    'https://87.229.22.126:1443',
+    'https://85.209.243.3:1443',
+    'https://85.209.243.4:1443',
+    'https://85.209.243.5:1443',
+    'https://85.209.243.6:1443',
+    'https://85.209.243.7:1443',
+    'https://206.245.167.63:1443',
   ],
 };
 
