@@ -114,6 +114,16 @@ export async function connectPlatformSdk(
   return pending;
 }
 
+/**
+ * Whether the SDK for `network` is already loaded and connected. Never loads
+ * or connects anything, so passive readers (the health poll) can use an SDK
+ * that something else brought up without triggering the multi-megabyte
+ * download themselves.
+ */
+export function hasConnectedPlatformSdk(network: PlatformNetwork): boolean {
+  return sdkCache.get(network)?.isConnected === true;
+}
+
 export function disconnectPlatformSdk(network: PlatformNetwork): void {
   sdkCache.delete(network);
 }

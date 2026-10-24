@@ -40,14 +40,16 @@ export async function fetchNetworkStatus(
   //     we deliberately avoid it.
   //   - testnet/devnets (no JSON-RPC): read full Platform status, which also
   //     yields Tenderdash block height + age. IslockService picks the path
-  //     (EvoSDK on testnet, DAPI over explicit dapiAddresses on devnets).
+  //     (EvoSDK on testnet, DAPI over explicit dapiAddresses on devnets). On
+  //     testnet this is passive: Platform is only read once the SDK is already
+  //     connected for another reason, so the poll never downloads it.
   const useDapiPlatformStatus = !islock.supportsJsonRpc;
 
   // Bound the Insight retry so a flaky endpoint can't stretch one poll past the
   // 30s interval (the dapi-client / JSON-RPC calls have their own timeouts).
   const [coreResult, secondaryResult] = await Promise.allSettled([
     insight.getBlockHeight({ maxAttempts: 1 }),
-    useDapiPlatformStatus ? islock.getPlatformStatus() : islock.getBestChainLock(),
+    useDapiPlatformStatus ? islock.peekPlatformStatus() : islock.getBestChainLock(),
   ]);
 
   const coreHeight = coreResult.status === 'fulfilled' ? coreResult.value : undefined;
@@ -56,13 +58,17 @@ export async function fetchNetworkStatus(
   let platformBlockHeight: number | undefined;
   let platformBlockTimeMs: number | undefined;
   let secondaryReachable: boolean;
+  // Platform status was deliberately not read (see peekPlatformStatus). Not a
+  // failure: the verdict then rests on Core alone and carries no Platform alarm.
+  let platformNotChecked = false;
 
   if (useDapiPlatformStatus) {
-    // Settled value is the getPlatformStatus() shape on this branch.
+    // Settled value is the peekPlatformStatus() shape on this branch.
     const platform =
       secondaryResult.status === 'fulfilled'
-        ? (secondaryResult.value as Awaited<ReturnType<IslockService['getPlatformStatus']>>)
+        ? (secondaryResult.value as Awaited<ReturnType<IslockService['peekPlatformStatus']>>)
         : undefined;
+    platformNotChecked = secondaryResult.status === 'fulfilled' && platform === undefined;
     secondaryReachable = platform !== undefined;
     coreChainLockedHeight = platform?.coreChainLockedHeight;
     platformBlockHeight = platform?.latestBlockHeight;
@@ -107,7 +113,11 @@ export async function fetchNetworkStatus(
   if (!coreReachable && !secondaryReachable) {
     return {
       health: 'unknown',
-      reasons: ['Could not reach Insight or the chain-lock source'],
+      reasons: [
+        platformNotChecked
+          ? 'Could not reach Insight'
+          : 'Could not reach Insight or the chain-lock source',
+      ],
       checkedAtMs,
     };
   }
@@ -116,7 +126,7 @@ export async function fetchNetworkStatus(
     escalate('degraded');
     reasons.push('Insight (Core) unreachable');
   }
-  if (!secondaryReachable) {
+  if (!secondaryReachable && !platformNotChecked) {
     // "Unreachable" is a transport failure, not an observed consensus stall —
     // flag it as degraded so a transient error doesn't fire a false red
     // "stalled" alarm. A genuine stall shows up via the lag/age checks below.

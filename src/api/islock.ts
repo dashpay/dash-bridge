@@ -186,6 +186,15 @@ export class IslockService {
   }
 
   /**
+   * Platform status for background polling: `undefined` means "not available
+   * without loading the EvoSDK" (testnet before something else connected it),
+   * which is not a failure. See DAPISubscriptionClient.peekPlatformStatus.
+   */
+  async peekPlatformStatus(): Promise<PlatformStatus | undefined> {
+    return this.subscriptionClient.peekPlatformStatus();
+  }
+
+  /**
    * Diagnostic helper: ask DAPI directly whether `txid` is currently
    * IS-locked or chain-locked. Returns null if the tx isn't known.
    *

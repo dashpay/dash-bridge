@@ -53,6 +53,21 @@ describe('connectPlatformSdk', () => {
     expect(sdkState.connect).toHaveBeenCalledOnce();
   });
 
+  it('reports whether an SDK is connected without loading or connecting one', async () => {
+    const { hasConnectedPlatformSdk, disconnectPlatformSdk } = await import('./client.js');
+
+    expect(hasConnectedPlatformSdk('testnet')).toBe(false);
+    expect(sdkState.created).toBe(0);
+
+    await connectPlatformSdk('testnet', { maxAttempts: 1 });
+    expect(hasConnectedPlatformSdk('testnet')).toBe(true);
+    expect(hasConnectedPlatformSdk('mainnet')).toBe(false);
+    expect(sdkState.created).toBe(1);
+
+    disconnectPlatformSdk('testnet');
+    expect(hasConnectedPlatformSdk('testnet')).toBe(false);
+  });
+
   it('reuses the connected SDK on later calls', async () => {
     const first = await connectPlatformSdk('testnet', { maxAttempts: 1 });
     const second = await connectPlatformSdk('testnet', { maxAttempts: 1 });

@@ -4,7 +4,7 @@ import { fetchNetworkStatus, formatAge } from './network-status.js';
 import type { InsightClient } from './insight.js';
 import type { IslockService } from './islock.js';
 
-type PlatformStatus = Awaited<ReturnType<IslockService['getPlatformStatus']>>;
+type PlatformStatus = NonNullable<Awaited<ReturnType<IslockService['peekPlatformStatus']>>>;
 type ChainLock = Awaited<ReturnType<IslockService['getBestChainLock']>>;
 
 /**
@@ -15,6 +15,8 @@ type ChainLock = Awaited<ReturnType<IslockService['getBestChainLock']>>;
 function makeClients(opts: {
   coreHeight?: number | Error;
   platform?: PlatformStatus | Error;
+  /** Platform status deliberately not read (testnet, SDK not loaded): peek resolves undefined. */
+  platformSkipped?: boolean;
   chainLock?: ChainLock | Error;
 }): { insight: InsightClient; islock: IslockService } {
   const insight = {
@@ -33,7 +35,8 @@ function makeClients(opts: {
       if (opts.chainLock instanceof Error) throw opts.chainLock;
       return opts.chainLock ?? null;
     },
-    getPlatformStatus: async () => {
+    peekPlatformStatus: async () => {
+      if (opts.platformSkipped) return undefined;
       if (opts.platform instanceof Error) throw opts.platform;
       if (opts.platform === undefined) throw new Error('no platform status');
       return opts.platform;
@@ -118,6 +121,39 @@ describe('fetchNetworkStatus (DAPI / devnet path)', () => {
     expect(status.health).toBe('degraded');
     expect(status.coreHeight).toBe(10_700);
     expect(status.reasons.join(' ')).toMatch(/Platform/i);
+  });
+});
+
+describe('fetchNetworkStatus (Platform status not read yet)', () => {
+  it('judges Core alone and raises no Platform alarm', async () => {
+    const { insight, islock } = makeClients({ coreHeight: 10_700, platformSkipped: true });
+
+    const status = await fetchNetworkStatus(insight, islock);
+
+    expect(status.health).toBe('healthy');
+    expect(status.reasons).toEqual([]);
+    expect(status.coreHeight).toBe(10_700);
+    expect(status.coreChainLockedHeight).toBeUndefined();
+    expect(status.platformBlockHeight).toBeUndefined();
+    expect(status.chainLockLag).toBeUndefined();
+  });
+
+  it('is unknown, not degraded, when Insight fails too', async () => {
+    const { insight, islock } = makeClients({ coreHeight: new Error('down'), platformSkipped: true });
+
+    const status = await fetchNetworkStatus(insight, islock);
+
+    expect(status.health).toBe('unknown');
+    expect(status.reasons).toEqual(['Could not reach Insight']);
+  });
+
+  it('still degrades when a real Platform read fails', async () => {
+    const { insight, islock } = makeClients({ coreHeight: 10_700, platform: new Error('timeout') });
+
+    const status = await fetchNetworkStatus(insight, islock);
+
+    expect(status.health).toBe('degraded');
+    expect(status.reasons).toEqual(['Platform (DAPI) status unreachable']);
   });
 });
 

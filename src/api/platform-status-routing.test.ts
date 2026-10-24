@@ -3,10 +3,14 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   fetchPlatformStatus: vi.fn(),
+  fetchPlatformStatusIfSdkReady: vi.fn(),
   dapiGetStatus: vi.fn(),
 }));
 
-vi.mock('../platform/status.js', () => ({ fetchPlatformStatus: mocks.fetchPlatformStatus }));
+vi.mock('../platform/status.js', () => ({
+  fetchPlatformStatus: mocks.fetchPlatformStatus,
+  fetchPlatformStatusIfSdkReady: mocks.fetchPlatformStatusIfSdkReady,
+}));
 
 vi.mock('@dashevo/dapi-client', () => {
   class FakeClient {
@@ -122,7 +126,7 @@ describe('Platform status routing', () => {
     });
 
     it('reports healthy when the SDK call succeeds', async () => {
-      mocks.fetchPlatformStatus.mockResolvedValue(freshStatus());
+      mocks.fetchPlatformStatusIfSdkReady.mockResolvedValue(freshStatus());
 
       const status = await fetchNetworkStatus(insightAt(1_578_102), testnetIslock());
 
@@ -131,18 +135,53 @@ describe('Platform status routing', () => {
       expect(status.coreChainLockedHeight).toBe(1_578_100);
       expect(status.platformBlockHeight).toBe(80_000);
       expect(status.platformBlockAgeMs).toBeLessThan(60_000);
-      expect(mocks.fetchPlatformStatus).toHaveBeenCalledWith('testnet');
+      expect(mocks.fetchPlatformStatusIfSdkReady).toHaveBeenCalledWith('testnet');
       expect(mocks.dapiGetStatus).not.toHaveBeenCalled();
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
+    it('never triggers the SDK download: without a connected SDK it judges Core alone', async () => {
+      mocks.fetchPlatformStatusIfSdkReady.mockResolvedValue(undefined);
+
+      const status = await fetchNetworkStatus(insightAt(1_578_102), testnetIslock());
+
+      expect(status.health).toBe('healthy');
+      expect(status.reasons).toEqual([]);
+      expect(status.coreHeight).toBe(1_578_102);
+      expect(status.platformBlockHeight).toBeUndefined();
+      // The loading variant is what would pull the SDK in; the poll must not use it.
+      expect(mocks.fetchPlatformStatus).not.toHaveBeenCalled();
+      expect(mocks.dapiGetStatus).not.toHaveBeenCalled();
+    });
+
     it('reports degraded only when the SDK call fails', async () => {
-      mocks.fetchPlatformStatus.mockRejectedValue(new Error('Timed out while reading Platform status'));
+      mocks.fetchPlatformStatusIfSdkReady.mockRejectedValue(
+        new Error('Timed out while reading Platform status')
+      );
 
       const status = await fetchNetworkStatus(insightAt(1_578_102), testnetIslock());
 
       expect(status.health).toBe('degraded');
       expect(status.reasons).toEqual(['Platform (DAPI) status unreachable']);
     });
+
+    it('lets the chain-lock fallback load the SDK, since the user is mid-flow', async () => {
+      mocks.fetchPlatformStatus.mockResolvedValue(freshStatus());
+
+      await expect(testnetIslock().getCoreChainLockedHeight()).resolves.toBe(1_578_100);
+      expect(mocks.fetchPlatformStatus).toHaveBeenCalledWith('testnet');
+    });
+  });
+
+  it('peeks devnet status through dapi-client with no SDK involved', async () => {
+    mocks.dapiGetStatus.mockResolvedValue({ chain: { coreChainLockedHeight: 7 } });
+    const client = new DAPISubscriptionClient({
+      network: 'devnet-moutai',
+      dapiAddresses: ['https://68.67.122.254:1443'],
+    });
+
+    await expect(client.peekPlatformStatus()).resolves.toMatchObject({ coreChainLockedHeight: 7 });
+    expect(mocks.fetchPlatformStatus).not.toHaveBeenCalled();
+    expect(mocks.fetchPlatformStatusIfSdkReady).not.toHaveBeenCalled();
   });
 });

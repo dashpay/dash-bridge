@@ -1,4 +1,8 @@
-import { withConnectedPlatformSdk, withPlatformOperationTimeout } from './client.js';
+import {
+  hasConnectedPlatformSdk,
+  withConnectedPlatformSdk,
+  withPlatformOperationTimeout,
+} from './client.js';
 
 export interface PlatformStatus {
   coreChainLockedHeight?: number;
@@ -21,6 +25,18 @@ function positiveInteger(value: unknown): number | undefined {
   }
   const number = Number(value);
   return Number.isSafeInteger(number) && number > 0 ? number : undefined;
+}
+
+/**
+ * Like {@link fetchPlatformStatus}, but only when the SDK is already loaded
+ * and connected; otherwise resolves `undefined` without loading it. For
+ * background health polling, which must not pull the ~7 MB (gzip) SDK onto
+ * every page load just to draw an indicator.
+ */
+export async function fetchPlatformStatusIfSdkReady(
+  network: string
+): Promise<PlatformStatus | undefined> {
+  return hasConnectedPlatformSdk(network) ? fetchPlatformStatus(network) : undefined;
 }
 
 /**

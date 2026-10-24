@@ -5,7 +5,11 @@ import dashcoreLib from '@dashevo/dashcore-lib';
 import { getNetwork } from '../config.js';
 import { hash160 } from '../crypto/hash.js';
 import { describeIslock } from '../utils/islock-debug.js';
-import { fetchPlatformStatus, type PlatformStatus } from '../platform/status.js';
+import {
+  fetchPlatformStatus,
+  fetchPlatformStatusIfSdkReady,
+  type PlatformStatus,
+} from '../platform/status.js';
 
 interface BloomFilterStatic {
   create(elements: number, falsePositiveRate: number, nTweak: number, nFlags: number): {
@@ -569,11 +573,31 @@ export class DAPISubscriptionClient {
    * every other network keeps the dapi-client gRPC call.
    */
   async getPlatformStatus(): Promise<PlatformStatus> {
-    // By config type, not name: an unknown name falls back to the testnet config.
-    if (getNetwork(this.network).type === 'testnet') {
+    if (this.readsStatusViaSdk()) {
       return fetchPlatformStatus(this.network);
     }
+    return this.fetchStatusViaDapiClient();
+  }
 
+  /**
+   * Passive variant of {@link getPlatformStatus} for background health polling.
+   * On testnet it resolves `undefined`, without loading the EvoSDK, until the
+   * SDK is already connected for another reason; other networks read exactly
+   * as getPlatformStatus does (dapi-client needs no SDK download).
+   */
+  async peekPlatformStatus(): Promise<PlatformStatus | undefined> {
+    if (this.readsStatusViaSdk()) {
+      return fetchPlatformStatusIfSdkReady(this.network);
+    }
+    return this.fetchStatusViaDapiClient();
+  }
+
+  /** By config type, not name: an unknown name falls back to the testnet config. */
+  private readsStatusViaSdk(): boolean {
+    return getNetwork(this.network).type === 'testnet';
+  }
+
+  private async fetchStatusViaDapiClient(): Promise<PlatformStatus> {
     const status = await this.dapiClient.platform.getStatus();
 
     const chain = status.getChainStatus?.() ?? status.chain;

@@ -13,12 +13,14 @@ import {
 const MOCK_QUERY = '/?network=testnet&e2e=mock';
 
 test.describe('Deterministic UI E2E (mock mode)', () => {
-  test('testnet discovers evonodes from the quorum service and never calls a digitalcash.dev host', async ({ page }) => {
+  test('testnet discovers evonodes from the quorum service, never calls digitalcash.dev and does not load the SDK for the health poll', async ({ page }) => {
     const digitalcashRequests: string[] = [];
+    const sdkRequests: string[] = [];
     page.on('request', (request) => {
-      if (/(^|\.)digitalcash\.dev$/.test(new URL(request.url()).hostname)) {
-        digitalcashRequests.push(request.url());
-      }
+      const url = new URL(request.url());
+      if (/(^|\.)digitalcash\.dev$/.test(url.hostname)) digitalcashRequests.push(request.url());
+      // The EvoSDK bundle/wasm must not be fetched just to draw the health indicator.
+      if (/evo-sdk|wasm[-_]sdk/i.test(url.pathname)) sdkRequests.push(request.url());
     });
     await page.route('https://quorums.testnet.networks.dash.org/masternodes', (route) =>
       route.fulfill({
@@ -46,6 +48,7 @@ test.describe('Deterministic UI E2E (mock mode)', () => {
     await page.waitForTimeout(2000);
 
     expect(digitalcashRequests).toEqual([]);
+    expect(sdkRequests).toEqual([]);
   });
 
   test('create identity flow transitions to completion and DPNS registration', async ({ page }) => {
