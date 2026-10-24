@@ -2134,11 +2134,15 @@ export function downloadKeyBackup(state: BridgeState): void {
   a.href = url;
   a.download = filename;
   document.body.appendChild(a);
-  noteDownloadStarted();
+  // Only iOS browsers (all WebKit) ask before downloading, and block the
+  // page's loads while they ask; elsewhere a chunk failure is not the prompt.
+  if (getCurrentMobilePlatform() === 'ios') noteDownloadStarted();
   a.click();
   document.body.removeChild(a);
-  // iOS Safari reads the blob only once the user answers its download
-  // prompt, which can take a while.
+  // iOS Safari reads the blob only when the user answers its download prompt,
+  // which can be minutes later; revoking now would make that download fail.
+  // 5 min bounds how long the backup stays in memory; a later answer gets
+  // nothing, and the error screens keep a Download Key Backup button.
   setTimeout(() => URL.revokeObjectURL(url), 5 * 60_000);
 }
 

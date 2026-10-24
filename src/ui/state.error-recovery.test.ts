@@ -90,6 +90,29 @@ describe('getErrorRecovery after the InstantSend lock arrived', () => {
   });
 });
 
+describe('which submission failures offer a retry', () => {
+  const offersRetry = (error: Error) => getErrorRecovery(setError(lockReceived(), error)).canRetrySubmission;
+
+  it('retries a client-side timeout (PlatformOperationTimeoutError)', () => {
+    const timeout = new Error('Timed out while broadcasting identity create state transition');
+    timeout.name = 'PlatformOperationTimeoutError';
+    expect(offersRetry(timeout)).toBe(true);
+    expect(offersRetry(new Error('Failed to create identity: Timed out while waiting for the result'))).toBe(true);
+  });
+
+  it('retries when the SDK has no node left to use, and a devnet polling window that ran out', () => {
+    expect(offersRetry(new Error('Dapi client error: no available addresses to use'))).toBe(true);
+    expect(offersRetry(new Error('Identity 9Wz7 did not appear on Platform within 60s polling window. Check later.'))).toBe(true);
+    expect(offersRetry(new Error("grpc error: code: 'Unavailable', message: \"connection reset\""))).toBe(true);
+  });
+
+  it('does not retry Platform rejections that merely contain status-code digits or the word timeout', () => {
+    expect(offersRetry(new Error('Failed to create identity: insufficient asset lock balance 5030000 < 5029000'))).toBe(false);
+    expect(offersRetry(new Error('Invalid identity public key: signature verification timeout field 429'))).toBe(false);
+    expect(offersRetry(new Error('Failed to create identity: invalid instant asset lock proof signature'))).toBe(false);
+  });
+});
+
 describe('getErrorRecovery for a missing InstantSend lock', () => {
   it('is not a received lock and has nothing to retry', () => {
     const waiting: BridgeState = { ...lockReceived(), step: 'waiting_islock', assetLockProof: undefined, instantLockBytes: undefined };

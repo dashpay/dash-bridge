@@ -212,7 +212,7 @@ import {
   warmDashModules,
   warmPlatformSdkForFunding,
 } from './platform/loaders.js';
-import { CHUNK_LOAD_ATTEMPTS, ChunkLoadError, createChunkLoader } from './platform/chunk-loader.js';
+import { DEFAULT_CHUNK_LOAD_ATTEMPTS, ChunkLoadError, createChunkLoader } from './platform/chunk-loader.js';
 import {
   deriveCandidateKeys,
   explainKeyIneligibility,
@@ -356,21 +356,25 @@ function downloadFundingKeyBackup(backupState: BridgeState): void {
   downloadKeyBackup(backupState);
   if (isE2EMockMode()) return;
   const network = backupState.network;
-  let timer: ReturnType<typeof setTimeout> | undefined;
   const rewarm = () => {
     window.removeEventListener('focus', rewarm);
     clearTimeout(timer);
-    if (state.network !== network) return;
-    void warmPlatformSdkForFunding(network).then((attempted) => {
-      if (attempted) pollNetworkStatusNow?.();
-    });
+    if (state.network === network) void warmFundingConnect(network);
   };
-  timer = setTimeout(rewarm, 15_000);
+  const timer = setTimeout(rewarm, 15_000);
   window.addEventListener('focus', rewarm);
 }
 
-/** A stalled SDK download (it is several MB) ends in the Reload error instead of "Preparing…" forever. */
-const FUNDING_PREPARE_TIMEOUT_MS = 120_000;
+/**
+ * Testnet: connect the SDK (shared with any connect in flight) and poll the
+ * health indicator as soon as it settles. Other networks: nothing.
+ */
+function warmFundingConnect(network: string): Promise<void> {
+  return warmPlatformSdkForFunding(network).then((attempted) => {
+    if (attempted) pollNetworkStatusNow?.();
+  });
+}
+
 /** How long a funding flow waits for the testnet SDK connect before showing its deposit address anyway. */
 const FUNDING_SDK_CONNECT_WAIT_MS = 5000;
 
@@ -378,8 +382,8 @@ const FUNDING_SDK_CONNECT_WAIT_MS = 5000;
  * Gate in front of every funding flow's deposit address (shown as "Preparing
  * Dash Platform..."). Loads the chunks the Platform submission needs, with
  * retries, so that once funds are committed nothing depends on a download;
- * when they still fail this throws a ChunkLoadError while nothing is at risk
- * (error screen with Reload).
+ * when they still fail (or stall for 5 min) this throws a ChunkLoadError
+ * while nothing is at risk (error screen with Reload).
  *
  * Testnet also starts connecting the SDK, so the health indicator reads
  * Platform before the asset lock is broadcast (polls right after the connect
@@ -393,25 +397,10 @@ async function preparePlatformForFunding(): Promise<void> {
     await loadE2EMockSdk();
     return;
   }
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new ChunkLoadError(
-      'evo-sdk',
-      1,
-      new Error(`still loading after ${FUNDING_PREPARE_TIMEOUT_MS / 1000} s`)
-    )), FUNDING_PREPARE_TIMEOUT_MS);
-  });
-  try {
-    await Promise.race([loadPlatformForFunding(), timeout]);
-  } finally {
-    clearTimeout(timer);
-  }
+  await loadPlatformForFunding();
   // Connected before the deposit-step backup download, whose iOS prompt would
   // cancel a connect still in flight (see downloadFundingKeyBackup).
-  const connect = warmPlatformSdkForFunding(state.network).then((attempted) => {
-    if (attempted) pollNetworkStatusNow?.();
-  });
-  await Promise.race([connect, delay(FUNDING_SDK_CONNECT_WAIT_MS)]);
+  await Promise.race([warmFundingConnect(state.network), delay(FUNDING_SDK_CONNECT_WAIT_MS)]);
 }
 
 // ── Network-status polling ──────────────────────────────────────────────────
@@ -580,7 +569,7 @@ function delay(ms: number): Promise<void> {
 /**
  * Failure injection for mock-mode e2e tests, set with page.addInitScript as
  * window.__e2eMockFailures: `sdkLoadFailures` failed SDK chunk loads before
- * the gate's loader succeeds (CHUNK_LOAD_ATTEMPTS or more exhausts its
+ * the gate's loader succeeds (DEFAULT_CHUNK_LOAD_ATTEMPTS or more exhausts its
  * retries), `submissionFailures` failed Platform submissions after the
  * InstantSend lock arrived.
  */
@@ -609,10 +598,24 @@ const loadE2EMockSdk = createChunkLoader('evo-sdk', null, async () => {
   return {};
 });
 
+function e2eMockSubmissionSteps(mode: BridgeState['mode']): {
+  step: BridgeStep;
+  complete: (s: BridgeState) => BridgeState;
+} {
+  switch (mode) {
+    case 'topup':
+      return { step: 'topping_up', complete: setTopUpComplete };
+    case 'send_to_address':
+      return { step: 'sending_to_address', complete: setSendToAddressComplete };
+    default:
+      return { step: 'registering_identity', complete: (s) => setIdentityRegistered(s, E2E_MOCK_IDENTITY_ID) };
+  }
+}
+
 async function runE2EMockSubmission(): Promise<void> {
   await delay(120);
   if (consumeE2EMockFailure('submissionFailures')) {
-    throw new ChunkLoadError('evo-sdk', CHUNK_LOAD_ATTEMPTS, mockImportFailure());
+    throw new ChunkLoadError('evo-sdk', DEFAULT_CHUNK_LOAD_ATTEMPTS, mockImportFailure());
   }
 }
 
@@ -2822,6 +2825,7 @@ async function startTopUp() {
       await delay(120);
       await preparePlatformForFunding();
       updateState(setOneTimeKeyPair(state, assetLockKeyPair, depositAddress));
+      downloadFundingKeyBackup(state);
       updateState(setStep(state, 'detecting_deposit'));
       clearE2EMockAdvanceHook();
       await waitForE2EMockAdvance();
@@ -3116,6 +3120,7 @@ async function startBridge() {
       await delay(120);
       await preparePlatformForFunding();
       updateState(setKeyPairs(state, assetLockKeyPair, depositAddress));
+      downloadFundingKeyBackup(state);
       updateState(setStep(state, 'detecting_deposit'));
       await waitForE2EMockAdvance();
       updateState(setUtxoDetected(state, createE2EMockUtxo()));
@@ -3414,19 +3419,10 @@ async function runPlatformSubmission(
   assetLockPrivateKeyWif: string
 ): Promise<void> {
   if (isE2EMockMode()) {
-    if (state.mode === 'topup') {
-      updateState(setStep(state, 'topping_up'));
-      await runE2EMockSubmission();
-      updateState(setTopUpComplete(state));
-    } else if (state.mode === 'send_to_address') {
-      updateState(setStep(state, 'sending_to_address'));
-      await runE2EMockSubmission();
-      updateState(setSendToAddressComplete(state));
-    } else {
-      updateState(setStep(state, 'registering_identity'));
-      await runE2EMockSubmission();
-      updateState(setIdentityRegistered(state, E2E_MOCK_IDENTITY_ID));
-    }
+    const { step, complete } = e2eMockSubmissionSteps(state.mode);
+    updateState(setStep(state, step));
+    await runE2EMockSubmission();
+    updateState(complete(state));
     return;
   }
 
@@ -3627,11 +3623,6 @@ async function startChainlockFallback(): Promise<void> {
 // ============================================================================
 
 /**
- * Auto-publish contract after identity creation if the identity was created
- * for contract registration. Finds the first suitable auth key and publishes.
- * Returns true if contract publishing was initiated, false otherwise.
- */
-/**
  * Identity registered: show it, publish the contract it was created for (if
  * any), then download the final key backup (its filename has the identity
  * ID; the deposit-step backup already holds the keys). The download goes
@@ -3647,6 +3638,11 @@ async function completeIdentityCreation(identityId: string): Promise<void> {
   }
 }
 
+/**
+ * Auto-publish contract after identity creation if the identity was created
+ * for contract registration. Finds the first suitable auth key and publishes.
+ * Returns true if contract publishing was initiated, false otherwise.
+ */
 async function autoPublishContractIfNeeded(identityId: string): Promise<boolean> {
   if (!state.contractFromIdentityCreation || !state.contractJson) return false;
 

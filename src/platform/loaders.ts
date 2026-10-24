@@ -5,7 +5,7 @@ import usernameTransferChunkUrl from 'virtual:chunk-url:./username-transfer.js';
 import feeEstimatorChunkUrl from 'virtual:chunk-url:dash-contract-fee-estimator';
 import islockChunkUrl from 'virtual:chunk-url:../api/islock.js';
 import { getNetwork } from '../config.js';
-import { createChunkLoader } from './chunk-loader.js';
+import { createChunkLoader, withChunkTimeout } from './chunk-loader.js';
 import { loadSdkModule } from './sdkModule.js';
 
 export const loadPlatformModule = createChunkLoader('platform', platformChunkUrl, () => import('./index.js'));
@@ -41,10 +41,15 @@ export function warmDashModules(): Promise<PromiseSettledResult<unknown>[]> {
 /**
  * Load the chunks a Platform submission needs (EvoSDK and platform
  * operations), for the funding gate in main.ts. Rejects with a ChunkLoadError
- * when a chunk still fails after the loaders' retries.
+ * naming the chunk when it still fails after the loaders' retries, or is
+ * still loading after `timeoutMs` (the SDK is ~7 MB gzipped: 5 min covers
+ * about 200 kbit/s; Reload would throw a partial download away).
  */
-export async function loadPlatformForFunding(): Promise<void> {
-  await Promise.all([loadSdkModule(), loadPlatformModule()]);
+export async function loadPlatformForFunding(timeoutMs = 5 * 60_000): Promise<void> {
+  await Promise.all([
+    withChunkTimeout(loadSdkModule(), 'evo-sdk', timeoutMs),
+    withChunkTimeout(loadPlatformModule(), 'platform', timeoutMs),
+  ]);
 }
 
 /**

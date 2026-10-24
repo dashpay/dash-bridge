@@ -105,9 +105,14 @@ test.describe('Deterministic UI E2E (mock mode)', () => {
   test.describe('Platform component gate before funding', () => {
     test('a dropped SDK download is retried and the flow reaches the deposit address', async ({ page }) => {
       const warnings: string[] = [];
+      const events: string[] = [];
       page.on('console', (msg) => {
         if (msg.type() === 'warning') warnings.push(msg.text());
+        if (msg.text().includes('Chunk "evo-sdk" failed to load')) events.push('sdk-failure');
       });
+      // The key backup download must wait for the gate: on iOS its prompt
+      // cancels in-flight loads (that poisoned the SDK import in production).
+      page.on('download', () => events.push('backup-download'));
       await injectMockFailures(page, { sdkLoadFailures: 2 });
       await page.goto(MOCK_QUERY);
       await page.click('#mode-create-btn');
@@ -117,10 +122,13 @@ test.describe('Deterministic UI E2E (mock mode)', () => {
       await expect(page.locator('.preparing-step')).toContainText('Preparing…');
       await expect(page.locator('.deposit-headline')).toBeVisible();
       expect(warnings.filter((w) => w.includes('Chunk "evo-sdk" failed to load'))).toHaveLength(2);
+      await expect.poll(() => events).toEqual(['sdk-failure', 'sdk-failure', 'backup-download']);
     });
 
     for (const flow of ['create', 'topup'] as const) {
       test(`${flow}: an SDK that cannot load stops the flow before any deposit address, with Reload`, async ({ page }) => {
+        let downloads = 0;
+        page.on('download', () => { downloads += 1; });
         await injectMockFailures(page, { sdkLoadFailures: 3 });
         await page.goto(MOCK_QUERY);
         if (flow === 'create') {
@@ -138,6 +146,7 @@ test.describe('Deterministic UI E2E (mock mode)', () => {
         await expect(page.locator('.error-step')).toContainText('No funds have been sent');
         await expect(page.locator('.deposit-headline')).toHaveCount(0);
         await expect(page.locator('#download-keys-btn')).toHaveCount(0);
+        expect(downloads).toBe(0);
         await page.locator('.error-technical summary').click();
         await expect(page.locator('.error-technical-content')).toContainText('Failed to load: evo-sdk');
 

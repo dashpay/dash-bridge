@@ -39,7 +39,6 @@ import {
   type IdentityRegistrationUnconfirmedError,
 } from '../platform/identity-confirm.js';
 import { ChunkLoadError } from '../platform/chunk-loader.js';
-import { isRetryableError } from '../utils/retry.js';
 import { shouldRecommendMobileApp } from './mobile-app.js';
 
 /**
@@ -619,16 +618,29 @@ function resolveErrorCode(state: BridgeState, error: Error): string {
 }
 
 /**
- * Whether resubmitting the same proof can help: the submission did not reach
- * Platform or its outcome is unknown. A rejection by Platform is not retried:
- * resubmitting the same transition gets the same verdict.
+ * Failures where the submission did not reach Platform or its outcome is
+ * unknown. Deliberately narrow (no bare status codes or "timeout" substrings,
+ * which also occur in amounts, IDs and Platform's own rejection texts).
+ * - "Dapi client error: transport error: … TypeError: Failed to fetch"
+ *   (Chromium) / "… Load failed" (WebKit): the request never got through
+ * - "no available addresses": the SDK banned every node after failures
+ * - gRPC "Unavailable" / "Deadline exceeded"
+ * - "Timed out while …" (PlatformOperationTimeoutError, client.ts)
+ * - "… did not appear on Platform within 60s polling window" (non-trusted
+ *   devnets, identity.ts)
+ */
+const TRANSIENT_SUBMISSION_MESSAGE =
+  /failed to fetch|load failed|networkerror|no available addresses|\bunavailable\b|deadline exceeded|\btimed out while\b|did not appear on platform within/i;
+
+/**
+ * Whether resubmitting the same proof can help. A rejection by Platform is
+ * not retried: resubmitting the same transition gets the same verdict.
  */
 function isTransientSubmissionError(error: Error | undefined): boolean {
   if (!error) return false;
   if (error instanceof ChunkLoadError || isIdentityRegistrationUnconfirmedError(error)) return true;
-  // The SDK wraps transport failures: "Dapi client error: transport error: …
-  // TypeError: Failed to fetch" (Chromium) / "Load failed" (WebKit).
-  return isRetryableError(error) || /transport error|failed to fetch|load failed|deadline exceeded|unavailable/i.test(error.message);
+  if (error.name === 'PlatformOperationTimeoutError') return true;
+  return TRANSIENT_SUBMISSION_MESSAGE.test(error.message);
 }
 
 export interface ErrorRecovery {

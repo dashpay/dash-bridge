@@ -42,14 +42,18 @@ interface ChunkLoaderOptions {
 
 /** Delay before each retry. */
 const RETRY_DELAYS_MS: readonly number[] = [500, 1500];
-export const CHUNK_LOAD_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
+/** Attempts per round normally; a round right after a download prompt makes more. */
+export const DEFAULT_CHUNK_LOAD_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
 /** Retry delays while a download prompt may be open (about a minute in total). */
 const PROMPT_RETRY_DELAYS_MS: readonly number[] = [2000, 5000, 10000, 15000, 30000];
 const DOWNLOAD_PROMPT_WINDOW_MS = 60_000;
 
 let lastDownloadStartedAt = -Infinity;
 
-/** Call when the page starts a file download (it may raise a prompt that blocks loads). */
+/**
+ * Call when the page starts a file download that raises a prompt blocking the
+ * page's loads (iOS/iPadOS Safari and other iOS browsers, all WebKit).
+ */
 export function noteDownloadStarted(now = Date.now()): void {
   lastDownloadStartedAt = now;
 }
@@ -63,6 +67,23 @@ const defaultImportUrl = (url: string) => import(/* @vite-ignore */ url);
 
 /** Unique per page load, so a CDN cannot answer the retry from a cached error. */
 const pageToken = Date.now().toString(36);
+
+/**
+ * Reject with a ChunkLoadError naming `chunk` if `promise` has not settled
+ * within `ms` (a stalled download would otherwise wait forever). The load
+ * itself keeps going; a later call may still use it.
+ */
+export async function withChunkTimeout<T>(promise: Promise<T>, chunk: string, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new ChunkLoadError(chunk, 1, new Error(`still loading after ${ms / 1000} s`))), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export function cacheBustedUrl(url: string, attempt: number): string {
   const parsed = new URL(url, globalThis.location?.href);
