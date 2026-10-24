@@ -83,6 +83,19 @@ describe('IslockService', () => {
     await expect(handle.wait()).resolves.toBe(bytes);
   });
 
+  it('propagates a failed subscription so the caller stops before broadcasting', async () => {
+    mocks.subscribeForInstantSendLock.mockRejectedValue(
+      new Error('InstantSend lock subscription failed for txid: 3 nodes tried, last error: boom')
+    );
+    const service = new IslockService({ network: 'testnet', dapiAddresses: ['https://127.0.0.1:1443'] });
+
+    await expect(
+      service.subscribeForInstantSendLock('txid', new Uint8Array([4]), { txid: 'prevout', vout: 0 })
+    ).rejects.toThrow(/3 nodes tried/);
+    // No tripwire poller is left running for a subscription that never existed.
+    expect(mocks.getTransactionLockStatus).not.toHaveBeenCalled();
+  });
+
   it('keeps the pre-broadcast DAPI subscription path for devnets without RPC', async () => {
     const bytes = new Uint8Array([9, 8, 7]);
     const subHandle = { wait: vi.fn().mockResolvedValue(bytes) };

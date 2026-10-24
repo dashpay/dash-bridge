@@ -226,7 +226,7 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
     expect(new TextDecoder().decode(bytes)).toBe(TXID);
   });
 
-  it('rejects naming the nodes tried and the last error when every node fails', async () => {
+  it('rejects wait() naming the nodes tried and the last error when every node fails after readiness', async () => {
     const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(3) });
     const sub = await startReady(client);
     const outcome = expect(sub.wait()).rejects.toThrow(/3 nodes tried.*last error: boom 2/);
@@ -236,23 +236,47 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
     for (const node of nodeClients()) expect(node.disconnect).toHaveBeenCalled();
   });
 
-  it('rejects immediately without waiting for the readiness cap when all nodes fail on connect', async () => {
+  it('still returns a handle when readiness comes from the cap, and a later total failure surfaces via wait()', async () => {
+    const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(3) });
+    const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT);
+    await vi.advanceTimersByTimeAsync(ISLOCK_READINESS_CAP_MS);
+    const sub = await pending; // streams are open but silent: returns at the cap
+
+    const outcome = expect(sub.wait()).rejects.toThrow(/3 nodes tried.*last error: late boom 2/);
+    liveStreams().forEach((stream, i) => stream.emit('error', new Error(`late boom ${i}`)));
+    await outcome;
+  });
+
+  it('rejects subscribe itself, before returning, when every stream fails inside the readiness window', async () => {
+    const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(3) });
+    const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT);
+    const outcome = expect(pending).rejects.toThrow(
+      new RegExp(`InstantSend lock subscription failed for ${TXID}: 3 nodes tried, last error: boom 2`)
+    );
+    await flush(); // streams opened, nothing delivered yet
+
+    liveStreams().forEach((stream, i) => stream.emit('error', new Error(`boom ${i}`)));
+    await outcome;
+    for (const node of nodeClients()) expect(node.disconnect).toHaveBeenCalled();
+  });
+
+  it('rejects subscribe immediately, without the readiness cap, when all nodes fail on connect', async () => {
     for (const host of addresses(3).map((a) => new URL(a).hostname)) state.deadHosts.add(host);
     const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(3) });
     const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT);
-    await flush();
-    const sub = await pending;
-    await expect(sub.wait()).rejects.toThrow(/3 nodes tried.*Response closed without headers/);
+    const outcome = expect(pending).rejects.toThrow(/3 nodes tried.*Response closed without headers/);
+    await flush(); // far less than ISLOCK_READINESS_CAP_MS
+    await outcome;
   });
 
-  it('caps total attempts when replacements keep failing', async () => {
+  it('rejects subscribe after the attempt cap when replacements keep failing', async () => {
     const many = addresses(20);
     for (const a of many) state.deadHosts.add(new URL(a).hostname);
     const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: many });
     const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT);
+    const outcome = expect(pending).rejects.toThrow(new RegExp(`${ISLOCK_MAX_NODE_ATTEMPTS} nodes tried`));
     await flush();
-    const sub = await pending;
-    await expect(sub.wait()).rejects.toThrow(new RegExp(`${ISLOCK_MAX_NODE_ATTEMPTS} nodes tried`));
+    await outcome;
     expect(nodeClients()).toHaveLength(ISLOCK_MAX_NODE_ATTEMPTS);
   });
 

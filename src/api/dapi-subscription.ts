@@ -262,7 +262,9 @@ export class DAPISubscriptionClient {
    * subscribeToTransactionsWithProofs resolves before any connection exists, so
    * readiness is approximated: return once any stream delivers a message (the
    * server replays recent blocks, usually within ~1 s) or after the readiness
-   * cap, whichever comes first. The remaining streams keep connecting.
+   * cap, whichever comes first. The remaining streams keep connecting. If every
+   * node attempt has already failed by then, this rejects instead of returning
+   * a handle, so nothing is broadcast without a listener.
    */
   private async subscribeOnMultipleNodes(
     txid: string,
@@ -279,6 +281,9 @@ export class DAPISubscriptionClient {
     let markReady!: () => void;
     const ready = new Promise<void>((resolve) => { markReady = resolve; });
     const readyTimerId = setTimeout(markReady, ISLOCK_READINESS_CAP_MS);
+    // Set when every node attempt failed. Only read once, right after the
+    // readiness wait, to fail before the caller broadcasts.
+    let allFailed: Error | undefined;
 
     const lockPromise = new Promise<Uint8Array>((resolve, reject) => {
       const slots = new Set<NodeSlot>();
@@ -334,9 +339,11 @@ export class DAPISubscriptionClient {
             openNode();
           } else if (slots.size === 0) {
             const reason = error instanceof Error ? error.message : String(error);
-            finish(() => reject(new Error(
+            const exhausted = new Error(
               `InstantSend lock subscription failed for ${txid}: ${attempts} nodes tried, last error: ${reason}`
-            )));
+            );
+            allFailed = exhausted;
+            finish(() => reject(exhausted));
           }
         };
 
@@ -393,6 +400,10 @@ export class DAPISubscriptionClient {
     lockPromise.catch(() => {});
 
     await ready;
+    // The caller broadcasts the asset lock as soon as this returns, so a
+    // subscription with no live stream must stop the flow before funds are
+    // committed. Failures after this point surface through wait().
+    if (allFailed) throw allFailed;
     return { wait: () => lockPromise };
   }
 
