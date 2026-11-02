@@ -1,10 +1,18 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import DAPIClientModule from '@dashevo/dapi-client';
+import dapiNetworkConfigs from '@dashevo/dapi-client/lib/networkConfigs.js';
 import dashcoreLib from '@dashevo/dashcore-lib';
 import { getNetwork } from '../config.js';
 import { hash160 } from '../crypto/hash.js';
 import { describeIslock } from '../utils/islock-debug.js';
+import {
+  EvonodeDiscovery,
+  parseDapiAddress,
+  seedAddresses,
+  shuffled,
+  type DapiAddress,
+} from './evonode-discovery.js';
 import {
   fetchPlatformStatus,
   fetchPlatformStatusIfSdkReady,
@@ -46,30 +54,19 @@ export const ISLOCK_READINESS_CAP_MS = 3000;
 
 const CLIENT_OPTIONS = { timeout: 30000, retries: 3 };
 
-interface DapiAddress {
-  protocol: string;
-  host: string;
-  port: number;
-}
-
 interface NodeSlot {
   client?: any;
   stream?: any;
   failed: boolean;
 }
 
-function shuffled<T>(items: readonly T[]): T[] {
-  const copy = [...items];
-  for (let i = copy.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
-  }
-  return copy;
-}
-
 export class DAPISubscriptionClient {
   readonly network: string;
-  private readonly dapiClient: any;
+  // Exactly one of these is set: testnet discovers its evonodes, every other
+  // network uses one client over its configured addresses (or, on mainnet,
+  // dapi-client's default seeds).
+  private readonly discovery?: EvonodeDiscovery;
+  private readonly fixedClient?: any;
   private readonly nodeAddresses: DapiAddress[];
   // Aborts of in-flight multi-node subscriptions. DAPIClient.disconnect() does
   // not cancel streams, so disconnect() must stop these to close the per-node clients.
@@ -77,27 +74,46 @@ export class DAPISubscriptionClient {
 
   constructor(config: DAPISubscriptionConfig) {
     this.network = config.network;
-    const options: any = { ...CLIENT_OPTIONS };
     this.nodeAddresses = [];
     if (config.dapiAddresses?.length) {
       // DAPIClient expects address objects { host, port, protocol }, not URL strings.
       // Our configs store URLs (https://host:port) for EvoSDK compatibility, so
       // parse them here.
-      const parsed: DapiAddress[] = config.dapiAddresses.map((addr) => {
-        const url = new URL(addr);
-        return {
-          protocol: url.protocol.replace(':', ''),
-          host: url.hostname,
-          port: url.port ? parseInt(url.port, 10) : 443,
-        };
-      });
-      options.dapiAddresses = parsed;
+      const parsed = config.dapiAddresses.map(parseDapiAddress);
       // A repeated address would put two "distinct" streams on one node.
       this.nodeAddresses = [...new Map(parsed.map((a) => [`${a.host}:${a.port}`, a])).values()];
+      this.fixedClient = new DAPIClientClass({ ...CLIENT_OPTIONS, dapiAddresses: parsed });
+    } else if (getNetwork(config.network).type === 'testnet') {
+      // Seeds come from the published dapi-client, so they follow its releases.
+      this.discovery = new EvonodeDiscovery({
+        network: 'testnet',
+        seeds: seedAddresses(dapiNetworkConfigs.testnet.seeds),
+        createClient: (dapiAddresses) => new DAPIClientClass({ ...CLIENT_OPTIONS, dapiAddresses }),
+      });
     } else {
-      options.network = config.network === 'mainnet' ? 'mainnet' : 'testnet';
+      this.fixedClient = new DAPIClientClass({
+        ...CLIENT_OPTIONS,
+        network: config.network === 'mainnet' ? 'mainnet' : 'testnet',
+      });
     }
-    this.dapiClient = new DAPIClientClass(options);
+  }
+
+  /**
+   * Client for calls that may go to any node. On testnet it covers the
+   * evonodes found by the last discovery, so it is undefined before the
+   * first subscription.
+   */
+  private get dapiClient(): any {
+    return this.discovery ? this.discovery.sharedClient : this.fixedClient;
+  }
+
+  /**
+   * Start syncing the testnet masternode list so the first IS lock
+   * subscription doesn't wait for it. Never rejects; resolves at once on
+   * networks with configured addresses.
+   */
+  warmEvonodeDiscovery(): Promise<void> {
+    return this.discovery ? this.discovery.warm() : Promise.resolve();
   }
 
   /** A client pinned to one node, so streams and height probes can't land on the same node twice. */
@@ -131,7 +147,9 @@ export class DAPISubscriptionClient {
   private raceBestBlockHeight(
     txid: string,
     clients: Array<any | undefined>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    // Nodes that already failed in earlier batches, for the error message.
+    triedBefore = 0
   ): Promise<number> {
     return new Promise<number>((resolve, reject) => {
       let done = false;
@@ -154,7 +172,7 @@ export class DAPISubscriptionClient {
         if (++failures < clients.length) return;
         const reason = error instanceof Error ? error.message : String(error);
         settle(() => reject(new Error(
-          `InstantSend lock subscription failed for ${txid}: ${clients.length} nodes tried, last error: ${reason}`
+          `InstantSend lock subscription failed for ${txid}: ${triedBefore + clients.length} nodes tried, last error: ${reason}`
         )));
       };
 
@@ -259,27 +277,56 @@ export class DAPISubscriptionClient {
     onProgress?.('Creating bloom filter...');
     const bloomFilter = this.createBloomFilter(hash160(publicKey), utxo);
 
-    onProgress?.('Getting current block height...');
-    if (this.nodeAddresses.length >= 2) {
+    if (this.discovery || this.nodeAddresses.length >= 2) {
       // The shared client picks one random node and waits out its full connect
       // timeout (~75 s in browsers) when that node is unreachable, with nothing
       // broadcast meanwhile. Ask the nodes the streams will use, all at once.
-      const nodes = shuffled(this.nodeAddresses);
-      const clients = nodes
-        .slice(0, ISLOCK_CONCURRENT_NODES)
-        .map((address) => this.tryCreateNodeClient(address));
-      // disconnect() (e.g. a network switch) must also stop this wait, or the
+      // disconnect() (e.g. a network switch) must also stop these waits, or the
       // streams below would open on the network being left.
       const raceAbort = new AbortController();
       const abortRace = (): void => raceAbort.abort();
       if (signal?.aborted) abortRace();
       signal?.addEventListener('abort', abortRace, { once: true });
       this.activeSubscriptions.add(abortRace);
+      let nodes: DapiAddress[] = [];
+      let clients: Array<any | undefined> = [];
       let currentHeight: number;
       try {
-        currentHeight = await this.raceBestBlockHeight(txid, clients, raceAbort.signal);
+        let candidates = this.nodeAddresses;
+        if (this.discovery) {
+          onProgress?.('Finding evonodes...');
+          candidates = await this.discovery.getNodes(raceAbort.signal);
+          console.log(`[islock-sub] discovered ${candidates.length} evonodes`);
+        }
+        onProgress?.('Getting current block height...');
+        nodes = shuffled(candidates);
+        // A batch where no node answers moves on to the next one, up to the
+        // same node budget the streams have; the streams then start from the
+        // batch that answered, skipping nodes already known to be down.
+        const probeLimit = Math.min(nodes.length, ISLOCK_MAX_NODE_ATTEMPTS);
+        let offset = 0;
+        for (;;) {
+          clients = nodes
+            .slice(offset, Math.min(offset + ISLOCK_CONCURRENT_NODES, probeLimit))
+            .map((address) => this.tryCreateNodeClient(address));
+          try {
+            currentHeight = await this.raceBestBlockHeight(txid, clients, raceAbort.signal, offset);
+            break;
+          } catch (error) {
+            if (raceAbort.signal.aborted) throw error;
+            for (const client of clients) this.disconnectQuietly(client);
+            clients = [];
+            offset += ISLOCK_CONCURRENT_NODES;
+            if (offset >= probeLimit) throw error;
+            console.warn(`[islock-sub] no block height from ${offset} nodes; asking the next ones`);
+          }
+        }
+        nodes = nodes.slice(offset);
       } catch (error) {
         for (const client of clients) this.disconnectQuietly(client);
+        if (raceAbort.signal.aborted) {
+          throw new Error(`InstantSend lock subscription aborted for ${txid}`);
+        }
         throw error;
       } finally {
         this.activeSubscriptions.delete(abortRace);
@@ -291,6 +338,7 @@ export class DAPISubscriptionClient {
       );
     }
 
+    onProgress?.('Getting current block height...');
     const currentHeight: number = await this.dapiClient.core.getBestBlockHeight();
     console.log('[islock-sub] Current block height:', currentHeight);
     const fromBlockHeight = Math.max(1, currentHeight - 10);
@@ -560,7 +608,11 @@ export class DAPISubscriptionClient {
 
   async disconnect(): Promise<void> {
     for (const abort of [...this.activeSubscriptions]) abort();
-    try { await this.dapiClient.disconnect(); } catch { /* ignore */ }
+    if (this.discovery) {
+      await this.discovery.disconnect();
+      return;
+    }
+    try { await this.fixedClient.disconnect(); } catch { /* ignore */ }
   }
 
   /**
@@ -621,6 +673,10 @@ export class DAPISubscriptionClient {
     const status = await this.dapiClient.platform.getStatus();
 
     const chain = status.getChainStatus?.() ?? status.chain;
+    // dapi-client 5 returns null for sections a node leaves out, where 3.x
+    // threw. A status without its chain section says nothing about Platform,
+    // so keep treating it as a failed read rather than a healthy one.
+    if (!chain) throw new Error('Platform status has no chain section');
     const clhRaw = chain?.getCoreChainLockedHeight?.() ?? chain?.coreChainLockedHeight;
     const lbhRaw = chain?.getLatestBlockHeight?.() ?? chain?.latestBlockHeight;
 

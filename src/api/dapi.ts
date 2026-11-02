@@ -7,8 +7,9 @@ import { describeIslock } from '../utils/islock-debug.js';
 import { abortableSleep } from '../utils/sleep.js';
 import { fetchJson } from '../utils/fetch-json.js';
 
-// Testnet has no default: it reads IS locks from the DAPI bloom stream (see
-// TESTNET.dapiAddresses) because trpc.digitalcash.dev never upgraded to V24.
+// Testnet has no default: it reads IS locks from the DAPI bloom stream on
+// evonodes it discovers (see api/evonode-discovery.ts) because
+// trpc.digitalcash.dev never upgraded to V24.
 const API_URLS: Record<string, string> = {
   mainnet: 'https://rpc.digitalcash.dev',
 };

@@ -43,7 +43,9 @@ export default defineConfig({
     },
     include: [
       '@dashevo/dapi-client',
+      '@dashevo/dapi-client/lib/networkConfigs.js',
       '@dashevo/dashcore-lib',
+      'cbor',
     ],
   },
 });
