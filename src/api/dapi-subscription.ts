@@ -147,7 +147,9 @@ export class DAPISubscriptionClient {
   private raceBestBlockHeight(
     txid: string,
     clients: Array<any | undefined>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    // Nodes that already failed in earlier batches, for the error message.
+    triedBefore = 0
   ): Promise<number> {
     return new Promise<number>((resolve, reject) => {
       let done = false;
@@ -170,7 +172,7 @@ export class DAPISubscriptionClient {
         if (++failures < clients.length) return;
         const reason = error instanceof Error ? error.message : String(error);
         settle(() => reject(new Error(
-          `InstantSend lock subscription failed for ${txid}: ${clients.length} nodes tried, last error: ${reason}`
+          `InstantSend lock subscription failed for ${txid}: ${triedBefore + clients.length} nodes tried, last error: ${reason}`
         )));
       };
 
@@ -298,10 +300,28 @@ export class DAPISubscriptionClient {
         }
         onProgress?.('Getting current block height...');
         nodes = shuffled(candidates);
-        clients = nodes
-          .slice(0, ISLOCK_CONCURRENT_NODES)
-          .map((address) => this.tryCreateNodeClient(address));
-        currentHeight = await this.raceBestBlockHeight(txid, clients, raceAbort.signal);
+        // A batch where no node answers moves on to the next one, up to the
+        // same node budget the streams have; the streams then start from the
+        // batch that answered, skipping nodes already known to be down.
+        const probeLimit = Math.min(nodes.length, ISLOCK_MAX_NODE_ATTEMPTS);
+        let offset = 0;
+        for (;;) {
+          clients = nodes
+            .slice(offset, Math.min(offset + ISLOCK_CONCURRENT_NODES, probeLimit))
+            .map((address) => this.tryCreateNodeClient(address));
+          try {
+            currentHeight = await this.raceBestBlockHeight(txid, clients, raceAbort.signal, offset);
+            break;
+          } catch (error) {
+            if (raceAbort.signal.aborted) throw error;
+            for (const client of clients) this.disconnectQuietly(client);
+            clients = [];
+            offset += ISLOCK_CONCURRENT_NODES;
+            if (offset >= probeLimit) throw error;
+            console.warn(`[islock-sub] no block height from ${offset} nodes; asking the next ones`);
+          }
+        }
+        nodes = nodes.slice(offset);
       } catch (error) {
         for (const client of clients) this.disconnectQuietly(client);
         if (raceAbort.signal.aborted) {

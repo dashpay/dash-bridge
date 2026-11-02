@@ -153,6 +153,10 @@ export function fetchEvonodesFromSeeds(
                 fail(error);
                 return;
               }
+              if (endpoints.length === 0) {
+                fail(new Error('Masternode list has no valid evonodes'));
+                return;
+              }
               console.log(`[evonode-discovery] ${endpoints.length} evonodes from seed ${seed.host}:${seed.port}`);
               finish(() => resolve(endpoints));
             });

@@ -149,6 +149,18 @@ describe('fetchEvonodesFromSeeds', () => {
     expect(net.clients[0].disconnect).toHaveBeenCalled();
   });
 
+  it('treats a list with no valid evonodes as a failed seed', async () => {
+    const net = fakeNetwork({
+      'seed-1.test': { kind: 'list', hosts: [] },
+      'seed-2.test': { kind: 'list', hosts: ['10.0.0.5'] },
+    });
+
+    const result = fetchEvonodesFromSeeds(seeds, net.createClient, 'testnet');
+    await vi.advanceTimersByTimeAsync(250);
+
+    await expect(result).resolves.toEqual([endpoint('10.0.0.5')]);
+  });
+
   it('treats a list it cannot parse as a failed seed', async () => {
     const net = fakeNetwork({
       'seed-1.test': { kind: 'list', hosts: ['bad'] },

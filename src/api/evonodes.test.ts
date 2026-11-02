@@ -46,19 +46,34 @@ describe('parseEvonodeAddresses', () => {
     const result = parseEvonodeAddresses(
       payload(
         node('evo1.example.org'),
-        node('x', { address: 'user@evil.example:19999' }),
-        node('x', { address: 'host/path:19999' }),
-        node('x', { address: '[::1]:19999' }),
+        node('user@evil.example'),
+        node('host/path'),
+        node('[::1]'),
         node('999.1.1.1'),
         node('1.2.3.4.5'),
-        node('x', { address: '' }),
-        node('x', { address: 42 }),
+        // Records without platform_https fall back to the Core host.
+        node('x', { address: 'user@evil.example:19999', addresses: undefined }),
+        node('x', { address: '', addresses: undefined }),
+        node('x', { address: 42, addresses: undefined }),
+        node('x', { address: undefined, addresses: { platform_https: ['no-port'] } }),
+        node('x', { address: undefined, addresses: { platform_https: ['10.0.0.1:0'] } }),
         null,
         'junk'
       )
     );
 
     expect(result).toEqual(['https://evo1.example.org:1443']);
+  });
+
+  it('uses the platform_https endpoint, which can differ from the Core P2P host', () => {
+    const result = parseEvonodeAddresses(
+      payload(
+        node('68.67.122.3', { addresses: { core_p2p: ['68.67.122.3:19999'], platform_https: ['evo3.example.org:443'] } }),
+        node('68.67.122.4', { addresses: undefined })
+      )
+    );
+
+    expect(result).toEqual(['https://evo3.example.org:443', 'https://68.67.122.4:1443']);
   });
 
   it.each([undefined, null, 'x', {}, { data: {} }, { success: false }])(

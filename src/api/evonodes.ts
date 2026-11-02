@@ -48,13 +48,27 @@ export function parseEvonodeAddresses(payload: unknown): string[] {
   const endpoints = new Set<string>();
   for (const node of data) {
     if (!node || typeof node !== 'object') continue;
-    const { address, status, versionCheck } = node as Record<string, unknown>;
-    if (status !== 'ENABLED' || versionCheck !== 'success' || typeof address !== 'string') continue;
-    // `address` is the Core P2P endpoint (host:19999); only the host is reused.
-    const endpoint = toDapiEndpoint(address.replace(/:\d+$/, ''));
+    const { address, addresses, status, versionCheck } = node as Record<string, unknown>;
+    if (status !== 'ENABLED' || versionCheck !== 'success') continue;
+    const endpoint = platformEndpoint(addresses) ?? coreHostEndpoint(address);
     if (endpoint) endpoints.add(endpoint);
   }
   return [...endpoints];
+}
+
+/** The node's DAPI endpoint from `addresses.platform_https` ("host:port"), as the masternode list has it. */
+function platformEndpoint(addresses: unknown): string | undefined {
+  const https = (addresses as { platform_https?: unknown } | null | undefined)?.platform_https;
+  const first = Array.isArray(https) ? https[0] : undefined;
+  if (typeof first !== 'string') return undefined;
+  const separator = first.lastIndexOf(':');
+  if (separator <= 0) return undefined;
+  return toDapiEndpoint(first.slice(0, separator), Number(first.slice(separator + 1)));
+}
+
+/** Older records: `address` is the Core P2P endpoint (host:19999); only its host is reused, on port 1443. */
+function coreHostEndpoint(address: unknown): string | undefined {
+  return typeof address === 'string' ? toDapiEndpoint(address.replace(/:\d+$/, '')) : undefined;
 }
 
 /**

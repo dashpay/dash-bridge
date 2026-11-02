@@ -367,6 +367,41 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
       }
     });
 
+    it('asks the next nodes when a whole batch fails its height request, and streams from those', async () => {
+      // Keep the shuffle in order so node0..2 form the first batch.
+      vi.spyOn(Math, 'random').mockReturnValue(0.999999);
+      for (const host of ['node0.test', 'node1.test', 'node2.test']) state.hungHeightHosts.add(host);
+      state.height = 700;
+      const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(6) });
+
+      const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT);
+      await vi.advanceTimersByTimeAsync(ISLOCK_HEIGHT_TIMEOUT_MS);
+      liveStreams()[0]?.emit('data', blockMessage);
+      const sub = await pending;
+
+      const streaming = nodeClients().filter((c) => c.streams.length > 0).map((c) => c.options.dapiAddresses[0].host);
+      expect(streaming).toEqual(['node3.test', 'node4.test', 'node5.test']);
+      expect(liveStreams()[0]).toBeDefined();
+      for (const node of nodeClients().filter((c) => c.streams.length > 0)) {
+        expect(node.core.subscribeToTransactionsWithProofs.mock.calls[0][1].fromBlockHeight).toBe(690);
+      }
+      liveStreams()[0].emit('data', lockMessage(TXID));
+      await sub.wait();
+    });
+
+    it(`stops probing heights after ${ISLOCK_MAX_NODE_ATTEMPTS} nodes`, async () => {
+      const many = addresses(12);
+      for (const url of many) state.failedHeightHosts.add(new URL(url).hostname);
+      const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: many });
+
+      const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT);
+      const outcome = expect(pending).rejects.toThrow(new RegExp(`${ISLOCK_MAX_NODE_ATTEMPTS} nodes tried.*height refused`));
+      await flush();
+      await outcome;
+      expect(nodeClients()).toHaveLength(ISLOCK_MAX_NODE_ATTEMPTS);
+      expect(liveStreams()).toHaveLength(0);
+    });
+
     it('rejects at once when every node fails its height request', async () => {
       for (const host of ['node0.test', 'node1.test', 'node2.test']) state.failedHeightHosts.add(host);
       const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(3) });
