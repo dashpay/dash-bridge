@@ -68,8 +68,9 @@ export class IslockService {
   /**
    * Open the IS lock source before broadcasting and return a handle whose
    * `.wait()` resolves with the IS lock bytes once available. Networks without
-   * RPC (testnet, devnets) use the DAPI bloom subscription over their explicit
-   * dapiAddresses, which must be established before broadcast because
+   * RPC (testnet, devnets) use the DAPI bloom subscription (testnet over the
+   * evonodes it discovers, devnets over their configured dapiAddresses), which
+   * must be established before broadcast because
    * subscriptions don't replay historical IS locks. Mainnet uses JSON-RPC
    * polling, which can recover by txid and avoids browser-hostile dapi-client
    * stream discovery.
@@ -209,6 +210,15 @@ export class IslockService {
     txid: string
   ): Promise<{ instantLocked: boolean; chainLocked: boolean; height: number } | null> {
     return this.subscriptionClient.getTransactionLockStatus(txid);
+  }
+
+  /**
+   * Start finding testnet evonodes for the IS lock subscription. Never
+   * rejects; a no-op on networks with configured addresses or JSON-RPC.
+   */
+  warmEvonodeDiscovery(): Promise<void> {
+    if (this.hasJsonRpc) return Promise.resolve();
+    return this.subscriptionClient.warmEvonodeDiscovery();
   }
 
   async disconnect(): Promise<void> {

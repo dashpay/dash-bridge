@@ -15,6 +15,10 @@ const state = vi.hoisted(() => ({
     state.slowWaiters.splice(0).forEach((release) => release());
   },
   height: 100,
+  // Valid evonode IPs in the simplified masternode list that discovery clients sync.
+  smlHosts: [] as string[],
+  smlError: undefined as Error | undefined,
+  smlHangs: false,
 }));
 
 vi.mock('@dashevo/dapi-client', () => {
@@ -25,9 +29,27 @@ vi.mock('@dashevo/dapi-client', () => {
     core: any;
     platform = {};
 
+    dapiAddressProvider: any;
+
     constructor(options: any) {
       this.options = options;
       state.clients.push(this);
+      if (!options.dapiAddresses) {
+        const smlProvider: any = {
+          stream: undefined,
+          getSimplifiedMNList: vi.fn(async () => {
+            if (state.smlHangs) return new Promise(() => {});
+            if (state.smlError) {
+              smlProvider.stream = null;
+              throw state.smlError;
+            }
+            smlProvider.stream = {};
+            const entries = state.smlHosts.map((ip) => ({ nType: 1, platformHTTPPort: 1443, getIp: () => ip }));
+            return { getValidMasternodesList: () => entries };
+          }),
+        };
+        this.dapiAddressProvider = { smlProvider };
+      }
       this.core = {
         getBestBlockHeight: vi.fn(async () => {
           const only = options.dapiAddresses?.length === 1 ? options.dapiAddresses[0].host : undefined;
@@ -76,6 +98,12 @@ vi.mock('@dashevo/dashcore-lib', () => ({
 }));
 
 vi.mock('../utils/islock-debug.js', () => ({ describeIslock: () => ({}) }));
+
+const fallbackMock = vi.hoisted(() => vi.fn<[], Promise<string[]>>());
+vi.mock('./evonodes.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./evonodes.js')>()),
+  fetchTestnetEvonodeAddresses: fallbackMock,
+}));
 
 import {
   DAPISubscriptionClient,
@@ -127,6 +155,11 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
     state.slowHosts.clear();
     state.slowWaiters.length = 0;
     state.height = 100;
+    state.smlHosts = [];
+    state.smlError = undefined;
+    state.smlHangs = false;
+    fallbackMock.mockReset();
+    fallbackMock.mockResolvedValue([]);
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -513,10 +546,10 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
     await sub.wait();
   });
 
-  it('uses the single shared client with fewer than two addresses', async () => {
+  it('uses the single shared client with fewer than two configured addresses', async () => {
     for (const dapiAddresses of [undefined, [] as string[], addresses(1)]) {
       state.clients.length = 0;
-      const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses });
+      const client = new DAPISubscriptionClient({ network: 'devnet-moutai', dapiAddresses });
       expect(state.clients).toHaveLength(1);
 
       const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT);
@@ -579,5 +612,122 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
     expect(nodeClients().map((c) => c.options.dapiAddresses[0].host).sort()).toEqual(['a.test', 'b.test']);
     liveStreams()[0].emit('data', lockMessage(TXID));
     await sub.wait();
+  });
+
+  describe('testnet evonode discovery', () => {
+    const hosts = (n: number): string[] => Array.from({ length: n }, (_, i) => `10.0.0.${i + 1}`);
+    const discoveryClients = (): any[] => state.clients.filter((c) => !c.options.dapiAddresses);
+
+    it('opens the streams on distinct evonodes from the masternode list, not on the shared client', async () => {
+      state.smlHosts = hosts(6);
+      const client = new DAPISubscriptionClient({ network: 'testnet' });
+      expect(discoveryClients()).toHaveLength(1);
+      expect(discoveryClients()[0].options.network).toBe('testnet');
+
+      const sub = await startReady(client);
+
+      const streamHosts = nodeClients().map((c) => c.options.dapiAddresses[0].host);
+      expect(streamHosts).toHaveLength(ISLOCK_CONCURRENT_NODES);
+      expect(new Set(streamHosts).size).toBe(ISLOCK_CONCURRENT_NODES);
+      for (const host of streamHosts) expect(state.smlHosts).toContain(host);
+      expect(discoveryClients()[0].core.subscribeToTransactionsWithProofs).not.toHaveBeenCalled();
+      expect(fallbackMock).not.toHaveBeenCalled();
+
+      liveStreams()[1].emit('data', lockMessage(TXID));
+      await expect(sub.wait()).resolves.toBeInstanceOf(Uint8Array);
+    });
+
+    it('subscribes with a single discovered evonode', async () => {
+      state.smlHosts = hosts(1);
+      const client = new DAPISubscriptionClient({ network: 'testnet' });
+
+      const sub = await startReady(client);
+
+      expect(nodeClients()).toHaveLength(1);
+      liveStreams()[0].emit('data', lockMessage(TXID));
+      await expect(sub.wait()).resolves.toBeInstanceOf(Uint8Array);
+    });
+
+    it('uses the list as it is at each subscription', async () => {
+      state.smlHosts = ['10.0.0.1'];
+      const client = new DAPISubscriptionClient({ network: 'testnet' });
+      const first = await startReady(client);
+      liveStreams()[0].emit('data', lockMessage(TXID));
+      await first.wait();
+
+      state.clients.length = 0;
+      state.smlHosts = ['10.0.0.9'];
+      await startReady(client);
+
+      expect(nodeClients().map((c) => c.options.dapiAddresses[0].host)).toEqual(['10.0.0.9']);
+    });
+
+    it('falls back to the quorum service list when the masternode list fails', async () => {
+      state.smlError = new Error('Failed to parse payload');
+      fallbackMock.mockResolvedValue(['https://10.1.0.1:1443', 'https://10.1.0.2:1443', 'https://10.1.0.3:1443']);
+      const client = new DAPISubscriptionClient({ network: 'testnet' });
+
+      await startReady(client);
+
+      expect(fallbackMock).toHaveBeenCalledOnce();
+      expect(nodeClients().map((c) => c.options.dapiAddresses[0].host).sort()).toEqual(['10.1.0.1', '10.1.0.2', '10.1.0.3']);
+    });
+
+    it('rejects before opening any stream when no evonode can be found', async () => {
+      state.smlError = new Error('No available addresses');
+      const client = new DAPISubscriptionClient({ network: 'testnet' });
+
+      await expect(client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT)).rejects.toThrow(
+        /No testnet evonodes found/
+      );
+      expect(nodeClients()).toHaveLength(0);
+    });
+
+    it('disconnect() during discovery rejects with the abort error and opens nothing', async () => {
+      state.smlHangs = true;
+      const client = new DAPISubscriptionClient({ network: 'testnet' });
+
+      const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT);
+      const assertion = expect(pending).rejects.toThrow(`InstantSend lock subscription aborted for ${TXID}`);
+      await flush();
+      await client.disconnect();
+      await assertion;
+
+      expect(nodeClients()).toHaveLength(0);
+      expect(discoveryClients()[0].disconnect).toHaveBeenCalled();
+    });
+
+    it('a caller abort during discovery rejects with the abort error', async () => {
+      state.smlHangs = true;
+      const client = new DAPISubscriptionClient({ network: 'testnet' });
+      const controller = new AbortController();
+
+      const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT, undefined, controller.signal);
+      const assertion = expect(pending).rejects.toThrow(`InstantSend lock subscription aborted for ${TXID}`);
+      await flush();
+      controller.abort();
+      await assertion;
+      expect(nodeClients()).toHaveLength(0);
+    });
+
+    it('warmEvonodeDiscovery() syncs the list without opening streams', async () => {
+      state.smlHosts = hosts(3);
+      const client = new DAPISubscriptionClient({ network: 'testnet' });
+
+      await client.warmEvonodeDiscovery();
+
+      expect(discoveryClients()[0].dapiAddressProvider.smlProvider.getSimplifiedMNList).toHaveBeenCalledOnce();
+      expect(nodeClients()).toHaveLength(0);
+    });
+
+    it('configured addresses (devnets) never start discovery', async () => {
+      const client = new DAPISubscriptionClient({ network: 'devnet-moutai', dapiAddresses: addresses(3) });
+
+      await client.warmEvonodeDiscovery();
+      await startReady(client);
+
+      expect(discoveryClients()).toHaveLength(0);
+      expect(fallbackMock).not.toHaveBeenCalled();
+    });
   });
 });

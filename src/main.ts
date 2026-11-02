@@ -14,7 +14,6 @@ import { InsightClient, isAmbiguousBroadcastError } from './api/insight.js';
 import type { IslockService } from './api/islock.js';
 import { fetchNetworkStatus } from './api/network-status.js';
 import { DAPIClient } from './api/dapi.js';
-import { resolveDapiAddresses } from './api/evonodes.js';
 import { buildInstantAssetLockProof, buildChainAssetLockProof } from './proof/index.js';
 import { bech32m } from '@scure/base';
 import { privateKeyToWif, bytesToHex, abortableSleep } from './utils/index.js';
@@ -291,20 +290,17 @@ let warmupStarted = false;
 async function initClients(network: string): Promise<void> {
   const config = getNetwork(network);
   insightClient = new InsightClient(config);
-  // Testnet evonodes (and their certificates) rotate within days, so use the
-  // live list; the static one in config.ts is the fallback.
-  const [{ IslockService }, dapiAddresses] = await Promise.all([
-    loadIslockModule(),
-    resolveDapiAddresses(config),
-  ]);
-  // The evonode fetch can take seconds. If the user switched networks meanwhile,
+  const { IslockService } = await loadIslockModule();
+  // The chunk load can take seconds. If the user switched networks meanwhile,
   // the newer init owns the clients; installing these would pair this network's
   // IS-lock service with the other network's Insight client.
   if (state.network !== network) return;
+  // Testnet has no dapiAddresses: the service discovers its evonodes when a
+  // funding flow starts (see warmFundingConnect).
   islockService = new IslockService({
     network,
     rpcUrl: config.rpcUrl,
-    dapiAddresses,
+    dapiAddresses: config.dapiAddresses,
   });
   startNetworkStatusPolling();
 }
@@ -367,12 +363,18 @@ function downloadFundingKeyBackup(backupState: BridgeState): void {
 
 /**
  * Testnet: connect the SDK (shared with any connect in flight) and poll the
- * health indicator as soon as it settles. Other networks: nothing.
+ * health indicator as soon as it settles, and sync the masternode list the IS
+ * lock subscription picks its evonodes from. Other networks: nothing.
+ * Never rejects.
  */
 function warmFundingConnect(network: string): Promise<void> {
-  return warmPlatformSdkForFunding(network).then((attempted) => {
+  const sdk = warmPlatformSdkForFunding(network).then((attempted) => {
     if (attempted) pollNetworkStatusNow?.();
   });
+  const evonodes = state.network === network
+    ? islockService?.warmEvonodeDiscovery()
+    : undefined;
+  return Promise.all([sdk, evonodes]).then(() => {});
 }
 
 /** How long a funding flow waits for the testnet SDK connect before showing its deposit address anyway. */

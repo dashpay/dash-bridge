@@ -1,11 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  MIN_DYNAMIC_EVONODES,
   TESTNET_MASTERNODES_URL,
+  fetchTestnetEvonodeAddresses,
   parseEvonodeAddresses,
-  resolveDapiAddresses,
-  resolveTestnetDapiAddresses,
+  toDapiEndpoint,
 } from './evonodes.js';
 
 const node = (host: string, overrides: Record<string, unknown> = {}) => ({
@@ -19,8 +18,6 @@ const node = (host: string, overrides: Record<string, unknown> = {}) => ({
 });
 
 const payload = (...nodes: unknown[]) => ({ success: true, data: nodes });
-
-const FALLBACK = ['https://1.1.1.1:1443', 'https://1.1.1.2:1443', 'https://1.1.1.3:1443'];
 
 describe('parseEvonodeAddresses', () => {
   it('keeps ENABLED nodes with a successful version check and maps them to :1443', () => {
@@ -72,7 +69,27 @@ describe('parseEvonodeAddresses', () => {
   );
 });
 
-describe('resolveTestnetDapiAddresses', () => {
+describe('toDapiEndpoint', () => {
+  it('builds an https endpoint, defaulting to port 1443', () => {
+    expect(toDapiEndpoint('68.67.122.1')).toBe('https://68.67.122.1:1443');
+    expect(toDapiEndpoint('68.67.122.1', 443)).toBe('https://68.67.122.1:443');
+  });
+
+  it.each([
+    ['999.1.1.1', 1443],
+    ['[::1]', 1443],
+    ['user@host', 1443],
+    [undefined, 1443],
+    ['68.67.122.1', 0],
+    ['68.67.122.1', 70000],
+    ['68.67.122.1', Number.NaN],
+    ['68.67.122.1', '1443'],
+  ])('rejects host %j port %j', (host, port) => {
+    expect(toDapiEndpoint(host, port)).toBeUndefined();
+  });
+});
+
+describe('fetchTestnetEvonodeAddresses', () => {
   const fetchMock = vi.fn();
 
   beforeEach(() => {
@@ -95,55 +112,31 @@ describe('resolveTestnetDapiAddresses', () => {
       json: async () => body,
     });
 
-  it('uses only the live list when it has enough nodes', async () => {
-    respond(payload(node('10.0.0.1'), node('10.0.0.2'), node('10.0.0.3'), node('10.0.0.4')));
+  it('returns the healthy nodes from the quorum service', async () => {
+    respond(payload(node('10.0.0.1'), node('10.0.0.2', { status: 'POSE_BANNED' }), node('10.0.0.3')));
 
-    const result = await resolveTestnetDapiAddresses(FALLBACK);
-
-    expect(result).toEqual([
+    await expect(fetchTestnetEvonodeAddresses()).resolves.toEqual([
       'https://10.0.0.1:1443',
-      'https://10.0.0.2:1443',
       'https://10.0.0.3:1443',
-      'https://10.0.0.4:1443',
     ]);
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(fetchMock.mock.calls[0][0]).toBe(TESTNET_MASTERNODES_URL);
   });
 
-  it(`tops up with the static list below ${MIN_DYNAMIC_EVONODES} live nodes, without duplicates`, async () => {
-    respond(payload(node('10.0.0.1'), node('1.1.1.2')));
-
-    const result = await resolveTestnetDapiAddresses(FALLBACK);
-
-    expect(result).toEqual([
-      'https://10.0.0.1:1443',
-      'https://1.1.1.2:1443',
-      'https://1.1.1.1:1443',
-      'https://1.1.1.3:1443',
-    ]);
-  });
-
-  it('falls back to the static list when no node is healthy', async () => {
-    respond(payload(node('10.0.0.1', { status: 'POSE_BANNED' })));
-
-    await expect(resolveTestnetDapiAddresses(FALLBACK)).resolves.toEqual(FALLBACK);
-  });
-
-  it('falls back to the static list on a network error, without retrying', async () => {
+  it('returns nothing on a network error, without retrying', async () => {
     fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
 
-    await expect(resolveTestnetDapiAddresses(FALLBACK)).resolves.toEqual(FALLBACK);
+    await expect(fetchTestnetEvonodeAddresses()).resolves.toEqual([]);
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
-  it('falls back to the static list on an HTTP error', async () => {
+  it('returns nothing on an HTTP error', async () => {
     respond({}, false);
 
-    await expect(resolveTestnetDapiAddresses(FALLBACK)).resolves.toEqual(FALLBACK);
-    expect(fetchMock).toHaveBeenCalledOnce();
+    await expect(fetchTestnetEvonodeAddresses()).resolves.toEqual([]);
   });
 
-  it('falls back to the static list on invalid JSON', async () => {
+  it('returns nothing on invalid JSON', async () => {
     fetchMock.mockResolvedValue({
       ok: true,
       status: 200,
@@ -153,30 +146,10 @@ describe('resolveTestnetDapiAddresses', () => {
       },
     });
 
-    await expect(resolveTestnetDapiAddresses(FALLBACK)).resolves.toEqual(FALLBACK);
+    await expect(fetchTestnetEvonodeAddresses()).resolves.toEqual([]);
   });
 
-  describe('resolveDapiAddresses', () => {
-    it('resolves the live list for testnet', async () => {
-      respond(payload(node('10.0.0.1'), node('10.0.0.2'), node('10.0.0.3')));
-
-      const result = await resolveDapiAddresses({ type: 'testnet', dapiAddresses: FALLBACK });
-
-      expect(result).toHaveLength(3);
-      expect(result?.[0]).toBe('https://10.0.0.1:1443');
-    });
-
-    it('makes no request for devnets, mainnet or networks without addresses', async () => {
-      const devnet = ['https://68.67.122.254:1443'];
-
-      await expect(resolveDapiAddresses({ type: 'devnet', dapiAddresses: devnet })).resolves.toBe(devnet);
-      await expect(resolveDapiAddresses({ type: 'mainnet' })).resolves.toBeUndefined();
-      await expect(resolveDapiAddresses({ type: 'testnet' })).resolves.toBeUndefined();
-      expect(fetchMock).not.toHaveBeenCalled();
-    });
-  });
-
-  it('gives up after the timeout and uses the static list', async () => {
+  it('gives up after the 5 s timeout', async () => {
     vi.useFakeTimers();
     fetchMock.mockImplementation(
       (_url: string, init?: RequestInit) =>
@@ -187,10 +160,10 @@ describe('resolveTestnetDapiAddresses', () => {
         })
     );
 
-    const result = resolveTestnetDapiAddresses(FALLBACK);
+    const result = fetchTestnetEvonodeAddresses();
     await vi.advanceTimersByTimeAsync(5000);
 
-    await expect(result).resolves.toEqual(FALLBACK);
+    await expect(result).resolves.toEqual([]);
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 });

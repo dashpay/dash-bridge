@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   getTransactionLockStatus: vi.fn(),
   getCoreChainLockedHeight: vi.fn(),
   getPlatformStatus: vi.fn(),
+  warmEvonodeDiscovery: vi.fn(),
   disconnect: vi.fn(),
 }));
 
@@ -27,6 +28,7 @@ vi.mock('./dapi-subscription.js', () => ({
     getTransactionLockStatus: mocks.getTransactionLockStatus,
     getCoreChainLockedHeight: mocks.getCoreChainLockedHeight,
     getPlatformStatus: mocks.getPlatformStatus,
+    warmEvonodeDiscovery: mocks.warmEvonodeDiscovery,
     disconnect: mocks.disconnect,
   })),
 }));
@@ -74,7 +76,8 @@ describe('IslockService', () => {
     });
 
     expect(TESTNET.rpcUrl).toBeUndefined();
-    expect(TESTNET.dapiAddresses?.length).toBeGreaterThan(0);
+    // No built-in list: the subscription discovers testnet evonodes itself.
+    expect(TESTNET.dapiAddresses).toBeUndefined();
     expect(service.supportsJsonRpc).toBe(false);
     const handle = await service.subscribeForInstantSendLock('txid', new Uint8Array([4]), { txid: 'prevout', vout: 0 });
 
@@ -111,5 +114,15 @@ describe('IslockService', () => {
     expect(mocks.waitForInstantSendLock).not.toHaveBeenCalled();
     expect(mocks.subscribeForInstantSendLock).toHaveBeenCalledOnce();
     await expect(handle.wait()).resolves.toBe(bytes);
+  });
+
+  it('warms evonode discovery on testnet but not on JSON-RPC networks', async () => {
+    mocks.warmEvonodeDiscovery.mockResolvedValue(undefined);
+
+    await new IslockService({ network: 'testnet' }).warmEvonodeDiscovery();
+    expect(mocks.warmEvonodeDiscovery).toHaveBeenCalledOnce();
+
+    await new IslockService({ network: 'mainnet' }).warmEvonodeDiscovery();
+    expect(mocks.warmEvonodeDiscovery).toHaveBeenCalledOnce();
   });
 });
