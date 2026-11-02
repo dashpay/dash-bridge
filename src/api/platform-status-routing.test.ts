@@ -26,7 +26,6 @@ vi.mock('@dashevo/dashcore-lib', () => ({ default: {} }));
 import { DAPISubscriptionClient } from './dapi-subscription.js';
 import { IslockService } from './islock.js';
 import { fetchNetworkStatus } from './network-status.js';
-import { TESTNET } from '../config.js';
 import type { InsightClient } from './insight.js';
 
 const insightAt = (height: number): InsightClient =>
@@ -60,10 +59,7 @@ describe('Platform status routing', () => {
         new TypeError("Cannot read properties of undefined (reading 'getTotalSyncedTime')")
       );
       mocks.fetchPlatformStatus.mockResolvedValue(freshStatus());
-      const client = new DAPISubscriptionClient({
-        network: 'testnet',
-        dapiAddresses: TESTNET.dapiAddresses,
-      });
+      const client = new DAPISubscriptionClient({ network: 'testnet' });
 
       await expect(client.getPlatformStatus()).resolves.toMatchObject({
         coreChainLockedHeight: 1_578_100,
@@ -119,7 +115,7 @@ describe('Platform status routing', () => {
 
   describe('network status on testnet', () => {
     const testnetIslock = () =>
-      new IslockService({ network: 'testnet', dapiAddresses: TESTNET.dapiAddresses });
+      new IslockService({ network: 'testnet' });
 
     it('uses the DAPI/SDK path, not JSON-RPC', () => {
       expect(testnetIslock().supportsJsonRpc).toBe(false);

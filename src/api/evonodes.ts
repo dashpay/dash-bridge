@@ -12,7 +12,7 @@ export const TESTNET_MASTERNODES_URL = 'https://quorums.testnet.networks.dash.or
 const EVONODE_FETCH_TIMEOUT_MS = 5000;
 
 /** Port of the evonode DAPI endpoint (gRPC-web over HTTPS). */
-export const DAPI_HTTPS_PORT = 1443;
+const DAPI_HTTPS_PORT = 1443;
 
 // Plain IPv4 / DNS hostnames only: the result is turned into a URL and handed
 // to dapi-client, so anything exotic (IPv6 literals, userinfo, paths) is dropped.

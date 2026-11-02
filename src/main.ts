@@ -371,10 +371,7 @@ function warmFundingConnect(network: string): Promise<void> {
   const sdk = warmPlatformSdkForFunding(network).then((attempted) => {
     if (attempted) pollNetworkStatusNow?.();
   });
-  const evonodes = state.network === network
-    ? islockService?.warmEvonodeDiscovery()
-    : undefined;
-  return Promise.all([sdk, evonodes]).then(() => {});
+  return Promise.all([sdk, islockService?.warmEvonodeDiscovery()]).then(() => {});
 }
 
 /** How long a funding flow waits for the testnet SDK connect before showing its deposit address anyway. */

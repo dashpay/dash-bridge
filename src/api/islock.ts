@@ -70,8 +70,8 @@ export class IslockService {
    * `.wait()` resolves with the IS lock bytes once available. Networks without
    * RPC (testnet, devnets) use the DAPI bloom subscription (testnet over the
    * evonodes it discovers, devnets over their configured dapiAddresses), which
-   * must be established before broadcast because
-   * subscriptions don't replay historical IS locks. Mainnet uses JSON-RPC
+   * must be established before broadcast because subscriptions don't replay
+   * historical IS locks. Mainnet uses JSON-RPC
    * polling, which can recover by txid and avoids browser-hostile dapi-client
    * stream discovery.
    */

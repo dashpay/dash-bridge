@@ -72,7 +72,6 @@ describe('IslockService', () => {
     const service = new IslockService({
       network: 'testnet',
       rpcUrl: TESTNET.rpcUrl,
-      dapiAddresses: TESTNET.dapiAddresses,
     });
 
     expect(TESTNET.rpcUrl).toBeUndefined();

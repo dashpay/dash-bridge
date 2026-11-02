@@ -25,31 +25,14 @@ vi.mock('@dashevo/dapi-client', () => {
   class FakeClient {
     options: any;
     streams: any[] = [];
+    listStreams: any[] = [];
     disconnect = vi.fn(async () => {});
     core: any;
     platform = {};
 
-    dapiAddressProvider: any;
-
     constructor(options: any) {
       this.options = options;
       state.clients.push(this);
-      if (!options.dapiAddresses) {
-        const smlProvider: any = {
-          stream: undefined,
-          getSimplifiedMNList: vi.fn(async () => {
-            if (state.smlHangs) return new Promise(() => {});
-            if (state.smlError) {
-              smlProvider.stream = null;
-              throw state.smlError;
-            }
-            smlProvider.stream = {};
-            const entries = state.smlHosts.map((ip) => ({ nType: 1, platformHTTPPort: 1443, getIp: () => ip }));
-            return { getValidMasternodesList: () => entries };
-          }),
-        };
-        this.dapiAddressProvider = { smlProvider };
-      }
       this.core = {
         getBestBlockHeight: vi.fn(async () => {
           const only = options.dapiAddresses?.length === 1 ? options.dapiAddresses[0].host : undefined;
@@ -57,6 +40,23 @@ vi.mock('@dashevo/dapi-client', () => {
           if (only && state.hungHeightHosts.has(only)) return new Promise<number>(() => {});
           if (only && state.failedHeightHosts.has(only)) throw new Error('GrpcError: height refused');
           return state.height;
+        }),
+        // Seed clients serve the masternode list; see state.sml*.
+        subscribeToMasternodeList: vi.fn(async () => {
+          const stream: any = new EventEmitter();
+          stream.cancel = vi.fn();
+          this.listStreams.push(stream);
+          setTimeout(() => {
+            if (state.smlHangs) return;
+            if (state.smlError) {
+              stream.emit('error', state.smlError);
+              stream.emit('end');
+              return;
+            }
+            const bytes = new TextEncoder().encode(JSON.stringify({ hosts: state.smlHosts }));
+            stream.emit('data', { getMasternodeListDiff_asU8: () => bytes });
+          }, 1);
+          return stream;
         }),
         subscribeToTransactionsWithProofs: vi.fn(async (_filter: unknown, _opts: unknown) => {
           if (options.dapiAddresses?.length === 1 && state.deadHosts.has(options.dapiAddresses[0].host)) {
@@ -90,6 +90,16 @@ vi.mock('@dashevo/dashcore-lib', () => ({
       },
       { BLOOM_UPDATE_ALL: 1 }
     ),
+    // Test masternode lists: the stream message is { hosts }, see subscribeToMasternodeList.
+    SimplifiedMNListDiff: class {
+      constructor(public obj: { hosts: string[] }) {}
+    },
+    SimplifiedMNList: class {
+      constructor(private readonly diff: { obj: { hosts: string[] } }) {}
+      getValidMasternodesList() {
+        return this.diff.obj.hosts.map((host) => ({ getPlatformHTTPSEndpoint: () => ({ host, port: 1443 }) }));
+      }
+    },
     // Test "IS locks" are just the txid as UTF-8 bytes.
     InstantLock: {
       fromBuffer: (buf: Buffer) => ({ txid: buf.toString('utf8') }),
@@ -98,6 +108,8 @@ vi.mock('@dashevo/dashcore-lib', () => ({
 }));
 
 vi.mock('../utils/islock-debug.js', () => ({ describeIslock: () => ({}) }));
+// Test masternode list messages carry JSON instead of CBOR.
+vi.mock('cbor', () => ({ default: { decodeFirstSync: (bytes: Buffer) => JSON.parse(bytes.toString('utf8')) } }));
 
 const fallbackMock = vi.hoisted(() => vi.fn<[], Promise<string[]>>());
 vi.mock('./evonodes.js', async (importOriginal) => ({
@@ -122,13 +134,23 @@ const TIMEOUT = 60000;
 const addresses = (n: number): string[] =>
   Array.from({ length: n }, (_, i) => `https://node${i}.test:1443`);
 
+const isSeed = (c: any): boolean => c.options.dapiAddresses?.[0]?.host.startsWith('seed-');
+
 const lockMessage = (txid: string) => ({
   getInstantSendLockMessages: () => ({ getMessagesList_asU8: () => [new TextEncoder().encode(txid)] }),
 });
 const blockMessage = { getRawMerkleBlock: () => new Uint8Array([1]) };
 
 /** The one-address clients, in creation order. */
-const nodeClients = (): any[] => state.clients.filter((c) => c.options.dapiAddresses?.length === 1);
+const nodeClients = (): any[] =>
+  state.clients.filter(
+    (c) =>
+      c.options.dapiAddresses?.length === 1 &&
+      !isSeed(c) &&
+      // Not the discovery's shared client, which gets neither call here.
+      (c.core.getBestBlockHeight.mock.calls.length > 0 ||
+        c.core.subscribeToTransactionsWithProofs.mock.calls.length > 0)
+  );
 const liveStreams = (): any[] => nodeClients().flatMap((c) => c.streams);
 const flush = async (): Promise<void> => { await vi.advanceTimersByTimeAsync(0); };
 
@@ -616,21 +638,32 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
 
   describe('testnet evonode discovery', () => {
     const hosts = (n: number): string[] => Array.from({ length: n }, (_, i) => `10.0.0.${i + 1}`);
-    const discoveryClients = (): any[] => state.clients.filter((c) => !c.options.dapiAddresses);
+    const seedClients = (): any[] => state.clients.filter(isSeed);
 
-    it('opens the streams on distinct evonodes from the masternode list, not on the shared client', async () => {
+    /** Start a subscription, let discovery read the list and the first stream deliver a message. */
+    async function startDiscovered(client: DAPISubscriptionClient, signal?: AbortSignal) {
+      const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT, undefined, signal);
+      // Long enough for every seed to fail in turn (each answers after 1 ms).
+      await vi.advanceTimersByTimeAsync(20);
+      liveStreams()[0]?.emit('data', blockMessage);
+      return pending;
+    }
+
+    it('opens the streams on distinct evonodes from the masternode list, read once from one seed', async () => {
       state.smlHosts = hosts(6);
       const client = new DAPISubscriptionClient({ network: 'testnet' });
-      expect(discoveryClients()).toHaveLength(1);
-      expect(discoveryClients()[0].options.network).toBe('testnet');
+      // Nothing is fetched until a subscription (or warm-up) needs it.
+      expect(state.clients).toHaveLength(0);
 
-      const sub = await startReady(client);
+      const sub = await startDiscovered(client);
 
+      expect(seedClients()).toHaveLength(1);
+      expect(seedClients()[0].listStreams[0].cancel).toHaveBeenCalled();
+      expect(seedClients()[0].disconnect).toHaveBeenCalled();
       const streamHosts = nodeClients().map((c) => c.options.dapiAddresses[0].host);
       expect(streamHosts).toHaveLength(ISLOCK_CONCURRENT_NODES);
       expect(new Set(streamHosts).size).toBe(ISLOCK_CONCURRENT_NODES);
       for (const host of streamHosts) expect(state.smlHosts).toContain(host);
-      expect(discoveryClients()[0].core.subscribeToTransactionsWithProofs).not.toHaveBeenCalled();
       expect(fallbackMock).not.toHaveBeenCalled();
 
       liveStreams()[1].emit('data', lockMessage(TXID));
@@ -641,45 +674,47 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
       state.smlHosts = hosts(1);
       const client = new DAPISubscriptionClient({ network: 'testnet' });
 
-      const sub = await startReady(client);
+      const sub = await startDiscovered(client);
 
-      expect(nodeClients()).toHaveLength(1);
+      expect(liveStreams()).toHaveLength(1);
       liveStreams()[0].emit('data', lockMessage(TXID));
       await expect(sub.wait()).resolves.toBeInstanceOf(Uint8Array);
     });
 
-    it('uses the list as it is at each subscription', async () => {
-      state.smlHosts = ['10.0.0.1'];
+    it('replaces a failed stream with another discovered evonode', async () => {
+      state.smlHosts = hosts(5);
       const client = new DAPISubscriptionClient({ network: 'testnet' });
-      const first = await startReady(client);
-      liveStreams()[0].emit('data', lockMessage(TXID));
-      await first.wait();
+      const sub = await startDiscovered(client);
 
-      state.clients.length = 0;
-      state.smlHosts = ['10.0.0.9'];
-      await startReady(client);
+      liveStreams()[0].emit('error', new Error('GrpcError: stream reset'));
+      await flush();
 
-      expect(nodeClients().map((c) => c.options.dapiAddresses[0].host)).toEqual(['10.0.0.9']);
+      expect(nodeClients()).toHaveLength(ISLOCK_CONCURRENT_NODES + 1);
+      const replacement = nodeClients()[ISLOCK_CONCURRENT_NODES];
+      replacement.streams[0].emit('data', lockMessage(TXID));
+      await expect(sub.wait()).resolves.toBeInstanceOf(Uint8Array);
     });
 
-    it('falls back to the quorum service list when the masternode list fails', async () => {
-      state.smlError = new Error('Failed to parse payload');
+    it('falls back to the quorum service list when no seed serves the masternode list', async () => {
+      state.smlError = new Error('Response closed without headers');
       fallbackMock.mockResolvedValue(['https://10.1.0.1:1443', 'https://10.1.0.2:1443', 'https://10.1.0.3:1443']);
       const client = new DAPISubscriptionClient({ network: 'testnet' });
 
-      await startReady(client);
+      await startDiscovered(client);
 
       expect(fallbackMock).toHaveBeenCalledOnce();
       expect(nodeClients().map((c) => c.options.dapiAddresses[0].host).sort()).toEqual(['10.1.0.1', '10.1.0.2', '10.1.0.3']);
+      for (const seed of seedClients()) expect(seed.disconnect).toHaveBeenCalled();
     });
 
     it('rejects before opening any stream when no evonode can be found', async () => {
       state.smlError = new Error('No available addresses');
       const client = new DAPISubscriptionClient({ network: 'testnet' });
 
-      await expect(client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT)).rejects.toThrow(
-        /No testnet evonodes found/
-      );
+      const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT);
+      const assertion = expect(pending).rejects.toThrow(/No testnet evonodes found/);
+      await vi.advanceTimersByTimeAsync(50);
+      await assertion;
       expect(nodeClients()).toHaveLength(0);
     });
 
@@ -689,12 +724,12 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
 
       const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT);
       const assertion = expect(pending).rejects.toThrow(`InstantSend lock subscription aborted for ${TXID}`);
-      await flush();
+      await vi.advanceTimersByTimeAsync(5);
       await client.disconnect();
       await assertion;
 
       expect(nodeClients()).toHaveLength(0);
-      expect(discoveryClients()[0].disconnect).toHaveBeenCalled();
+      expect(seedClients()[0].listStreams[0].cancel).toHaveBeenCalled();
     });
 
     it('a caller abort during discovery rejects with the abort error', async () => {
@@ -704,20 +739,25 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
 
       const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT, undefined, controller.signal);
       const assertion = expect(pending).rejects.toThrow(`InstantSend lock subscription aborted for ${TXID}`);
-      await flush();
+      await vi.advanceTimersByTimeAsync(5);
       controller.abort();
       await assertion;
       expect(nodeClients()).toHaveLength(0);
     });
 
-    it('warmEvonodeDiscovery() syncs the list without opening streams', async () => {
+    it('warmEvonodeDiscovery() reads the list ahead, and the subscription reuses it', async () => {
       state.smlHosts = hosts(3);
       const client = new DAPISubscriptionClient({ network: 'testnet' });
 
-      await client.warmEvonodeDiscovery();
-
-      expect(discoveryClients()[0].dapiAddressProvider.smlProvider.getSimplifiedMNList).toHaveBeenCalledOnce();
+      const warm = client.warmEvonodeDiscovery();
+      await vi.advanceTimersByTimeAsync(5);
+      await warm;
+      expect(seedClients()).toHaveLength(1);
       expect(nodeClients()).toHaveLength(0);
+
+      await startDiscovered(client);
+      expect(seedClients()).toHaveLength(1);
+      expect(nodeClients()).toHaveLength(3);
     });
 
     it('configured addresses (devnets) never start discovery', async () => {
@@ -726,7 +766,7 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
       await client.warmEvonodeDiscovery();
       await startReady(client);
 
-      expect(discoveryClients()).toHaveLength(0);
+      expect(seedClients()).toHaveLength(0);
       expect(fallbackMock).not.toHaveBeenCalled();
     });
   });

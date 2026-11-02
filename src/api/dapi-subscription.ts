@@ -1,11 +1,18 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import DAPIClientModule from '@dashevo/dapi-client';
+import dapiNetworkConfigs from '@dashevo/dapi-client/lib/networkConfigs.js';
 import dashcoreLib from '@dashevo/dashcore-lib';
 import { getNetwork } from '../config.js';
 import { hash160 } from '../crypto/hash.js';
 import { describeIslock } from '../utils/islock-debug.js';
-import { EvonodeDiscovery, parseDapiAddress, type DapiAddress } from './evonode-discovery.js';
+import {
+  EvonodeDiscovery,
+  parseDapiAddress,
+  seedAddresses,
+  shuffled,
+  type DapiAddress,
+} from './evonode-discovery.js';
 import {
   fetchPlatformStatus,
   fetchPlatformStatusIfSdkReady,
@@ -53,15 +60,6 @@ interface NodeSlot {
   failed: boolean;
 }
 
-function shuffled<T>(items: readonly T[]): T[] {
-  const copy = [...items];
-  for (let i = copy.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
-  }
-  return copy;
-}
-
 export class DAPISubscriptionClient {
   readonly network: string;
   // Exactly one of these is set: testnet discovers its evonodes, every other
@@ -86,9 +84,12 @@ export class DAPISubscriptionClient {
       this.nodeAddresses = [...new Map(parsed.map((a) => [`${a.host}:${a.port}`, a])).values()];
       this.fixedClient = new DAPIClientClass({ ...CLIENT_OPTIONS, dapiAddresses: parsed });
     } else if (getNetwork(config.network).type === 'testnet') {
-      this.discovery = new EvonodeDiscovery(
-        () => new DAPIClientClass({ ...CLIENT_OPTIONS, network: 'testnet' })
-      );
+      // Seeds come from the published dapi-client, so they follow its releases.
+      this.discovery = new EvonodeDiscovery({
+        network: 'testnet',
+        seeds: seedAddresses(dapiNetworkConfigs.testnet.seeds),
+        createClient: (dapiAddresses) => new DAPIClientClass({ ...CLIENT_OPTIONS, dapiAddresses }),
+      });
     } else {
       this.fixedClient = new DAPIClientClass({
         ...CLIENT_OPTIONS,
@@ -97,8 +98,12 @@ export class DAPISubscriptionClient {
     }
   }
 
-  /** Client for calls that may go to any node. */
-  private get dapiClient(): any {
+  /**
+   * Client for calls that may go to any node. On testnet it covers the
+   * evonodes found by the last discovery, so it is undefined before the
+   * first subscription.
+   */
+  private get dapiClient(): any | undefined {
     return this.discovery ? this.discovery.sharedClient : this.fixedClient;
   }
 
@@ -648,6 +653,10 @@ export class DAPISubscriptionClient {
     const status = await this.dapiClient.platform.getStatus();
 
     const chain = status.getChainStatus?.() ?? status.chain;
+    // dapi-client 5 returns null for sections a node leaves out, where 3.x
+    // threw. A status without its chain section says nothing about Platform,
+    // so keep treating it as a failed read rather than a healthy one.
+    if (!chain) throw new Error('Platform status has no chain section');
     const clhRaw = chain?.getCoreChainLockedHeight?.() ?? chain?.coreChainLockedHeight;
     const lbhRaw = chain?.getLatestBlockHeight?.() ?? chain?.latestBlockHeight;
 

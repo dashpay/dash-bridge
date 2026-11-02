@@ -39,7 +39,7 @@ test.describe('Deterministic UI E2E (mock mode)', () => {
       if (/evo-sdk|wasm[-_]sdk/i.test(url.pathname)) sdkRequests.push(request.url());
       // Evonode discovery (masternode list from the seeds, quorum-service
       // fallback) starts with a funding flow, not on page load.
-      if (/^seed-\d+\.testnet\.networks\.dash\.org$/.test(url.hostname) || url.pathname === '/masternodes') {
+      if (/^seed-\d+\./.test(url.hostname) || url.pathname === '/masternodes') {
         discoveryRequests.push(request.url());
       }
     });
