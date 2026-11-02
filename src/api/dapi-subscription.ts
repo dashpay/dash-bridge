@@ -103,7 +103,7 @@ export class DAPISubscriptionClient {
    * evonodes found by the last discovery, so it is undefined before the
    * first subscription.
    */
-  private get dapiClient(): any | undefined {
+  private get dapiClient(): any {
     return this.discovery ? this.discovery.sharedClient : this.fixedClient;
   }
 

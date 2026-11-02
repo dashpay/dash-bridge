@@ -639,6 +639,8 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
   describe('testnet evonode discovery', () => {
     const hosts = (n: number): string[] => Array.from({ length: n }, (_, i) => `10.0.0.${i + 1}`);
     const seedClients = (): any[] => state.clients.filter(isSeed);
+    /** Every client that isn't a seed client: node clients and the shared client. */
+    const nonSeedClients = (): any[] => state.clients.filter((c) => !isSeed(c));
 
     /** Start a subscription, let discovery read the list and the first stream deliver a message. */
     async function startDiscovered(client: DAPISubscriptionClient, signal?: AbortSignal) {
@@ -664,7 +666,8 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
       expect(streamHosts).toHaveLength(ISLOCK_CONCURRENT_NODES);
       expect(new Set(streamHosts).size).toBe(ISLOCK_CONCURRENT_NODES);
       for (const host of streamHosts) expect(state.smlHosts).toContain(host);
-      expect(fallbackMock).not.toHaveBeenCalled();
+      // The quorum service is asked alongside, as a health hint (it vouches for nothing here).
+      expect(fallbackMock).toHaveBeenCalledOnce();
 
       liveStreams()[1].emit('data', lockMessage(TXID));
       await expect(sub.wait()).resolves.toBeInstanceOf(Uint8Array);
@@ -715,7 +718,7 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
       const assertion = expect(pending).rejects.toThrow(/No testnet evonodes found/);
       await vi.advanceTimersByTimeAsync(50);
       await assertion;
-      expect(nodeClients()).toHaveLength(0);
+      expect(nonSeedClients()).toHaveLength(0);
     });
 
     it('disconnect() during discovery rejects with the abort error and opens nothing', async () => {
@@ -728,7 +731,7 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
       await client.disconnect();
       await assertion;
 
-      expect(nodeClients()).toHaveLength(0);
+      expect(nonSeedClients()).toHaveLength(0);
       expect(seedClients()[0].listStreams[0].cancel).toHaveBeenCalled();
     });
 
@@ -742,7 +745,7 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
       await vi.advanceTimersByTimeAsync(5);
       controller.abort();
       await assertion;
-      expect(nodeClients()).toHaveLength(0);
+      expect(nonSeedClients()).toHaveLength(0);
     });
 
     it('warmEvonodeDiscovery() reads the list ahead, and the subscription reuses it', async () => {
@@ -753,7 +756,7 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
       await vi.advanceTimersByTimeAsync(5);
       await warm;
       expect(seedClients()).toHaveLength(1);
-      expect(nodeClients()).toHaveLength(0);
+      expect(nonSeedClients()).toHaveLength(0);
 
       await startDiscovered(client);
       expect(seedClients()).toHaveLength(1);

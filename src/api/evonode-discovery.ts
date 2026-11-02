@@ -11,12 +11,21 @@ export interface DapiAddress {
   port: number;
 }
 
+/** A dapi-client pinned to the given addresses. */
+export type CreateDapiClient = (addresses: DapiAddress[]) => any;
+
 /** Longest one masternode list fetch may take, across all seeds tried. */
 export const MASTERNODE_LIST_TIMEOUT_MS = 10000;
 /** A seed that hasn't answered by then gets company: the next seed is asked too. */
 export const SEED_HEDGE_DELAY_MS = 3000;
 /** A list older than this is fetched again before use. */
 export const EVONODE_LIST_MAX_AGE_MS = 10 * 60_000;
+/**
+ * Fewest evonodes that both the masternode list and the quorum service's
+ * health check vouch for before discovery narrows to them (one per IS lock
+ * stream).
+ */
+export const MIN_HEALTHY_EVONODES = 3;
 
 const { SimplifiedMNList, SimplifiedMNListDiff } = dashcoreLib as any;
 
@@ -37,23 +46,23 @@ export function parseDapiAddress(url: string): DapiAddress {
 
 /** Distinct DAPI endpoints of the valid evonodes in a simplified masternode list. */
 export function evonodeEndpointsFromSml(sml: any): string[] {
-  const entries: any[] = sml?.getValidMasternodesList?.() ?? [];
   const endpoints = new Set<string>();
-  for (const entry of entries) {
+  for (const entry of sml.getValidMasternodesList()) {
     // null for regular masternodes; handles evonodes registered with
     // extended addresses, whose DAPI host can differ from the Core P2P host.
-    const platform = entry?.getPlatformHTTPSEndpoint?.();
+    const platform = entry.getPlatformHTTPSEndpoint();
     const endpoint = platform && toDapiEndpoint(platform.host, platform.port);
     if (endpoint) endpoints.add(endpoint);
   }
   return [...endpoints];
 }
 
-/** Evonode endpoints in a masternode list stream message (a full diff from the genesis block). */
-export function evonodeEndpointsFromListMessage(response: any, network: string): string[] {
-  const bytes = Buffer.from(response.getMasternodeListDiff_asU8());
-  const diff = new SimplifiedMNListDiff(cbor.decodeFirstSync(bytes), network);
-  return evonodeEndpointsFromSml(new SimplifiedMNList(diff));
+function disconnectQuietly(client: any): void {
+  Promise.resolve().then(() => client?.disconnect()).catch(() => {});
+}
+
+function cancelQuietly(stream: any): void {
+  try { stream?.cancel(); } catch { /* ignore */ }
 }
 
 /**
@@ -70,27 +79,29 @@ export function evonodeEndpointsFromListMessage(response: any, network: string):
  */
 export function fetchEvonodesFromSeeds(
   seeds: readonly DapiAddress[],
-  createClient: (seed: DapiAddress) => any,
+  createClient: CreateDapiClient,
   network: string,
   signal?: AbortSignal
 ): Promise<string[]> {
   return new Promise<string[]>((resolve, reject) => {
-    const open = new Set<{ client: any; stream?: any }>();
+    // Attempts still in play; leaving this set is what retires an attempt.
+    const open = new Set<{ client?: any; stream?: any }>();
     let next = 0;
     let failures = 0;
     let settled = false;
     let hedgeTimer: ReturnType<typeof setTimeout> | undefined;
 
+    const release = (attempt: { client?: any; stream?: any }): void => {
+      cancelQuietly(attempt.stream);
+      disconnectQuietly(attempt.client);
+    };
     const finish = (fn: () => void): void => {
       if (settled) return;
       settled = true;
       clearTimeout(deadlineTimer);
       clearTimeout(hedgeTimer);
       signal?.removeEventListener('abort', onAbort);
-      for (const attempt of open) {
-        try { attempt.stream?.cancel(); } catch { /* ignore */ }
-        Promise.resolve().then(() => attempt.client.disconnect()).catch(() => {});
-      }
+      for (const attempt of open) release(attempt);
       open.clear();
       fn();
     };
@@ -105,14 +116,12 @@ export function fetchEvonodesFromSeeds(
       const seed = seeds[next++];
       if (!seed) return;
       hedgeTimer = setTimeout(tryNextSeed, SEED_HEDGE_DELAY_MS);
-      const attempt: { client: any; stream?: any } = { client: undefined };
-      let failed = false;
+      const attempt: { client?: any; stream?: any } = {};
+      open.add(attempt);
+
       const fail = (error: unknown): void => {
-        if (settled || failed) return;
-        failed = true;
-        open.delete(attempt);
-        try { attempt.stream?.cancel(); } catch { /* ignore */ }
-        Promise.resolve().then(() => attempt.client?.disconnect()).catch(() => {});
+        if (!open.delete(attempt)) return;
+        release(attempt);
         console.warn(`[evonode-discovery] seed ${seed.host}:${seed.port} failed:`, error);
         failures += 1;
         if (failures >= seeds.length) {
@@ -124,31 +133,35 @@ export function fetchEvonodesFromSeeds(
       };
 
       try {
-        attempt.client = createClient(seed);
-        open.add(attempt);
-        Promise.resolve(attempt.client.core.subscribeToMasternodeList({ retries: 0 })).then((stream: any) => {
-          if (settled || failed) {
-            try { stream.cancel(); } catch { /* ignore */ }
-            return;
-          }
-          attempt.stream = stream;
-          stream.on('data', (response: unknown) => {
-            if (settled || failed) return;
-            let endpoints: string[];
-            try {
-              endpoints = evonodeEndpointsFromListMessage(response, network);
-            } catch (error) {
-              fail(error);
+        attempt.client = createClient([seed]);
+        Promise.resolve(attempt.client.core.subscribeToMasternodeList({ retries: 0 }))
+          .then((stream: any) => {
+            if (!open.has(attempt)) {
+              // Settled or failed while the stream was being opened.
+              cancelQuietly(stream);
               return;
             }
-            console.log(`[evonode-discovery] ${endpoints.length} evonodes from seed ${seed.host}:${seed.port}`);
-            finish(() => resolve(endpoints));
-          });
-          // In browsers a failed stream reports through 'end' (with a status)
-          // as well as 'error'; `failed` makes the second report a no-op.
-          stream.on('error', (error: unknown) => fail(error));
-          stream.on('end', () => fail(new Error('Masternode list stream ended before sending the list')));
-        }, fail);
+            attempt.stream = stream;
+            stream.on('data', (response: any) => {
+              if (!open.has(attempt)) return;
+              let endpoints: string[];
+              try {
+                const bytes = Buffer.from(response.getMasternodeListDiff_asU8());
+                const diff = new SimplifiedMNListDiff(cbor.decodeFirstSync(bytes), network);
+                endpoints = evonodeEndpointsFromSml(new SimplifiedMNList(diff));
+              } catch (error) {
+                fail(error);
+                return;
+              }
+              console.log(`[evonode-discovery] ${endpoints.length} evonodes from seed ${seed.host}:${seed.port}`);
+              finish(() => resolve(endpoints));
+            });
+            // In browsers a failed stream reports through 'end' (with a status)
+            // as well as 'error'; only the first report counts.
+            stream.on('error', (error: unknown) => fail(error));
+            stream.on('end', () => fail(new Error('Masternode list stream ended before sending the list')));
+          })
+          .catch(fail);
       } catch (error) {
         fail(error);
       }
@@ -170,48 +183,46 @@ export function fetchEvonodesFromSeeds(
 export interface EvonodeDiscoveryOptions {
   network: string;
   seeds: readonly DapiAddress[];
-  /** A dapi-client pinned to the given addresses. */
-  createClient: (addresses: DapiAddress[]) => any;
-  /** Quorum-service list, used when the masternode list can't be read. */
-  fetchFallback?: () => Promise<string[]>;
+  createClient: CreateDapiClient;
+  /** Quorum-service list of evonodes that pass its health check. */
+  fetchHealthy?: () => Promise<string[]>;
   now?: () => number;
 }
 
 /**
- * Finds the testnet evonodes to open IS lock streams on, from the simplified
- * masternode list served by the network seeds (dapi-client's discovery
- * source), read with {@link fetchEvonodesFromSeeds}. The list is kept for
- * {@link EVONODE_LIST_MAX_AGE_MS} and fetched again after that, so a long
- * session never works from a stale list.
+ * Finds the testnet evonodes to open IS lock streams on. The source is the
+ * simplified masternode list served by the network seeds (dapi-client's
+ * discovery source), read with {@link fetchEvonodesFromSeeds}. The quorum
+ * service's list of nodes passing its DAPI health check is read alongside:
+ * when at least {@link MIN_HEALTHY_EVONODES} nodes are in both, only those
+ * are used; when the masternode list can't be read, the quorum service list
+ * is used on its own.
  *
- * Every valid evonode in the list is used, not dapi-client's testnet address
- * provider result, which also filters by a snapshot of addresses bundled with
- * the library. Bad nodes cost little: the subscription races several and
- * replaces failed ones.
+ * Every valid evonode in the list is considered, not dapi-client's testnet
+ * address provider result, which also filters by a snapshot of addresses
+ * bundled with the library.
  *
- * When the masternode list can't be read, the quorum service list is used
- * instead. When both fail, getNodes() rejects, so the caller stops before
- * broadcasting.
+ * The result is kept for {@link EVONODE_LIST_MAX_AGE_MS}, then read again.
+ * If that read finds nothing, the previous list is used rather than none.
+ * getNodes() rejects only when no list was ever found, so the caller stops
+ * before broadcasting.
  */
 export class EvonodeDiscovery {
   private readonly network: string;
   private readonly seeds: readonly DapiAddress[];
-  private readonly createClient: (addresses: DapiAddress[]) => any;
-  private readonly fetchFallback: () => Promise<string[]>;
+  private readonly createClient: CreateDapiClient;
+  private readonly fetchHealthy: () => Promise<string[]>;
   private readonly now: () => number;
   private list?: { endpoints: string[]; fetchedAt: number };
-  // In-flight masternode list read, shared by concurrent callers (warm() and
-  // getNodes()). Each read has its own deadline and closes its own streams.
-  private pendingFetch?: Promise<string[]>;
-  // Aborts the in-flight read on disconnect().
-  private fetchController?: AbortController;
+  // In-flight read, shared by concurrent callers (warm() and getNodes()).
+  private pending?: { promise: Promise<string[]>; controller: AbortController };
   private shared?: { key: string; client: any };
 
   constructor(options: EvonodeDiscoveryOptions) {
     this.network = options.network;
     this.seeds = options.seeds;
     this.createClient = options.createClient;
-    this.fetchFallback = options.fetchFallback ?? fetchTestnetEvonodeAddresses;
+    this.fetchHealthy = options.fetchHealthy ?? fetchTestnetEvonodeAddresses;
     this.now = options.now ?? Date.now;
   }
 
@@ -220,22 +231,16 @@ export class EvonodeDiscovery {
    * go to any of them (e.g. getTransaction); undefined before the first
    * discovery.
    */
-  get sharedClient(): any | undefined {
+  get sharedClient(): any {
     return this.shared?.client;
   }
 
   /**
-   * The current evonode endpoints. Rejects when neither the masternode list
-   * nor the quorum service yields one, or when `signal` aborts.
+   * The current evonode endpoints. Rejects when none can be found, or when
+   * `signal` aborts.
    */
   async getNodes(signal?: AbortSignal): Promise<DapiAddress[]> {
-    let endpoints = await this.whenNotAborted(this.readList(), signal);
-    if (endpoints.length === 0) {
-      endpoints = await this.whenNotAborted(this.fetchFallback(), signal);
-      if (endpoints.length > 0) {
-        console.warn(`[evonode-discovery] using ${endpoints.length} evonodes from the quorum service`);
-      }
-    }
+    const endpoints = await whenNotAborted(this.readList(), signal);
     if (endpoints.length === 0) {
       throw new Error('No testnet evonodes found: the masternode list and the quorum service both failed');
     }
@@ -245,51 +250,67 @@ export class EvonodeDiscovery {
   }
 
   /**
-   * Read the masternode list ahead of the first getNodes(). Settles (never
-   * rejects) once the list is read or the read fails.
+   * Find the evonodes ahead of the first getNodes(). Settles (never rejects)
+   * once the read finishes either way.
    */
   async warm(): Promise<void> {
     await this.readList();
   }
 
   async disconnect(): Promise<void> {
-    this.fetchController?.abort();
+    this.pending?.controller.abort();
     const shared = this.shared;
     this.shared = undefined;
-    if (shared) {
-      try { await shared.client.disconnect(); } catch { /* ignore */ }
-    }
+    if (shared) disconnectQuietly(shared.client);
   }
 
-  /** Endpoints from a fresh enough masternode list, or [] when it can't be read. */
+  /** Endpoints of a fresh enough list, read again when stale; [] when none was ever found. */
   private readList(): Promise<string[]> {
     if (this.list && this.now() - this.list.fetchedAt < EVONODE_LIST_MAX_AGE_MS) {
       return Promise.resolve(this.list.endpoints);
     }
-    if (!this.pendingFetch) {
+    if (!this.pending) {
       const controller = new AbortController();
-      this.fetchController = controller;
-      const fetch = fetchEvonodesFromSeeds(
-        shuffled(this.seeds),
-        (seed) => this.createClient([seed]),
-        this.network,
-        controller.signal
-      ).then(
-        (endpoints) => {
-          if (endpoints.length > 0) this.list = { endpoints, fetchedAt: this.now() };
-          else console.warn('[evonode-discovery] masternode list has no valid evonodes');
-          return endpoints;
-        },
-        (error) => {
-          console.warn('[evonode-discovery] masternode list unavailable:', error);
-          return [] as string[];
-        }
-      ).finally(() => {
-        if (this.pendingFetch === fetch) this.pendingFetch = undefined;
-      });
-      this.pendingFetch = fetch;
+      const pending = {
+        controller,
+        promise: this.discover(controller.signal).finally(() => {
+          // A read aborted by disconnect() may finish after a newer one started.
+          if (this.pending === pending) this.pending = undefined;
+        }),
+      };
+      this.pending = pending;
     }
-    return this.pendingFetch;
+    return this.pending.promise;
+  }
+
+  private async discover(signal: AbortSignal): Promise<string[]> {
+    const [fromList, healthy] = await Promise.all([
+      fetchEvonodesFromSeeds(shuffled(this.seeds), this.createClient, this.network, signal).catch((error) => {
+        console.warn('[evonode-discovery] masternode list unavailable:', error);
+        return [] as string[];
+      }),
+      this.fetchHealthy().catch(() => [] as string[]),
+    ]);
+
+    let endpoints = fromList;
+    if (fromList.length > 0) {
+      const healthySet = new Set(healthy);
+      const vouched = fromList.filter((endpoint) => healthySet.has(endpoint));
+      if (vouched.length >= MIN_HEALTHY_EVONODES) endpoints = vouched;
+    } else if (healthy.length > 0) {
+      console.warn(`[evonode-discovery] using ${healthy.length} evonodes from the quorum service`);
+      endpoints = healthy;
+    }
+
+    if (endpoints.length > 0) {
+      this.list = { endpoints, fetchedAt: this.now() };
+      return endpoints;
+    }
+    if (this.list) {
+      console.warn('[evonode-discovery] no evonodes found; keeping the previous list');
+      return this.list.endpoints;
+    }
+    return [];
   }
 
   private updateSharedClient(endpoints: string[], nodes: DapiAddress[]): void {
@@ -297,21 +318,21 @@ export class EvonodeDiscovery {
     if (this.shared?.key === key) return;
     const previous = this.shared;
     this.shared = { key, client: this.createClient(nodes) };
-    if (previous) Promise.resolve().then(() => previous.client.disconnect()).catch(() => {});
+    if (previous) disconnectQuietly(previous.client);
   }
+}
 
-  private whenNotAborted<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-    if (!signal) return promise;
-    return new Promise<T>((resolve, reject) => {
-      const onAbort = (): void => reject(new Error('Evonode discovery aborted'));
-      if (signal.aborted) {
-        onAbort();
-        return;
-      }
-      signal.addEventListener('abort', onAbort, { once: true });
-      promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
-    });
-  }
+function whenNotAborted<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(new Error('Evonode discovery aborted'));
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
 }
 
 export function shuffled<T>(items: readonly T[]): T[] {

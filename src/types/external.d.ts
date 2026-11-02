@@ -50,7 +50,6 @@ declare module '@dashevo/dapi-client' {
 declare module '@dashevo/dapi-client/lib/networkConfigs.js' {
   const networkConfigs: {
     testnet: { seeds: string[] };
-    mainnet: { seeds: string[] };
   };
   export default networkConfigs;
 }
