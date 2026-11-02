@@ -69,11 +69,13 @@ describe('parseEvonodeAddresses', () => {
     const result = parseEvonodeAddresses(
       payload(
         node('68.67.122.3', { addresses: { core_p2p: ['68.67.122.3:19999'], platform_https: ['evo3.example.org:443'] } }),
-        node('68.67.122.4', { addresses: undefined })
+        node('68.67.122.4', { addresses: undefined }),
+        // Without platform_https, the record's platformHTTPPort (mainnet: 443).
+        node('89.35.131.219', { addresses: undefined, address: '89.35.131.219:9999', platformHTTPPort: 443 })
       )
     );
 
-    expect(result).toEqual(['https://evo3.example.org:443', 'https://68.67.122.4:1443']);
+    expect(result).toEqual(['https://evo3.example.org:443', 'https://68.67.122.4:1443', 'https://89.35.131.219:443']);
   });
 
   it.each([undefined, null, 'x', {}, { data: {} }, { success: false }])(

@@ -50,8 +50,14 @@ export const ISLOCK_CONCURRENT_NODES = 3;
 export const ISLOCK_MAX_NODE_ATTEMPTS = ISLOCK_CONCURRENT_NODES + 6;
 /** Deadline for each node's best-block-height answer before the stream starts. */
 export const ISLOCK_HEIGHT_TIMEOUT_MS = 8000;
-/** Longest subscribeForInstantSendLock waits for a first stream message before returning. */
-export const ISLOCK_READINESS_CAP_MS = 3000;
+/**
+ * Longest subscribeForInstantSendLock waits for a first stream message. With
+ * no message by then it rejects (nothing has been broadcast yet): a stream
+ * that has not delivered anything is not known to be listening, and an IS
+ * lock arriving before it is would be lost. Streams replay the last 10 blocks
+ * first, so a live one answers within about a second.
+ */
+export const ISLOCK_READINESS_TIMEOUT_MS = 15000;
 
 const CLIENT_OPTIONS = { timeout: 30000, retries: 3 };
 
@@ -115,7 +121,7 @@ export class DAPISubscriptionClient {
   }
 
   /**
-   * Start syncing the testnet masternode list so the first IS lock
+   * Start reading the testnet or mainnet masternode list so the first IS lock
    * subscription doesn't wait for it. Never rejects; resolves at once on
    * networks with configured addresses.
    */
@@ -445,11 +451,11 @@ export class DAPISubscriptionClient {
    * pick nodes at random and could land on the same one twice.
    *
    * subscribeToTransactionsWithProofs resolves before any connection exists, so
-   * readiness is approximated: return once any stream delivers a message (the
-   * server replays recent blocks, usually within ~1 s) or after the readiness
-   * cap, whichever comes first. The remaining streams keep connecting. If every
-   * node attempt has already failed by then, this rejects instead of returning
-   * a handle, so nothing is broadcast without a listener.
+   * readiness means a stream has delivered a message (the server replays
+   * recent blocks first, usually within ~1 s). Return then; the remaining
+   * streams keep connecting. If every node attempt fails first, or no stream
+   * delivers anything within {@link ISLOCK_READINESS_TIMEOUT_MS}, this rejects
+   * instead of returning a handle, so nothing is broadcast without a listener.
    */
   private async subscribeOnMultipleNodes(
     txid: string,
@@ -470,7 +476,7 @@ export class DAPISubscriptionClient {
 
     let markReady!: () => void;
     const ready = new Promise<void>((resolve) => { markReady = resolve; });
-    const readyTimerId = setTimeout(markReady, ISLOCK_READINESS_CAP_MS);
+    let readyTimerId: ReturnType<typeof setTimeout> | undefined;
     // Set when every node attempt failed. Only read once, right after the
     // readiness wait, to fail before the caller broadcasts.
     let allFailed: Error | undefined;
@@ -513,6 +519,14 @@ export class DAPISubscriptionClient {
       const timeoutId = setTimeout(() => {
         finish(() => reject(new Error(`Timeout waiting for InstantSend lock for ${txid} after ${timeoutMs}ms`)));
       }, timeoutMs);
+
+      readyTimerId = setTimeout(() => {
+        const silent = new Error(
+          `InstantSend lock subscription failed for ${txid}: no evonode stream delivered data within ${ISLOCK_READINESS_TIMEOUT_MS}ms`
+        );
+        allFailed = silent;
+        finish(() => reject(silent));
+      }, ISLOCK_READINESS_TIMEOUT_MS);
 
       const openNode = (): void => {
         const address = nodes[attempts++];
@@ -629,7 +643,7 @@ export class DAPISubscriptionClient {
    * Devnets go straight to dapi-client (`platform.getStatus()`) rather than
    * `sdk.system.status()` because the wasm SDK in trusted mode can return
    * testnet-cached values there, while this path is authoritative for
-   * whatever masternode the dapiAddresses point at. Testnet uses the SDK;
+   * whatever masternode the dapiAddresses point at. Testnet and mainnet use the SDK;
    * see {@link getPlatformStatus}.
    *
    * @returns the chain-locked height, or `undefined` if the masternode

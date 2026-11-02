@@ -41,10 +41,10 @@ src/
 │   └── builder.ts       # InstantSend lock proof building
 ├── api/                 # Network communication
 │   ├── insight.ts       # Insight API client (UTXO fetching, broadcast)
-│   ├── dapi.ts          # JSON-RPC client (mainnet InstantSend locks, best chain lock)
-│   ├── dapi-subscription.ts # DAPI bloom-filter stream (testnet/devnet InstantSend locks)
+│   ├── dapi.ts          # JSON-RPC client (only for a custom devnet with its own rpcUrl)
+│   ├── dapi-subscription.ts # DAPI bloom-filter streams (InstantSend locks on every network)
 │   ├── islock.ts        # IslockService: picks the InstantSend lock source per network
-│   ├── evonode-discovery.ts # Testnet evonodes from the masternode list the seeds serve
+│   ├── evonode-discovery.ts # Testnet/mainnet evonodes from the masternode list the seeds serve
 │   └── evonodes.ts      # Quorum-service evonode list (discovery fallback)
 ├── platform/            # Dash Platform operations
 │   ├── identity.ts      # Identity registration and top-up

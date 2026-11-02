@@ -24,7 +24,9 @@ vi.mock('@dashevo/dashcore-lib', () => {
 
 import {
   EVONODE_LIST_MAX_AGE_MS,
+  EVONODE_LIST_STALE_LIMIT_MS,
   EvonodeDiscovery,
+  LIST_FETCH_TIMING,
   MASTERNODE_LIST_TIMEOUT_MS,
   MIN_HEALTHY_EVONODES,
   SEED_HEDGE_DELAY_MS,
@@ -244,6 +246,22 @@ describe('fetchEvonodesFromSeeds', () => {
     expect(net.streams[0].cancel).toHaveBeenCalled();
   });
 
+  it('gives the bigger mainnet list longer: hedge at 8 s, give up at 25 s', async () => {
+    const net = fakeNetwork({});
+    const mainnetSeeds = seedAddresses(['seed-1.mainnet.test', 'seed-2.mainnet.test', 'seed-3.mainnet.test', 'seed-4.mainnet.test']);
+
+    const result = fetchEvonodesFromSeeds(mainnetSeeds, net.createClient, 'mainnet');
+    const assertion = expect(result).rejects.toThrow(`timed out after ${LIST_FETCH_TIMING.mainnet.timeoutMs}ms`);
+    await vi.advanceTimersByTimeAsync(SEED_HEDGE_DELAY_MS);
+    expect(net.clients).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(LIST_FETCH_TIMING.mainnet.hedgeDelayMs - SEED_HEDGE_DELAY_MS);
+    expect(net.clients).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(MASTERNODE_LIST_TIMEOUT_MS);
+    expect(mainnetSeeds[0].port).toBe(443);
+    await vi.advanceTimersByTimeAsync(LIST_FETCH_TIMING.mainnet.timeoutMs);
+    await assertion;
+  });
+
   it('rejects without contacting a seed when the signal is already aborted or there are no seeds', async () => {
     const net = fakeNetwork({});
     const controller = new AbortController();
@@ -322,9 +340,12 @@ describe('EvonodeDiscovery', () => {
     expect(hostsOf(await discovery.getNodes())).toEqual(['10.0.0.1']);
     expect(seedClients()).toHaveLength(1);
 
+    // Past the max age the old list is served at once while a new one is read.
     now = EVONODE_LIST_MAX_AGE_MS;
-    expect(hostsOf(await settle(discovery.getNodes()))).toEqual(['10.0.0.9']);
+    expect(hostsOf(await discovery.getNodes())).toEqual(['10.0.0.1']);
     expect(seedClients()).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(hostsOf(await discovery.getNodes())).toEqual(['10.0.0.9']);
     // The shared client follows the new list; the old one is closed.
     expect(discovery.sharedClient).not.toBe(firstShared);
     await vi.advanceTimersByTimeAsync(0);
@@ -336,9 +357,20 @@ describe('EvonodeDiscovery', () => {
     const { discovery } = discover(behaviour);
     await settle(discovery.getNodes());
 
-    now = EVONODE_LIST_MAX_AGE_MS;
+    // Even past the stale limit, where the read is awaited.
+    now = EVONODE_LIST_STALE_LIMIT_MS;
     behaviour['seed-1.test'] = { kind: 'reject' };
     expect(hostsOf(await settle(discovery.getNodes()))).toEqual(['10.0.0.1']);
+  });
+
+  it(`awaits a new read once the list is older than ${EVONODE_LIST_STALE_LIMIT_MS / 60000} minutes`, async () => {
+    const behaviour: Record<string, Behaviour> = { 'seed-1.test': { kind: 'list', hosts: ['10.0.0.1'] } };
+    const { discovery } = discover(behaviour);
+    await settle(discovery.getNodes());
+
+    now = EVONODE_LIST_STALE_LIMIT_MS;
+    behaviour['seed-1.test'] = { kind: 'list', hosts: ['10.0.0.9'] };
+    expect(hostsOf(await settle(discovery.getNodes()))).toEqual(['10.0.0.9']);
   });
 
   it('shares one read between concurrent callers', async () => {
@@ -366,7 +398,7 @@ describe('EvonodeDiscovery', () => {
     expect(hostsOf(await discovery.getNodes())).toEqual(['10.0.0.9']);
     expect(seedClients()).toHaveLength(1);
 
-    now = EVONODE_LIST_MAX_AGE_MS;
+    now = EVONODE_LIST_STALE_LIMIT_MS;
     behaviour['seed-1.test'] = { kind: 'list', hosts: ['10.0.0.1'] };
     expect(hostsOf(await settle(discovery.getNodes()))).toEqual(['10.0.0.1']);
   });
