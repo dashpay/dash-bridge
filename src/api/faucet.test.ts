@@ -120,6 +120,17 @@ describe('requestTestnetFunds', () => {
     vi.unstubAllGlobals();
   });
 
+  it('asks for the standard payout without an amount (the faucet rejects an unkeyed amount)', async () => {
+    stubFaucetResponse({ txid: VALID_TXID, amount: 1, address: 'yAddr' });
+    const { requestTestnetFunds } = await import('./faucet.js');
+
+    await requestTestnetFunds('https://faucet.example', 'yAddr', 'cap-token');
+
+    const [url, init] = (fetch as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0];
+    expect(url).toBe('https://faucet.example/api/core-faucet');
+    expect(JSON.parse(init.body as string)).toEqual({ address: 'yAddr', capToken: 'cap-token' });
+  });
+
   it('returns a response with a hex txid', async () => {
     stubFaucetResponse({ txid: VALID_TXID, amount: 1, address: 'yAddr' });
     const { requestTestnetFunds } = await import('./faucet.js');

@@ -59,15 +59,14 @@ export async function loadPlatformForFunding(timeoutMs = 5 * 60_000): Promise<vo
  * real Platform status before the asset lock is broadcast. Idle visitors never
  * reach a funding flow, so they still never download it.
  *
- * Testnet only: other networks keep their existing status sources (JSON-RPC on
- * mainnet, dapi-client on devnets) and are not touched. Fire and forget: a
- * failed connect is logged and later shows up as a degraded health verdict; it
- * never blocks funding. Concurrent and repeated calls share one connect.
- * Resolves true once a connect was attempted (settled either way), false when
- * the network is not testnet and nothing was started.
+ * Testnet and mainnet only: devnets read status through dapi-client and are
+ * not touched. Fire and forget: a failed connect is logged and later shows up
+ * as a degraded health verdict; it never blocks funding. Concurrent and
+ * repeated calls share one connect. Resolves true once a connect was attempted
+ * (settled either way), false for a devnet, where nothing was started.
  */
 export function warmPlatformSdkForFunding(network: string): Promise<boolean> {
-  if (getNetwork(network).type !== 'testnet') return Promise.resolve(false);
+  if (getNetwork(network).type === 'devnet') return Promise.resolve(false);
   return loadPlatformClientModule()
     .then(({ connectPlatformSdk }) => connectPlatformSdk(network))
     .then(

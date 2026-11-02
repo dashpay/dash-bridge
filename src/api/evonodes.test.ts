@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  TESTNET_MASTERNODES_URL,
-  fetchTestnetEvonodeAddresses,
+  fetchHealthyEvonodeAddresses,
+  quorumMasternodesUrl,
   parseEvonodeAddresses,
   toDapiEndpoint,
 } from './evonodes.js';
@@ -104,7 +104,7 @@ describe('toDapiEndpoint', () => {
   });
 });
 
-describe('fetchTestnetEvonodeAddresses', () => {
+describe('fetchHealthyEvonodeAddresses', () => {
   const fetchMock = vi.fn();
 
   beforeEach(() => {
@@ -130,25 +130,26 @@ describe('fetchTestnetEvonodeAddresses', () => {
   it('returns the healthy nodes from the quorum service', async () => {
     respond(payload(node('10.0.0.1'), node('10.0.0.2', { status: 'POSE_BANNED' }), node('10.0.0.3')));
 
-    await expect(fetchTestnetEvonodeAddresses()).resolves.toEqual([
+    await expect(fetchHealthyEvonodeAddresses('testnet')).resolves.toEqual([
       'https://10.0.0.1:1443',
       'https://10.0.0.3:1443',
     ]);
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(fetchMock.mock.calls[0][0]).toBe(TESTNET_MASTERNODES_URL);
+    expect(fetchMock.mock.calls[0][0]).toBe('https://quorums.testnet.networks.dash.org/masternodes');
+    expect(quorumMasternodesUrl('mainnet')).toBe('https://quorums.mainnet.networks.dash.org/masternodes');
   });
 
   it('returns nothing on a network error, without retrying', async () => {
     fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
 
-    await expect(fetchTestnetEvonodeAddresses()).resolves.toEqual([]);
+    await expect(fetchHealthyEvonodeAddresses('testnet')).resolves.toEqual([]);
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('returns nothing on an HTTP error', async () => {
     respond({}, false);
 
-    await expect(fetchTestnetEvonodeAddresses()).resolves.toEqual([]);
+    await expect(fetchHealthyEvonodeAddresses('testnet')).resolves.toEqual([]);
   });
 
   it('returns nothing on invalid JSON', async () => {
@@ -161,7 +162,7 @@ describe('fetchTestnetEvonodeAddresses', () => {
       },
     });
 
-    await expect(fetchTestnetEvonodeAddresses()).resolves.toEqual([]);
+    await expect(fetchHealthyEvonodeAddresses('testnet')).resolves.toEqual([]);
   });
 
   it('gives up after the 5 s timeout', async () => {
@@ -175,7 +176,7 @@ describe('fetchTestnetEvonodeAddresses', () => {
         })
     );
 
-    const result = fetchTestnetEvonodeAddresses();
+    const result = fetchHealthyEvonodeAddresses('testnet');
     await vi.advanceTimersByTimeAsync(5000);
 
     await expect(result).resolves.toEqual([]);

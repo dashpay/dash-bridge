@@ -186,18 +186,15 @@ function loadCapWidget(): Promise<void> {
 }
 
 /**
- * Request testnet funds from the faucet
+ * Request the faucet's standard payout. No `amount` is sent: the faucet only
+ * accepts one with an API key.
  */
 export async function requestTestnetFunds(
   baseUrl: string,
   address: string,
-  amount: number = 1.0,
   capToken?: string
 ): Promise<FaucetResponse> {
-  const body: Record<string, unknown> = {
-    address,
-    amount,
-  };
+  const body: Record<string, unknown> = { address };
 
   if (capToken) {
     body.capToken = capToken;

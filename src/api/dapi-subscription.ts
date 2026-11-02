@@ -8,6 +8,7 @@ import { hash160 } from '../crypto/hash.js';
 import { describeIslock } from '../utils/islock-debug.js';
 import {
   EvonodeDiscovery,
+  type DiscoveryNetwork,
   parseDapiAddress,
   seedAddresses,
   shuffled,
@@ -60,11 +61,19 @@ interface NodeSlot {
   failed: boolean;
 }
 
+/**
+ * The public network a config belongs to (by type, so an unknown name that
+ * falls back to the testnet config counts as testnet); undefined for devnets.
+ */
+function publicNetwork(network: string): DiscoveryNetwork | undefined {
+  const { type } = getNetwork(network);
+  return type === 'testnet' || type === 'mainnet' ? type : undefined;
+}
+
 export class DAPISubscriptionClient {
   readonly network: string;
-  // Exactly one of these is set: testnet discovers its evonodes, every other
-  // network uses one client over its configured addresses (or, on mainnet,
-  // dapi-client's default seeds).
+  // Exactly one of these is set: testnet and mainnet discover their evonodes,
+  // devnets use one client over their configured addresses.
   private readonly discovery?: EvonodeDiscovery;
   private readonly fixedClient?: any;
   private readonly nodeAddresses: DapiAddress[];
@@ -83,25 +92,23 @@ export class DAPISubscriptionClient {
       // A repeated address would put two "distinct" streams on one node.
       this.nodeAddresses = [...new Map(parsed.map((a) => [`${a.host}:${a.port}`, a])).values()];
       this.fixedClient = new DAPIClientClass({ ...CLIENT_OPTIONS, dapiAddresses: parsed });
-    } else if (getNetwork(config.network).type === 'testnet') {
-      // Seeds come from the published dapi-client, so they follow its releases.
-      this.discovery = new EvonodeDiscovery({
-        network: 'testnet',
-        seeds: seedAddresses(dapiNetworkConfigs.testnet.seeds),
-        createClient: (dapiAddresses) => new DAPIClientClass({ ...CLIENT_OPTIONS, dapiAddresses }),
-      });
     } else {
-      this.fixedClient = new DAPIClientClass({
-        ...CLIENT_OPTIONS,
-        network: config.network === 'mainnet' ? 'mainnet' : 'testnet',
+      // Seeds come from the published dapi-client, so they follow its releases.
+      // A devnet without addresses can't be reached; it discovers testnet's,
+      // as dapi-client's default would have.
+      const network = publicNetwork(config.network) ?? 'testnet';
+      this.discovery = new EvonodeDiscovery({
+        network,
+        seeds: seedAddresses(dapiNetworkConfigs[network].seeds),
+        createClient: (dapiAddresses) => new DAPIClientClass({ ...CLIENT_OPTIONS, dapiAddresses }),
       });
     }
   }
 
   /**
-   * Client for calls that may go to any node. On testnet it covers the
-   * evonodes found by the last discovery, so it is undefined before the
-   * first subscription.
+   * Client for calls that may go to any node. On testnet and mainnet it
+   * covers the evonodes found by the last discovery, so it is undefined
+   * before the first subscription.
    */
   private get dapiClient(): any {
     return this.discovery ? this.discovery.sharedClient : this.fixedClient;
@@ -640,8 +647,8 @@ export class DAPISubscriptionClient {
    * Tenderdash is stuck). Fields are `undefined` when the masternode doesn't
    * report them.
    *
-   * Testnet reads through the EvoSDK (see `fetchPlatformStatus` for why);
-   * every other network keeps the dapi-client gRPC call.
+   * Testnet and mainnet read through the EvoSDK (see `fetchPlatformStatus`
+   * for why); devnets keep the dapi-client gRPC call.
    */
   async getPlatformStatus(): Promise<PlatformStatus> {
     if (this.readsStatusViaSdk()) {
@@ -652,10 +659,11 @@ export class DAPISubscriptionClient {
 
   /**
    * Passive variant of {@link getPlatformStatus} for background health polling.
-   * On testnet it resolves `undefined`, without loading the EvoSDK, until a
-   * funding flow has started connecting it (and while that connect is in
-   * flight); from then on it reads, and failures reject. Other networks read
-   * exactly as getPlatformStatus does (dapi-client needs no SDK download).
+   * On testnet and mainnet it resolves `undefined`, without loading the
+   * EvoSDK, until a funding flow has started connecting it (and while that
+   * connect is in flight); from then on it reads, and failures reject.
+   * Devnets read exactly as getPlatformStatus does (dapi-client needs no SDK
+   * download).
    */
   async peekPlatformStatus(): Promise<PlatformStatus | undefined> {
     if (this.readsStatusViaSdk()) {
@@ -664,9 +672,8 @@ export class DAPISubscriptionClient {
     return this.fetchStatusViaDapiClient();
   }
 
-  /** By config type, not name: an unknown name falls back to the testnet config. */
   private readsStatusViaSdk(): boolean {
-    return getNetwork(this.network).type === 'testnet';
+    return publicNetwork(this.network) !== undefined;
   }
 
   private async fetchStatusViaDapiClient(): Promise<PlatformStatus> {

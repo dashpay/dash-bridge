@@ -67,13 +67,12 @@ export class IslockService {
 
   /**
    * Open the IS lock source before broadcasting and return a handle whose
-   * `.wait()` resolves with the IS lock bytes once available. Networks without
-   * RPC (testnet, devnets) use the DAPI bloom subscription (testnet over the
-   * evonodes it discovers, devnets over their configured dapiAddresses), which
-   * must be established before broadcast because subscriptions don't replay
-   * historical IS locks. Mainnet uses JSON-RPC
-   * polling, which can recover by txid and avoids browser-hostile dapi-client
-   * stream discovery.
+   * `.wait()` resolves with the IS lock bytes once available. Testnet, mainnet
+   * and devnets use the DAPI bloom subscription (testnet and mainnet over the
+   * evonodes they discover, devnets over their configured dapiAddresses),
+   * which must be established before broadcast because subscriptions don't
+   * replay historical IS locks. Only a custom devnet that configures its own
+   * rpcUrl polls JSON-RPC instead.
    */
   async subscribeForInstantSendLock(
     txid: string,
@@ -105,10 +104,7 @@ export class IslockService {
       };
     }
 
-    // JSON-RPC backed networks (mainnet) should not touch dapi-client
-    // stream setup here. Browser seed/SML discovery can fail on TLS-hostname
-    // validation and report "No available addresses", which would block the
-    // broadcast even though the RPC islock endpoint is sufficient.
+    // A devnet with its own rpcUrl polls it by txid and opens no stream.
     const jsonRpcController = new AbortController();
     onProgress?.('Polling InstantSend lock...');
 
@@ -158,11 +154,8 @@ export class IslockService {
   }
 
   /**
-   * Whether a JSON-RPC endpoint is configured (mainnet, or a devnet with an
-   * rpcUrl). Testnet and other devnets have none and read Platform status
-   * instead. The network-status poller uses this to avoid the dapi-client
-   * seed/SML address resolution, which can't complete in a browser on
-   * mainnet.
+   * Whether a JSON-RPC endpoint is configured: only a custom devnet with its
+   * own rpcUrl. Every other network reads Platform status instead.
    */
   get supportsJsonRpc(): boolean {
     return this.hasJsonRpc;

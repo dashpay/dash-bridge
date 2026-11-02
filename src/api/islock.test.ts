@@ -15,7 +15,7 @@ vi.mock('./dapi.js', () => ({
   DAPIClient: vi.fn().mockImplementation((config: { network: string; rpcUrl?: string }) => ({
     network: config.network,
     get hasRpcUrl() {
-      return !!config.rpcUrl || config.network === 'mainnet';
+      return !!config.rpcUrl;
     },
     waitForInstantSendLock: mocks.waitForInstantSendLock,
     getBestChainLock: mocks.getBestChainLock,
@@ -41,10 +41,10 @@ describe('IslockService', () => {
     mocks.getTransactionLockStatus.mockResolvedValue(null);
   });
 
-  it('uses JSON-RPC only on mainnet to avoid browser DAPI stream discovery', async () => {
+  it('uses JSON-RPC only for a devnet that configures its own rpcUrl', async () => {
     const bytes = new Uint8Array([1, 2, 3]);
     mocks.waitForInstantSendLock.mockResolvedValue(bytes);
-    const service = new IslockService({ network: 'mainnet' });
+    const service = new IslockService({ network: 'devnet-moutai', rpcUrl: 'https://rpc.devnet.test' });
     const progress: string[] = [];
 
     const handle = await service.subscribeForInstantSendLock(
@@ -115,13 +115,28 @@ describe('IslockService', () => {
     await expect(handle.wait()).resolves.toBe(bytes);
   });
 
-  it('warms evonode discovery on testnet but not on JSON-RPC networks', async () => {
+  it('uses the DAPI subscription on mainnet too: no JSON-RPC service anywhere by default', async () => {
+    const { MAINNET } = await import('../config.js');
+    const bytes = new Uint8Array([7]);
+    mocks.subscribeForInstantSendLock.mockResolvedValue({ wait: vi.fn().mockResolvedValue(bytes) });
+    const service = new IslockService({ network: 'mainnet', rpcUrl: MAINNET.rpcUrl });
+
+    expect(MAINNET.rpcUrl).toBeUndefined();
+    expect(service.supportsJsonRpc).toBe(false);
+    const handle = await service.subscribeForInstantSendLock('txid', new Uint8Array([4]), { txid: 'prevout', vout: 0 });
+
+    expect(mocks.waitForInstantSendLock).not.toHaveBeenCalled();
+    await expect(handle.wait()).resolves.toBe(bytes);
+  });
+
+  it('warms evonode discovery on testnet and mainnet but not on JSON-RPC networks', async () => {
     mocks.warmEvonodeDiscovery.mockResolvedValue(undefined);
 
     await new IslockService({ network: 'testnet' }).warmEvonodeDiscovery();
-    expect(mocks.warmEvonodeDiscovery).toHaveBeenCalledOnce();
-
     await new IslockService({ network: 'mainnet' }).warmEvonodeDiscovery();
-    expect(mocks.warmEvonodeDiscovery).toHaveBeenCalledOnce();
+    expect(mocks.warmEvonodeDiscovery).toHaveBeenCalledTimes(2);
+
+    await new IslockService({ network: 'devnet-moutai', rpcUrl: 'https://rpc.devnet.test' }).warmEvonodeDiscovery();
+    expect(mocks.warmEvonodeDiscovery).toHaveBeenCalledTimes(2);
   });
 });

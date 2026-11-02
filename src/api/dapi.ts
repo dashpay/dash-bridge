@@ -1,5 +1,9 @@
 /**
- * Client for InstantSend lock retrieval via JSON-RPC API
+ * JSON-RPC client for InstantSend locks and the best chain lock, used only
+ * for a custom devnet that configures its own `rpcUrl`. Testnet and mainnet
+ * use no JSON-RPC service: their IS locks come from DAPI streams on
+ * discovered evonodes (api/evonode-discovery.ts) and their chain-locked
+ * height from the EvoSDK.
  */
 
 import { withRetry, isRetryableError, type RetryOptions } from '../utils/retry.js';
@@ -7,12 +11,6 @@ import { describeIslock } from '../utils/islock-debug.js';
 import { abortableSleep } from '../utils/sleep.js';
 import { fetchJson } from '../utils/fetch-json.js';
 
-// Testnet has no default: it reads IS locks from the DAPI bloom stream on
-// evonodes it discovers (see api/evonode-discovery.ts) because
-// trpc.digitalcash.dev never upgraded to V24.
-const API_URLS: Record<string, string> = {
-  mainnet: 'https://rpc.digitalcash.dev',
-};
 
 export interface DAPIConfig {
   network: string;
@@ -57,7 +55,7 @@ export class DAPIClient {
   }
 
   get hasRpcUrl(): boolean {
-    return !!(this.rpcUrl || API_URLS[this.network]);
+    return !!this.rpcUrl;
   }
 
   /**
@@ -149,7 +147,7 @@ export class DAPIClient {
     }
 
     return withRetry(async () => {
-      const baseUrl = this.rpcUrl ?? API_URLS[this.network];
+      const baseUrl = this.rpcUrl;
       if (!baseUrl) {
         return null;
       }
@@ -175,7 +173,7 @@ export class DAPIClient {
     signal?: AbortSignal
   ): Promise<Uint8Array | null> {
     return withRetry(async () => {
-      const baseUrl = this.rpcUrl ?? API_URLS[this.network];
+      const baseUrl = this.rpcUrl;
       if (!baseUrl) {
         throw new Error(`No RPC URL configured for network ${this.network}`);
       }

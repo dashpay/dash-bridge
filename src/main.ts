@@ -3517,10 +3517,10 @@ async function startChainlockFallback(): Promise<void> {
   );
 
   // Poll #2: chain-locked Dash Core height. JSON-RPC `getbestchainlock`
-  // first (it returns nothing without an rpcUrl, e.g. on testnet), then the
-  // Platform status via IslockService: the EvoSDK on testnet, direct gRPC via
-  // @dashevo/dapi-client elsewhere (it works uniformly across trusted and
-  // non-trusted devnets; see DAPISubscriptionClient.getCoreChainLockedHeight).
+  // first (only a custom devnet with its own rpcUrl has one; it returns
+  // nothing elsewhere), then the Platform status via IslockService: the EvoSDK
+  // on testnet and mainnet, direct gRPC via @dashevo/dapi-client on devnets
+  // (see DAPISubscriptionClient.getCoreChainLockedHeight).
   const chainLockPoll = (async (): Promise<void> => {
     while (!signal.aborted) {
       let height: number | undefined;
@@ -4512,12 +4512,7 @@ async function requestFaucetFunds() {
     // Step 3: Request funds
     updateState(setFaucetRequesting(state));
 
-    const result = await requestTestnetFunds(
-      network.faucetBaseUrl,
-      state.depositAddress,
-      1.0,  // 1 DASH
-      capToken
-    );
+    const result = await requestTestnetFunds(network.faucetBaseUrl, state.depositAddress, capToken);
 
     updateState(setFaucetSuccess(state, result.txid));
 

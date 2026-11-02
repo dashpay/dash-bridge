@@ -114,7 +114,7 @@ vi.mock('cbor', () => ({ default: { decodeFirstSync: (bytes: Buffer) => JSON.par
 const fallbackMock = vi.hoisted(() => vi.fn<[], Promise<string[]>>());
 vi.mock('./evonodes.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./evonodes.js')>()),
-  fetchTestnetEvonodeAddresses: fallbackMock,
+  fetchHealthyEvonodeAddresses: fallbackMock,
 }));
 
 import {
@@ -603,8 +603,8 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
     await sub.wait();
   });
 
-  it('uses the single shared client with fewer than two configured addresses', async () => {
-    for (const dapiAddresses of [undefined, [] as string[], addresses(1)]) {
+  it('uses the single shared client for a devnet with one configured address', async () => {
+    for (const dapiAddresses of [addresses(1)]) {
       state.clients.length = 0;
       const client = new DAPISubscriptionClient({ network: 'devnet-moutai', dapiAddresses });
       expect(state.clients).toHaveLength(1);
@@ -796,6 +796,20 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
       await startDiscovered(client);
       expect(seedClients()).toHaveLength(1);
       expect(nodeClients()).toHaveLength(3);
+    });
+
+    it('mainnet discovers its evonodes from the mainnet seeds the same way', async () => {
+      state.smlHosts = hosts(4);
+      const client = new DAPISubscriptionClient({ network: 'mainnet' });
+
+      const sub = await startDiscovered(client);
+
+      expect(seedClients()).toHaveLength(1);
+      const seed = seedClients()[0].options.dapiAddresses[0];
+      expect(seed.host).toMatch(/\.mainnet\.networks\.dash\.org$|pshenmic/);
+      expect(nodeClients()).toHaveLength(ISLOCK_CONCURRENT_NODES);
+      liveStreams()[0].emit('data', lockMessage(TXID));
+      await expect(sub.wait()).resolves.toBeInstanceOf(Uint8Array);
     });
 
     it('configured addresses (devnets) never start discovery', async () => {

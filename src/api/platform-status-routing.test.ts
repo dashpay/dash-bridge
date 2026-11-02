@@ -104,12 +104,13 @@ describe('Platform status routing', () => {
       expect(mocks.fetchPlatformStatus).not.toHaveBeenCalled();
     });
 
-    it('keeps the dapi-client call on mainnet', async () => {
-      mocks.dapiGetStatus.mockResolvedValue({ chain: { coreChainLockedHeight: 5 } });
+    it('reads mainnet status through the SDK too (no JSON-RPC or dapi-client status there)', async () => {
+      mocks.fetchPlatformStatus.mockResolvedValue({ coreChainLockedHeight: 5 });
       const client = new DAPISubscriptionClient({ network: 'mainnet' });
 
       await expect(client.getCoreChainLockedHeight()).resolves.toBe(5);
-      expect(mocks.fetchPlatformStatus).not.toHaveBeenCalled();
+      expect(mocks.fetchPlatformStatus).toHaveBeenCalledWith('mainnet');
+      expect(mocks.dapiGetStatus).not.toHaveBeenCalled();
     });
   });
 
