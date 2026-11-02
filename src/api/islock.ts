@@ -10,10 +10,15 @@ export interface IslockServiceConfig {
   dapiAddresses?: string[];
 }
 
+/** Subscription attempts before broadcast, and the waits between them. */
+export const PRE_BROADCAST_RETRY_DELAYS_MS = [5000, 15000];
+
 export class IslockService {
   private readonly jsonRpcClient: DAPIClient;
   private readonly subscriptionClient: DAPISubscriptionClient;
   private readonly hasJsonRpc: boolean;
+  // Aborted by disconnect(), so a pre-broadcast retry wait stops with it.
+  private readonly lifetime = new AbortController();
 
   constructor(config: IslockServiceConfig) {
     const jsonRpcConfig: DAPIConfig = { network: config.network, rpcUrl: config.rpcUrl };
@@ -67,13 +72,12 @@ export class IslockService {
 
   /**
    * Open the IS lock source before broadcasting and return a handle whose
-   * `.wait()` resolves with the IS lock bytes once available. Networks without
-   * RPC (testnet, devnets) use the DAPI bloom subscription (testnet over the
-   * evonodes it discovers, devnets over their configured dapiAddresses), which
-   * must be established before broadcast because subscriptions don't replay
-   * historical IS locks. Mainnet uses JSON-RPC
-   * polling, which can recover by txid and avoids browser-hostile dapi-client
-   * stream discovery.
+   * `.wait()` resolves with the IS lock bytes once available. Testnet, mainnet
+   * and devnets use the DAPI bloom subscription (testnet and mainnet over the
+   * evonodes they discover, devnets over their configured dapiAddresses),
+   * which must be established before broadcast because subscriptions don't
+   * replay historical IS locks. Only a custom devnet that configures its own
+   * rpcUrl polls JSON-RPC instead.
    */
   async subscribeForInstantSendLock(
     txid: string,
@@ -85,13 +89,7 @@ export class IslockService {
   ): Promise<{ wait: () => Promise<Uint8Array> }> {
     if (!this.hasJsonRpc) {
       // DAPI subscription only — establish the stream, then return.
-      const sub = await this.subscriptionClient.subscribeForInstantSendLock(
-        txid,
-        publicKey,
-        utxo,
-        timeoutMs,
-        onProgress
-      );
+      const sub = await this.subscribeBeforeBroadcast(txid, publicKey, utxo, timeoutMs, onProgress);
       const tripwireController = new AbortController();
       this.startLockStatusTripwire(txid, tripwireController.signal);
       return {
@@ -105,10 +103,7 @@ export class IslockService {
       };
     }
 
-    // JSON-RPC backed networks (mainnet) should not touch dapi-client
-    // stream setup here. Browser seed/SML discovery can fail on TLS-hostname
-    // validation and report "No available addresses", which would block the
-    // broadcast even though the RPC islock endpoint is sufficient.
+    // A devnet with its own rpcUrl polls it by txid and opens no stream.
     const jsonRpcController = new AbortController();
     onProgress?.('Polling InstantSend lock...');
 
@@ -158,11 +153,8 @@ export class IslockService {
   }
 
   /**
-   * Whether a JSON-RPC endpoint is configured (mainnet, or a devnet with an
-   * rpcUrl). Testnet and other devnets have none and read Platform status
-   * instead. The network-status poller uses this to avoid the dapi-client
-   * seed/SML address resolution, which can't complete in a browser on
-   * mainnet.
+   * Whether a JSON-RPC endpoint is configured: only a custom devnet with its
+   * own rpcUrl. Every other network reads Platform status instead.
    */
   get supportsJsonRpc(): boolean {
     return this.hasJsonRpc;
@@ -188,7 +180,7 @@ export class IslockService {
 
   /**
    * Platform status for background polling: `undefined` means "not read yet"
-   * (testnet, before any funding flow started connecting the EvoSDK, or while
+   * (testnet and mainnet, before a funding flow started connecting the EvoSDK, or while
    * that connect is in flight), which is not a failure. A failing read after
    * that rejects. See DAPISubscriptionClient.peekPlatformStatus.
    */
@@ -213,7 +205,7 @@ export class IslockService {
   }
 
   /**
-   * Start finding testnet evonodes for the IS lock subscription. Never
+   * Start finding testnet or mainnet evonodes for the IS lock subscription. Never
    * rejects; a no-op on networks with configured addresses or JSON-RPC.
    */
   warmEvonodeDiscovery(): Promise<void> {
@@ -221,7 +213,46 @@ export class IslockService {
     return this.subscriptionClient.warmEvonodeDiscovery();
   }
 
+  /**
+   * Open the DAPI subscription, retrying while nothing has been broadcast:
+   * evonodes can be briefly unreachable, and failing here would leave the
+   * user with an unspent deposit and no in-app way back to it. The final
+   * failure says so.
+   */
+  private async subscribeBeforeBroadcast(
+    txid: string,
+    publicKey: Uint8Array,
+    utxo: { txid: string; vout: number },
+    timeoutMs: number,
+    onProgress?: (message: string) => void
+  ): Promise<{ wait: () => Promise<Uint8Array> }> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.subscriptionClient.subscribeForInstantSendLock(
+          txid, publicKey, utxo, timeoutMs, onProgress
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (this.lifetime.signal.aborted || /aborted/i.test(message)) throw error;
+        const delay = PRE_BROADCAST_RETRY_DELAYS_MS[attempt];
+        if (delay === undefined) {
+          throw new Error(
+            `${message}. Nothing was broadcast, so your deposit has not been spent; ` +
+              'it can be recovered with the key backup that was downloaded.'
+          );
+        }
+        console.warn(`[islock] subscription failed before broadcast, retrying in ${delay} ms:`, error);
+        onProgress?.('Could not reach Dash evonodes, retrying...');
+        await abortableSleep(delay, this.lifetime.signal);
+        if (this.lifetime.signal.aborted) {
+          throw new Error(`InstantSend lock subscription aborted for ${txid}`);
+        }
+      }
+    }
+  }
+
   async disconnect(): Promise<void> {
+    this.lifetime.abort();
     await this.subscriptionClient.disconnect();
   }
 }

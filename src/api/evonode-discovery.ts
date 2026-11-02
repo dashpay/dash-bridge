@@ -2,7 +2,7 @@
 
 import dashcoreLib from '@dashevo/dashcore-lib';
 import cbor from 'cbor';
-import { fetchTestnetEvonodeAddresses, toDapiEndpoint } from './evonodes.js';
+import { fetchHealthyEvonodeAddresses, toDapiEndpoint } from './evonodes.js';
 
 /** A DAPI endpoint in the shape dapi-client's `dapiAddresses` option takes. */
 export interface DapiAddress {
@@ -14,12 +14,31 @@ export interface DapiAddress {
 /** A dapi-client pinned to the given addresses. */
 export type CreateDapiClient = (addresses: DapiAddress[]) => any;
 
-/** Longest one masternode list fetch may take, across all seeds tried. */
+export type DiscoveryNetwork = 'testnet' | 'mainnet';
+
+/** Longest one testnet masternode list fetch may take, across all seeds tried. */
 export const MASTERNODE_LIST_TIMEOUT_MS = 10000;
-/** A seed that hasn't answered by then gets company: the next seed is asked too. */
+/** A testnet seed that hasn't answered by then gets company: the next seed is asked too. */
 export const SEED_HEDGE_DELAY_MS = 3000;
-/** A list older than this is fetched again before use. */
+
+export interface ListFetchTiming {
+  timeoutMs: number;
+  hedgeDelayMs: number;
+}
+
+/**
+ * The full mainnet list is about 1.2 MB (vs 270 kB on testnet) and took
+ * 4.6–7.6 s from a healthy seed, so mainnet waits longer before asking a
+ * second seed and before giving up.
+ */
+export const LIST_FETCH_TIMING: Record<DiscoveryNetwork, ListFetchTiming> = {
+  testnet: { timeoutMs: MASTERNODE_LIST_TIMEOUT_MS, hedgeDelayMs: SEED_HEDGE_DELAY_MS },
+  mainnet: { timeoutMs: 25000, hedgeDelayMs: 8000 },
+};
+/** A list older than this is read again (in the background while it is still usable). */
 export const EVONODE_LIST_MAX_AGE_MS = 10 * 60_000;
+/** A list older than this is not used while a new one is read; the read is awaited. */
+export const EVONODE_LIST_STALE_LIMIT_MS = 60 * 60_000;
 /**
  * Fewest evonodes that both the masternode list and the quorum service's
  * health check vouch for before discovery narrows to them (one per IS lock
@@ -80,8 +99,9 @@ function cancelQuietly(stream: any): void {
 export function fetchEvonodesFromSeeds(
   seeds: readonly DapiAddress[],
   createClient: CreateDapiClient,
-  network: string,
-  signal?: AbortSignal
+  network: DiscoveryNetwork,
+  signal?: AbortSignal,
+  timing: ListFetchTiming = LIST_FETCH_TIMING[network]
 ): Promise<string[]> {
   return new Promise<string[]>((resolve, reject) => {
     // Attempts still in play; leaving this set is what retires an attempt.
@@ -107,15 +127,15 @@ export function fetchEvonodesFromSeeds(
     };
     const onAbort = (): void => finish(() => reject(new Error('Masternode list fetch aborted')));
     const deadlineTimer = setTimeout(
-      () => finish(() => reject(new Error(`Masternode list fetch timed out after ${MASTERNODE_LIST_TIMEOUT_MS}ms`))),
-      MASTERNODE_LIST_TIMEOUT_MS
+      () => finish(() => reject(new Error(`Masternode list fetch timed out after ${timing.timeoutMs}ms`))),
+      timing.timeoutMs
     );
 
     const tryNextSeed = (): void => {
       clearTimeout(hedgeTimer);
       const seed = seeds[next++];
       if (!seed) return;
-      hedgeTimer = setTimeout(tryNextSeed, SEED_HEDGE_DELAY_MS);
+      hedgeTimer = setTimeout(tryNextSeed, timing.hedgeDelayMs);
       const attempt: { client?: any; stream?: any } = {};
       open.add(attempt);
 
@@ -185,7 +205,7 @@ export function fetchEvonodesFromSeeds(
 }
 
 export interface EvonodeDiscoveryOptions {
-  network: string;
+  network: DiscoveryNetwork;
   seeds: readonly DapiAddress[];
   createClient: CreateDapiClient;
   /** Quorum-service list of evonodes that pass its health check. */
@@ -194,7 +214,7 @@ export interface EvonodeDiscoveryOptions {
 }
 
 /**
- * Finds the testnet evonodes to open IS lock streams on. The source is the
+ * Finds the evonodes (testnet or mainnet) to open IS lock streams on. The source is the
  * simplified masternode list served by the network seeds (dapi-client's
  * discovery source), read with {@link fetchEvonodesFromSeeds}. The quorum
  * service's list of nodes passing its DAPI health check is read alongside:
@@ -212,7 +232,7 @@ export interface EvonodeDiscoveryOptions {
  * before broadcasting.
  */
 export class EvonodeDiscovery {
-  private readonly network: string;
+  private readonly network: DiscoveryNetwork;
   private readonly seeds: readonly DapiAddress[];
   private readonly createClient: CreateDapiClient;
   private readonly fetchHealthy: () => Promise<string[]>;
@@ -226,7 +246,7 @@ export class EvonodeDiscovery {
     this.network = options.network;
     this.seeds = options.seeds;
     this.createClient = options.createClient;
-    this.fetchHealthy = options.fetchHealthy ?? fetchTestnetEvonodeAddresses;
+    this.fetchHealthy = options.fetchHealthy ?? (() => fetchHealthyEvonodeAddresses(options.network));
     this.now = options.now ?? Date.now;
   }
 
@@ -246,7 +266,7 @@ export class EvonodeDiscovery {
   async getNodes(signal?: AbortSignal): Promise<DapiAddress[]> {
     const endpoints = await whenNotAborted(this.readList(), signal);
     if (endpoints.length === 0) {
-      throw new Error('No testnet evonodes found: the masternode list and the quorum service both failed');
+      throw new Error(`No ${this.network} evonodes found: the masternode list and the quorum service both failed`);
     }
     const nodes = endpoints.map(parseDapiAddress);
     this.updateSharedClient(endpoints, nodes);
@@ -268,11 +288,26 @@ export class EvonodeDiscovery {
     if (shared) disconnectQuietly(shared.client);
   }
 
-  /** Endpoints of a fresh enough list, read again when stale; [] when none was ever found. */
+  /**
+   * Endpoints of the current list; [] when none was ever found. A list past
+   * its max age is still served (and read again in the background) up to the
+   * stale limit, so a subscription after a long deposit wait doesn't wait for
+   * a full read before broadcasting.
+   */
   private readList(): Promise<string[]> {
-    if (this.list && this.now() - this.list.fetchedAt < EVONODE_LIST_MAX_AGE_MS) {
+    const age = this.list ? this.now() - this.list.fetchedAt : Infinity;
+    if (this.list && age < EVONODE_LIST_MAX_AGE_MS) {
       return Promise.resolve(this.list.endpoints);
     }
+    const read = this.startRead();
+    if (this.list && age < EVONODE_LIST_STALE_LIMIT_MS) {
+      read.catch(() => {});
+      return Promise.resolve(this.list.endpoints);
+    }
+    return read;
+  }
+
+  private startRead(): Promise<string[]> {
     if (!this.pending) {
       const controller = new AbortController();
       const pending = {

@@ -1,13 +1,15 @@
 import { fetchJson } from '../utils/fetch-json.js';
 
 /**
- * Quorum service lists every testnet masternode with its PoSe status and the
- * result of its DAPI version check. It answers CORS requests from any origin
- * (`access-control-allow-origin: *`, including preflights), so browsers can
- * read it directly. Used only as the fallback when dapi-client's masternode
- * list discovery fails (see evonode-discovery.ts).
+ * The quorum service lists every masternode of a network with its PoSe status
+ * and the result of its DAPI version check. It answers CORS requests from any
+ * origin (`access-control-allow-origin: *`, including preflights), so browsers
+ * can read it directly. Discovery uses it as a health hint and as the fallback
+ * when the masternode list can't be read (see evonode-discovery.ts).
  */
-export const TESTNET_MASTERNODES_URL = 'https://quorums.testnet.networks.dash.org/masternodes';
+export function quorumMasternodesUrl(network: 'testnet' | 'mainnet'): string {
+  return `https://quorums.${network}.networks.dash.org/masternodes`;
+}
 
 const EVONODE_FETCH_TIMEOUT_MS = 5000;
 
@@ -48,9 +50,9 @@ export function parseEvonodeAddresses(payload: unknown): string[] {
   const endpoints = new Set<string>();
   for (const node of data) {
     if (!node || typeof node !== 'object') continue;
-    const { address, addresses, status, versionCheck } = node as Record<string, unknown>;
+    const { address, addresses, platformHTTPPort, status, versionCheck } = node as Record<string, unknown>;
     if (status !== 'ENABLED' || versionCheck !== 'success') continue;
-    const endpoint = platformEndpoint(addresses) ?? coreHostEndpoint(address);
+    const endpoint = platformEndpoint(addresses) ?? coreHostEndpoint(address, platformHTTPPort);
     if (endpoint) endpoints.add(endpoint);
   }
   return [...endpoints];
@@ -66,22 +68,27 @@ function platformEndpoint(addresses: unknown): string | undefined {
   return toDapiEndpoint(first.slice(0, separator), Number(first.slice(separator + 1)));
 }
 
-/** Older records: `address` is the Core P2P endpoint (host:19999); only its host is reused, on port 1443. */
-function coreHostEndpoint(address: unknown): string | undefined {
-  return typeof address === 'string' ? toDapiEndpoint(address.replace(/:\d+$/, '')) : undefined;
+/**
+ * Older records: `address` is the Core P2P endpoint (host:19999); its host is
+ * reused with the record's platformHTTPPort (1443 when absent).
+ */
+function coreHostEndpoint(address: unknown, platformHTTPPort: unknown): string | undefined {
+  if (typeof address !== 'string') return undefined;
+  const port = typeof platformHTTPPort === 'number' ? platformHTTPPort : DAPI_HTTPS_PORT;
+  return toDapiEndpoint(address.replace(/:\d+$/, ''), port);
 }
 
 /**
- * Healthy testnet evonode endpoints from the quorum service (one attempt,
+ * Healthy evonode endpoints from the network's quorum service (one attempt,
  * 5 s). Resolves an empty list, after logging why, when the service fails.
  */
-export async function fetchTestnetEvonodeAddresses(): Promise<string[]> {
+export async function fetchHealthyEvonodeAddresses(network: 'testnet' | 'mainnet'): Promise<string[]> {
   try {
     return parseEvonodeAddresses(
-      await fetchJson(TESTNET_MASTERNODES_URL, {}, EVONODE_FETCH_TIMEOUT_MS)
+      await fetchJson(quorumMasternodesUrl(network), {}, EVONODE_FETCH_TIMEOUT_MS)
     );
   } catch (error) {
-    console.warn('Could not fetch the testnet evonode list from the quorum service:', error);
+    console.warn(`Could not fetch the ${network} evonode list from the quorum service:`, error);
     return [];
   }
 }

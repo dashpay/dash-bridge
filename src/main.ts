@@ -295,8 +295,8 @@ async function initClients(network: string): Promise<void> {
   // the newer init owns the clients; installing these would pair this network's
   // IS-lock service with the other network's Insight client.
   if (state.network !== network) return;
-  // Testnet has no dapiAddresses: the service discovers its evonodes when a
-  // funding flow starts (see warmFundingConnect).
+  // Testnet and mainnet have no dapiAddresses: the service discovers their
+  // evonodes when a funding flow starts (see warmFundingConnect).
   islockService = new IslockService({
     network,
     rpcUrl: config.rpcUrl,
@@ -362,10 +362,10 @@ function downloadFundingKeyBackup(backupState: BridgeState): void {
 }
 
 /**
- * Testnet: connect the SDK (shared with any connect in flight) and poll the
- * health indicator as soon as it settles, and sync the masternode list the IS
- * lock subscription picks its evonodes from. Other networks: nothing.
- * Never rejects.
+ * Testnet and mainnet: connect the SDK (shared with any connect in flight)
+ * and poll the health indicator as soon as it settles, and read the
+ * masternode list the IS lock subscription picks its evonodes from. Devnets:
+ * nothing. Never rejects.
  */
 function warmFundingConnect(network: string): Promise<void> {
   const sdk = warmPlatformSdkForFunding(network).then((attempted) => {
@@ -374,7 +374,7 @@ function warmFundingConnect(network: string): Promise<void> {
   return Promise.all([sdk, islockService?.warmEvonodeDiscovery()]).then(() => {});
 }
 
-/** How long a funding flow waits for the testnet SDK connect before showing its deposit address anyway. */
+/** How long a funding flow waits for the SDK connect (testnet, mainnet) before showing its deposit address anyway. */
 const FUNDING_SDK_CONNECT_WAIT_MS = 5000;
 
 /**
@@ -384,7 +384,7 @@ const FUNDING_SDK_CONNECT_WAIT_MS = 5000;
  * when they still fail (or stall for 5 min) this throws a ChunkLoadError
  * while nothing is at risk (error screen with Reload).
  *
- * Testnet also starts connecting the SDK, so the health indicator reads
+ * Testnet and mainnet also start connecting the SDK, so the health indicator reads
  * Platform before the asset lock is broadcast (polls right after the connect
  * settles instead of waiting for the next 30 s tick). The flow waits for that
  * connect at most FUNDING_SDK_CONNECT_WAIT_MS; it continues in the background
@@ -3480,8 +3480,8 @@ function cancelChainlockFallback(): void {
 
 /**
  * Begin the chainlock fallback flow: poll Insight for the asset-lock tx's
- * confirming block, poll for the chain-locked tip (JSON-RPC on mainnet,
- * Platform status elsewhere), and once `coreChainLockedHeight >= blockHeight` build a
+ * confirming block, poll for the chain-locked tip (Platform status; JSON-RPC
+ * only for a devnet with its own rpcUrl), and once `coreChainLockedHeight >= blockHeight` build a
  * chain asset lock proof and resubmit the original Platform operation.
  */
 async function startChainlockFallback(): Promise<void> {
@@ -3517,10 +3517,10 @@ async function startChainlockFallback(): Promise<void> {
   );
 
   // Poll #2: chain-locked Dash Core height. JSON-RPC `getbestchainlock`
-  // first (it returns nothing without an rpcUrl, e.g. on testnet), then the
-  // Platform status via IslockService: the EvoSDK on testnet, direct gRPC via
-  // @dashevo/dapi-client elsewhere (it works uniformly across trusted and
-  // non-trusted devnets; see DAPISubscriptionClient.getCoreChainLockedHeight).
+  // first (only a custom devnet with its own rpcUrl has one; it returns
+  // nothing elsewhere), then the Platform status via IslockService: the EvoSDK
+  // on testnet and mainnet, direct gRPC via @dashevo/dapi-client on devnets
+  // (see DAPISubscriptionClient.getCoreChainLockedHeight).
   const chainLockPoll = (async (): Promise<void> => {
     while (!signal.aborted) {
       let height: number | undefined;
@@ -4512,12 +4512,7 @@ async function requestFaucetFunds() {
     // Step 3: Request funds
     updateState(setFaucetRequesting(state));
 
-    const result = await requestTestnetFunds(
-      network.faucetBaseUrl,
-      state.depositAddress,
-      1.0,  // 1 DASH
-      capToken
-    );
+    const result = await requestTestnetFunds(network.faucetBaseUrl, state.depositAddress, capToken);
 
     updateState(setFaucetSuccess(state, result.txid));
 

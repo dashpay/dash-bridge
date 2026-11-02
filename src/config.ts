@@ -44,12 +44,11 @@ export const TESTNET: NetworkConfig = {
   dustThreshold: 546,
   platformHrp: 'tdash',
   faucetBaseUrl: 'https://faucet.thepasta.org',
-  // No rpcUrl: trpc.digitalcash.dev is stuck on Core v23 and has no IS locks
-  // past the V24 fork (block 1,578,000). IS locks come from the DAPI bloom
-  // stream instead, on evonodes found through dapi-client's masternode list
-  // discovery (falling back to the quorum service's list); see
-  // api/evonode-discovery.ts. No dapiAddresses: evonodes and their
-  // certificates rotate within days, so any built-in list goes stale.
+  // No rpcUrl: IS locks come from the DAPI bloom stream on evonodes found
+  // through dapi-client's masternode list discovery (with the quorum
+  // service's list as health hint and fallback); see api/evonode-discovery.ts.
+  // No dapiAddresses: evonodes and their certificates rotate within days, so
+  // any built-in list goes stale.
 };
 
 export const MAINNET: NetworkConfig = {
@@ -62,7 +61,8 @@ export const MAINNET: NetworkConfig = {
   minFee: 1000,
   dustThreshold: 546,
   platformHrp: 'dash',
-  rpcUrl: 'https://rpc.digitalcash.dev',
+  // No rpcUrl: like testnet, IS locks come from DAPI streams on discovered
+  // evonodes and Platform status from the EvoSDK (api/evonode-discovery.ts).
 };
 
 export const DEVNET_MOUTAI: NetworkConfig = {

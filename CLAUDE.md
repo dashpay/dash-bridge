@@ -41,10 +41,10 @@ src/
 │   └── builder.ts       # InstantSend lock proof building
 ├── api/                 # Network communication
 │   ├── insight.ts       # Insight API client (UTXO fetching, broadcast)
-│   ├── dapi.ts          # JSON-RPC client (mainnet InstantSend locks, best chain lock)
-│   ├── dapi-subscription.ts # DAPI bloom-filter stream (testnet/devnet InstantSend locks)
+│   ├── dapi.ts          # JSON-RPC client (only for a custom devnet with its own rpcUrl)
+│   ├── dapi-subscription.ts # DAPI bloom-filter streams (InstantSend locks on every network)
 │   ├── islock.ts        # IslockService: picks the InstantSend lock source per network
-│   ├── evonode-discovery.ts # Testnet evonodes from the masternode list the seeds serve
+│   ├── evonode-discovery.ts # Testnet/mainnet evonodes from the masternode list the seeds serve
 │   └── evonodes.ts      # Quorum-service evonode list (discovery fallback)
 ├── platform/            # Dash Platform operations
 │   ├── identity.ts      # Identity registration and top-up
@@ -87,8 +87,7 @@ Network is determined by URL parameter: `?network=mainnet` (defaults to testnet)
 
 InstantSend lock source and Platform status per network:
 
-- **mainnet**: JSON-RPC at `rpc.digitalcash.dev` (`rpcUrl` in `config.ts`).
-- **testnet**: no JSON-RPC service (trpc.digitalcash.dev never upgraded to Core V24). The lock comes from the DAPI bloom-filter stream on 3 evonodes at once. They are discovered when a funding flow starts, from the masternode list served by `@dashevo/dapi-client`'s testnet seeds, with the quorum service list as fallback; the subscription rejects before broadcast if both fail. There is no built-in node list. Platform status is read through the EvoSDK (`platform/status.ts`) because dapi-client's `platform.getStatus()` throws on testnet nodes.
+- **testnet and mainnet**: no JSON-RPC service, and no digitalcash.dev anywhere (the build check fails if it reappears). The lock comes from the DAPI bloom-filter stream on 3 evonodes at once. They are discovered when a funding flow starts, from the masternode list served by `@dashevo/dapi-client`'s seeds for that network, preferring nodes the quorum service health-checks and falling back to its list; the subscription rejects before broadcast if both fail. There is no built-in node list. Platform status is read through the EvoSDK (`platform/status.ts`) (it tolerates sections nodes leave out).
 - **devnets**: their configured `rpcUrl` if any, otherwise the DAPI stream over their `dapiAddresses`; Platform status through dapi-client.
 
 ## Dependencies

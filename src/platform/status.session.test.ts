@@ -89,7 +89,13 @@ describe('Platform status across an SDK session', () => {
       expect(sdk.connect).toHaveBeenCalledOnce();
     });
 
-    it.each(['mainnet', 'devnet-moutai'])('does nothing on %s', async (network) => {
+    it('connects the mainnet SDK when a funding flow starts', async () => {
+      await expect(warmPlatformSdkForFunding('mainnet')).resolves.toBe(true);
+
+      expect(sdk.created).toEqual(['mainnet']);
+    });
+
+    it.each(['devnet-moutai'])('does nothing on %s', async (network) => {
       await expect(warmPlatformSdkForFunding(network)).resolves.toBe(false);
 
       expect(sdk.created).toEqual([]);

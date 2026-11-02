@@ -58,6 +58,30 @@ test.describe('Deterministic UI E2E (mock mode)', () => {
     expect(discoveryRequests).toEqual([]);
   });
 
+  test('an idle mainnet page never calls digitalcash.dev, starts no evonode discovery and does not load the SDK', async ({ page }) => {
+    const forbidden: string[] = [];
+    page.on('request', (request) => {
+      const url = new URL(request.url());
+      if (
+        /(^|\.)digitalcash\.dev$/.test(url.hostname) ||
+        /^seed-\d+\./.test(url.hostname) ||
+        url.pathname === '/masternodes' ||
+        /evo-sdk|wasm[-_]sdk/i.test(url.pathname)
+      ) {
+        forbidden.push(request.url());
+      }
+    });
+    const islockChunk = page.waitForRequest((request) => /\/islock(-[^/]*\.js|\.ts)$/.test(new URL(request.url()).pathname), {
+      timeout: 15000,
+    });
+    await page.goto('/?network=mainnet&e2e=mock');
+    await islockChunk;
+    // Let the first network-status poll go out.
+    await page.waitForTimeout(2000);
+
+    expect(forbidden).toEqual([]);
+  });
+
   test('create identity flow transitions to completion and DPNS registration', async ({ page }) => {
     await page.goto(MOCK_QUERY);
 

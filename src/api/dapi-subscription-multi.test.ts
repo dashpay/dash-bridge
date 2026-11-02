@@ -114,7 +114,7 @@ vi.mock('cbor', () => ({ default: { decodeFirstSync: (bytes: Buffer) => JSON.par
 const fallbackMock = vi.hoisted(() => vi.fn<[], Promise<string[]>>());
 vi.mock('./evonodes.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./evonodes.js')>()),
-  fetchTestnetEvonodeAddresses: fallbackMock,
+  fetchHealthyEvonodeAddresses: fallbackMock,
 }));
 
 import {
@@ -122,7 +122,7 @@ import {
   ISLOCK_CONCURRENT_NODES,
   ISLOCK_MAX_NODE_ATTEMPTS,
   ISLOCK_HEIGHT_TIMEOUT_MS,
-  ISLOCK_READINESS_CAP_MS,
+  ISLOCK_READINESS_TIMEOUT_MS,
 } from './dapi-subscription.js';
 
 const TXID = 'aa'.repeat(32);
@@ -447,15 +447,17 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
     for (const node of nodeClients()) expect(node.disconnect).toHaveBeenCalled();
   });
 
-  it('still returns a handle when readiness comes from the cap, and a later total failure surfaces via wait()', async () => {
+  it('rejects subscribe before returning when no stream delivers data within the readiness timeout', async () => {
     const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(3) });
     const pending = client.subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT);
-    await vi.advanceTimersByTimeAsync(ISLOCK_READINESS_CAP_MS);
-    const sub = await pending; // streams are open but silent: returns at the cap
-
-    const outcome = expect(sub.wait()).rejects.toThrow(/3 nodes tried.*last error: late boom 2/);
-    liveStreams().forEach((stream, i) => stream.emit('error', new Error(`late boom ${i}`)));
+    const outcome = expect(pending).rejects.toThrow(
+      new RegExp(`no evonode stream delivered data within ${ISLOCK_READINESS_TIMEOUT_MS}ms`)
+    );
+    // Streams are open but silent: none is known to be listening.
+    await vi.advanceTimersByTimeAsync(ISLOCK_READINESS_TIMEOUT_MS);
     await outcome;
+    for (const stream of liveStreams()) expect(stream.cancel).toHaveBeenCalled();
+    for (const node of nodeClients()) expect(node.disconnect).toHaveBeenCalled();
   });
 
   it('rejects subscribe itself, before returning, when every stream fails inside the readiness window', async () => {
@@ -569,20 +571,19 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
     expect(late.listenerCount('data')).toBe(0);
   });
 
-  it('returns after the readiness cap when no stream emits data', async () => {
+  it('waits for the first stream data, however late within the readiness timeout, before returning', async () => {
     const client = new DAPISubscriptionClient({ network: 'testnet', dapiAddresses: addresses(3) });
     let returned = false;
     const pending = client
       .subscribeForInstantSendLock(TXID, PUBKEY, UTXO, TIMEOUT)
       .then((sub) => { returned = true; return sub; });
 
-    await vi.advanceTimersByTimeAsync(ISLOCK_READINESS_CAP_MS - 1);
+    await vi.advanceTimersByTimeAsync(ISLOCK_READINESS_TIMEOUT_MS - 1);
     expect(returned).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
+    liveStreams()[2].emit('data', blockMessage);
     const sub = await pending;
     expect(returned).toBe(true);
 
-    // Streams are still connecting in the background and can still win.
     liveStreams()[2].emit('data', lockMessage(TXID));
     await sub.wait();
   });
@@ -603,8 +604,8 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
     await sub.wait();
   });
 
-  it('uses the single shared client with fewer than two configured addresses', async () => {
-    for (const dapiAddresses of [undefined, [] as string[], addresses(1)]) {
+  it('uses the single shared client for a devnet with one configured address', async () => {
+    for (const dapiAddresses of [addresses(1)]) {
       state.clients.length = 0;
       const client = new DAPISubscriptionClient({ network: 'devnet-moutai', dapiAddresses });
       expect(state.clients).toHaveLength(1);
@@ -796,6 +797,22 @@ describe('DAPISubscriptionClient multi-node IS lock subscription', () => {
       await startDiscovered(client);
       expect(seedClients()).toHaveLength(1);
       expect(nodeClients()).toHaveLength(3);
+    });
+
+    it('mainnet discovers its evonodes from the mainnet seeds the same way', async () => {
+      state.smlHosts = hosts(4);
+      const client = new DAPISubscriptionClient({ network: 'mainnet' });
+
+      const sub = await startDiscovered(client);
+
+      expect(seedClients()).toHaveLength(1);
+      const seed = seedClients()[0].options.dapiAddresses[0];
+      expect(seed.host).toMatch(/\.mainnet\.networks\.dash\.org$|pshenmic/);
+      // The health hint comes from the mainnet quorum service, never testnet's.
+      expect(fallbackMock).toHaveBeenCalledWith('mainnet');
+      expect(nodeClients()).toHaveLength(ISLOCK_CONCURRENT_NODES);
+      liveStreams()[0].emit('data', lockMessage(TXID));
+      await expect(sub.wait()).resolves.toBeInstanceOf(Uint8Array);
     });
 
     it('configured addresses (devnets) never start discovery', async () => {

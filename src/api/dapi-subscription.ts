@@ -8,6 +8,7 @@ import { hash160 } from '../crypto/hash.js';
 import { describeIslock } from '../utils/islock-debug.js';
 import {
   EvonodeDiscovery,
+  type DiscoveryNetwork,
   parseDapiAddress,
   seedAddresses,
   shuffled,
@@ -49,8 +50,14 @@ export const ISLOCK_CONCURRENT_NODES = 3;
 export const ISLOCK_MAX_NODE_ATTEMPTS = ISLOCK_CONCURRENT_NODES + 6;
 /** Deadline for each node's best-block-height answer before the stream starts. */
 export const ISLOCK_HEIGHT_TIMEOUT_MS = 8000;
-/** Longest subscribeForInstantSendLock waits for a first stream message before returning. */
-export const ISLOCK_READINESS_CAP_MS = 3000;
+/**
+ * Longest subscribeForInstantSendLock waits for a first stream message. With
+ * no message by then it rejects (nothing has been broadcast yet): a stream
+ * that has not delivered anything is not known to be listening, and an IS
+ * lock arriving before it is would be lost. Streams replay the last 10 blocks
+ * first, so a live one answers within about a second.
+ */
+export const ISLOCK_READINESS_TIMEOUT_MS = 15000;
 
 const CLIENT_OPTIONS = { timeout: 30000, retries: 3 };
 
@@ -60,11 +67,19 @@ interface NodeSlot {
   failed: boolean;
 }
 
+/**
+ * The public network a config belongs to (by type, so an unknown name that
+ * falls back to the testnet config counts as testnet); undefined for devnets.
+ */
+function publicNetwork(network: string): DiscoveryNetwork | undefined {
+  const { type } = getNetwork(network);
+  return type === 'testnet' || type === 'mainnet' ? type : undefined;
+}
+
 export class DAPISubscriptionClient {
   readonly network: string;
-  // Exactly one of these is set: testnet discovers its evonodes, every other
-  // network uses one client over its configured addresses (or, on mainnet,
-  // dapi-client's default seeds).
+  // Exactly one of these is set: testnet and mainnet discover their evonodes,
+  // devnets use one client over their configured addresses.
   private readonly discovery?: EvonodeDiscovery;
   private readonly fixedClient?: any;
   private readonly nodeAddresses: DapiAddress[];
@@ -83,32 +98,30 @@ export class DAPISubscriptionClient {
       // A repeated address would put two "distinct" streams on one node.
       this.nodeAddresses = [...new Map(parsed.map((a) => [`${a.host}:${a.port}`, a])).values()];
       this.fixedClient = new DAPIClientClass({ ...CLIENT_OPTIONS, dapiAddresses: parsed });
-    } else if (getNetwork(config.network).type === 'testnet') {
-      // Seeds come from the published dapi-client, so they follow its releases.
-      this.discovery = new EvonodeDiscovery({
-        network: 'testnet',
-        seeds: seedAddresses(dapiNetworkConfigs.testnet.seeds),
-        createClient: (dapiAddresses) => new DAPIClientClass({ ...CLIENT_OPTIONS, dapiAddresses }),
-      });
     } else {
-      this.fixedClient = new DAPIClientClass({
-        ...CLIENT_OPTIONS,
-        network: config.network === 'mainnet' ? 'mainnet' : 'testnet',
+      // Seeds come from the published dapi-client, so they follow its releases.
+      // A devnet without addresses can't be reached; it discovers testnet's,
+      // as dapi-client's default would have.
+      const network = publicNetwork(config.network) ?? 'testnet';
+      this.discovery = new EvonodeDiscovery({
+        network,
+        seeds: seedAddresses(dapiNetworkConfigs[network].seeds),
+        createClient: (dapiAddresses) => new DAPIClientClass({ ...CLIENT_OPTIONS, dapiAddresses }),
       });
     }
   }
 
   /**
-   * Client for calls that may go to any node. On testnet it covers the
-   * evonodes found by the last discovery, so it is undefined before the
-   * first subscription.
+   * Client for calls that may go to any node. On testnet and mainnet it
+   * covers the evonodes found by the last discovery, so it is undefined
+   * before the first subscription.
    */
   private get dapiClient(): any {
     return this.discovery ? this.discovery.sharedClient : this.fixedClient;
   }
 
   /**
-   * Start syncing the testnet masternode list so the first IS lock
+   * Start reading the testnet or mainnet masternode list so the first IS lock
    * subscription doesn't wait for it. Never rejects; resolves at once on
    * networks with configured addresses.
    */
@@ -438,11 +451,11 @@ export class DAPISubscriptionClient {
    * pick nodes at random and could land on the same one twice.
    *
    * subscribeToTransactionsWithProofs resolves before any connection exists, so
-   * readiness is approximated: return once any stream delivers a message (the
-   * server replays recent blocks, usually within ~1 s) or after the readiness
-   * cap, whichever comes first. The remaining streams keep connecting. If every
-   * node attempt has already failed by then, this rejects instead of returning
-   * a handle, so nothing is broadcast without a listener.
+   * readiness means a stream has delivered a message (the server replays
+   * recent blocks first, usually within ~1 s). Return then; the remaining
+   * streams keep connecting. If every node attempt fails first, or no stream
+   * delivers anything within {@link ISLOCK_READINESS_TIMEOUT_MS}, this rejects
+   * instead of returning a handle, so nothing is broadcast without a listener.
    */
   private async subscribeOnMultipleNodes(
     txid: string,
@@ -463,7 +476,7 @@ export class DAPISubscriptionClient {
 
     let markReady!: () => void;
     const ready = new Promise<void>((resolve) => { markReady = resolve; });
-    const readyTimerId = setTimeout(markReady, ISLOCK_READINESS_CAP_MS);
+    let readyTimerId: ReturnType<typeof setTimeout> | undefined;
     // Set when every node attempt failed. Only read once, right after the
     // readiness wait, to fail before the caller broadcasts.
     let allFailed: Error | undefined;
@@ -506,6 +519,14 @@ export class DAPISubscriptionClient {
       const timeoutId = setTimeout(() => {
         finish(() => reject(new Error(`Timeout waiting for InstantSend lock for ${txid} after ${timeoutMs}ms`)));
       }, timeoutMs);
+
+      readyTimerId = setTimeout(() => {
+        const silent = new Error(
+          `InstantSend lock subscription failed for ${txid}: no evonode stream delivered data within ${ISLOCK_READINESS_TIMEOUT_MS}ms`
+        );
+        allFailed = silent;
+        finish(() => reject(silent));
+      }, ISLOCK_READINESS_TIMEOUT_MS);
 
       const openNode = (): void => {
         const address = nodes[attempts++];
@@ -622,7 +643,7 @@ export class DAPISubscriptionClient {
    * Devnets go straight to dapi-client (`platform.getStatus()`) rather than
    * `sdk.system.status()` because the wasm SDK in trusted mode can return
    * testnet-cached values there, while this path is authoritative for
-   * whatever masternode the dapiAddresses point at. Testnet uses the SDK;
+   * whatever masternode the dapiAddresses point at. Testnet and mainnet use the SDK;
    * see {@link getPlatformStatus}.
    *
    * @returns the chain-locked height, or `undefined` if the masternode
@@ -640,8 +661,8 @@ export class DAPISubscriptionClient {
    * Tenderdash is stuck). Fields are `undefined` when the masternode doesn't
    * report them.
    *
-   * Testnet reads through the EvoSDK (see `fetchPlatformStatus` for why);
-   * every other network keeps the dapi-client gRPC call.
+   * Testnet and mainnet read through the EvoSDK (see `fetchPlatformStatus`
+   * for why); devnets keep the dapi-client gRPC call.
    */
   async getPlatformStatus(): Promise<PlatformStatus> {
     if (this.readsStatusViaSdk()) {
@@ -652,10 +673,11 @@ export class DAPISubscriptionClient {
 
   /**
    * Passive variant of {@link getPlatformStatus} for background health polling.
-   * On testnet it resolves `undefined`, without loading the EvoSDK, until a
-   * funding flow has started connecting it (and while that connect is in
-   * flight); from then on it reads, and failures reject. Other networks read
-   * exactly as getPlatformStatus does (dapi-client needs no SDK download).
+   * On testnet and mainnet it resolves `undefined`, without loading the
+   * EvoSDK, until a funding flow has started connecting it (and while that
+   * connect is in flight); from then on it reads, and failures reject.
+   * Devnets read exactly as getPlatformStatus does (dapi-client needs no SDK
+   * download).
    */
   async peekPlatformStatus(): Promise<PlatformStatus | undefined> {
     if (this.readsStatusViaSdk()) {
@@ -664,9 +686,8 @@ export class DAPISubscriptionClient {
     return this.fetchStatusViaDapiClient();
   }
 
-  /** By config type, not name: an unknown name falls back to the testnet config. */
   private readsStatusViaSdk(): boolean {
-    return getNetwork(this.network).type === 'testnet';
+    return publicNetwork(this.network) !== undefined;
   }
 
   private async fetchStatusViaDapiClient(): Promise<PlatformStatus> {

@@ -128,4 +128,19 @@ if (typeof verifyLogin !== 'function' || bogus?.ok !== false) {
   fail('dist/widget-verify.mjs does not export a working verifyLogin');
 }
 
+// No Digital Cash service anywhere: IS locks and chain-lock heights come from
+// DAPI (evonode streams, the EvoSDK). Guard against one creeping back in.
+function builtFiles(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    return entry.isDirectory() ? builtFiles(path) : [path];
+  });
+}
+const digitalcashFiles = builtFiles(distDir.pathname).filter((path) =>
+  /\.(?:js|mjs|html|json|css)$/.test(path) && readFileSync(path, 'utf8').toLowerCase().includes('digitalcash')
+);
+if (digitalcashFiles.length > 0) {
+  fail(`build references digitalcash: ${digitalcashFiles.join(', ')}`);
+}
+
 console.log('Build artifact smoke check passed');

@@ -49,9 +49,9 @@ export async function fetchPlatformStatusIfSdkReady(
 /**
  * Read Platform status through the EvoSDK (`sdk.system.status()`).
  *
- * Used instead of `@dashevo/dapi-client`'s `platform.getStatus()` on testnet:
- * testnet evonodes omit the optional `state_sync` message (and occasionally
- * a version sub-field), and dapi-client 3.1.0-dev.7's
+ * Used instead of `@dashevo/dapi-client`'s `platform.getStatus()` on testnet
+ * and mainnet: evonodes omit the optional `state_sync` message (and
+ * occasionally a version sub-field), and dapi-client 3.1.0-dev.7's
  * `GetStatusResponse.createFromProto` dereferences them unconditionally, so
  * the whole call throws even though the chain/time data is present. The SDK
  * decodes the same response tolerantly.
