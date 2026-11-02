@@ -5,10 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // A "masternode list" here is CBOR of { hosts: [...] }; the fake parser turns
 // each host into a valid evonode on port 1443 ('bad' hosts make it throw).
+// Networks the list parser was given, so tests can check mainnet lists are parsed as mainnet.
+const parsedNetworks = vi.hoisted(() => [] as string[]);
+
 vi.mock('@dashevo/dashcore-lib', () => {
   class SimplifiedMNListDiff {
     hosts: string[];
     constructor(obj: { hosts: string[] }, public network: string) {
+      parsedNetworks.push(network);
       if (obj.hosts.includes('bad')) throw new Error('Failed to parse payload');
       this.hosts = obj.hosts;
     }
@@ -244,6 +248,17 @@ describe('fetchEvonodesFromSeeds', () => {
 
     await expect(result).rejects.toThrow(/aborted/);
     expect(net.streams[0].cancel).toHaveBeenCalled();
+  });
+
+  it('parses a mainnet list as mainnet', async () => {
+    parsedNetworks.length = 0;
+    const net = fakeNetwork({ 'seed-1.mainnet.test': { kind: 'list', hosts: ['10.0.0.1'] } });
+
+    const result = fetchEvonodesFromSeeds(seedAddresses(['seed-1.mainnet.test']), net.createClient, 'mainnet');
+    await vi.advanceTimersByTimeAsync(100);
+
+    await expect(result).resolves.toEqual([endpoint('10.0.0.1')]);
+    expect(parsedNetworks).toEqual(['mainnet']);
   });
 
   it('gives the bigger mainnet list longer: hedge at 8 s, give up at 25 s', async () => {

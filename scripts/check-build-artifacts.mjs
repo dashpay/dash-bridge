@@ -137,7 +137,7 @@ function builtFiles(dir) {
   });
 }
 const digitalcashFiles = builtFiles(distDir.pathname).filter((path) =>
-  /\.(?:js|mjs|html|json|css)$/.test(path) && readFileSync(path, 'utf8').includes('digitalcash')
+  /\.(?:js|mjs|html|json|css)$/.test(path) && readFileSync(path, 'utf8').toLowerCase().includes('digitalcash')
 );
 if (digitalcashFiles.length > 0) {
   fail(`build references digitalcash: ${digitalcashFiles.join(', ')}`);
