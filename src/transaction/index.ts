@@ -28,6 +28,9 @@ export {
   cloneTransaction,
   implicitFee,
   MAX_ASSET_LOCK_FEE,
+  MAX_ASSET_LOCK_INPUTS,
+  assetLockFee,
+  selectDepositUtxos,
 } from './builder.js';
 
 export {
