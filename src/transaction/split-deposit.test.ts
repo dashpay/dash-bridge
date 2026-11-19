@@ -94,8 +94,14 @@ describe('split deposits (#42)', () => {
   it('keeps the configured fee for small locks and raises it with the size for big ones', () => {
     expect(assetLockFee(1, 1000n)).toBe(1000n);
     expect(assetLockFee(6, 1000n)).toBe(1000n);
-    expect(assetLockFee(7, 1000n)).toBeGreaterThan(1000n);
+    expect(assetLockFee(7, 1000n)).toBe(58n + 7n * 148n);
     expect(assetLockFee(MAX_ASSET_LOCK_INPUTS, 1000n)).toBeLessThanOrEqual(MAX_ASSET_LOCK_FEE);
+  });
+
+  it('sizes an unsigned lock at exactly the base size plus its inputs', () => {
+    const tx = createAssetLockTransaction(coins([200000, 200000]), keyPair.publicKey, 1000n);
+    // Unsigned inputs are 41 bytes; signing adds at most 107 each.
+    expect(serializeTransaction(tx).length).toBe(58 + 2 * 41);
   });
 
   it('signs a lock at the input cap within the fee bound', async () => {

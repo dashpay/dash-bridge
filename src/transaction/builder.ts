@@ -88,8 +88,8 @@ const MIN_RELAY_FEE_PER_BYTE = 1n;
  */
 const MAX_P2PKH_INPUT_SIZE = 148n;
 
-/** Everything but the inputs: version, counts, OP_RETURN output, locktime, payload. */
-const ASSET_LOCK_BASE_SIZE = 57n;
+/** Everything but the inputs: version 4, counts 2, OP_RETURN output 11, locktime 4, payload 37. */
+const ASSET_LOCK_BASE_SIZE = 58n;
 
 /**
  * Most coins one asset lock spends, so its relay fee stays under
