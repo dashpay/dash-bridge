@@ -8,6 +8,7 @@ import {
   authenticateUtxo,
   UtxoAuthenticationError,
 } from '../transaction/utxo-auth.js';
+import { selectDepositUtxos } from '../transaction/builder.js';
 import { fetchJson } from '../utils/fetch-json.js';
 import { fetchWithDeadline, RequestTimeoutError } from '../utils/fetch-with-deadline.js';
 
@@ -60,6 +61,12 @@ const RAWTX_RETRY: RetryOptions = {
   maxDelayMs: 4000,
   shouldRetry: (error) => error instanceof RawTxNotIndexedError || isRetryableError(error),
 };
+
+/** What one asset lock can spend from these coins (see selectDepositUtxos). */
+function spendable(utxos: UTXO[]): { selected: UTXO[]; totalAmount: number } {
+  const selected = selectDepositUtxos(utxos);
+  return { selected, totalAmount: selected.reduce((sum, utxo) => sum + utxo.satoshis, 0) };
+}
 
 /**
  * Insight API client for UTXO lookup and transaction broadcast
@@ -236,15 +243,11 @@ export class InsightClient {
   }
 
   /**
-   * Result from waitForUtxo - includes info about insufficient deposits
-   */
-
-
-  /**
-   * Poll for UTXOs until one appears or timeout
+   * Poll until the deposit address holds at least `minAmount` in coins one
+   * asset lock can spend (see selectDepositUtxos), or until timeout.
    * @param onProgress - Optional callback with (remainingMs, currentTotal) on each poll
    * @param onRetry - Optional callback when a network error causes a retry
-   * @returns Object with utxo (if sufficient), totalAmount, and timedOut status
+   * @returns Object with utxos to spend (if sufficient), their totalAmount, and timedOut status
    */
   async waitForUtxo(
     address: string,
@@ -253,7 +256,7 @@ export class InsightClient {
     pollIntervalMs: number = 3000,
     onProgress?: (remainingMs: number, currentTotal: number) => void,
     onRetry?: (attempt: number, maxAttempts: number, error: unknown) => void
-  ): Promise<{ utxo: UTXO | null; totalAmount: number; timedOut: boolean }> {
+  ): Promise<{ utxos: UTXO[] | null; totalAmount: number; timedOut: boolean }> {
     const startTime = Date.now();
     let lastTotalAmount = 0;
 
@@ -264,8 +267,7 @@ export class InsightClient {
       try {
         const utxos = await this.getUTXOs(address, { onRetry });
 
-        // Calculate total amount across all UTXOs
-        const totalAmount = utxos.reduce((sum, utxo) => sum + utxo.satoshis, 0);
+        const { selected, totalAmount } = spendable(utxos);
         lastTotalAmount = totalAmount;
 
         // Call progress callback with remaining time and current total
@@ -273,13 +275,8 @@ export class InsightClient {
           onProgress(remaining, totalAmount);
         }
 
-        // Find the largest UTXO that meets minimum (or sum could work too)
-        // For simplicity, check if total meets minimum and use largest UTXO
-        if (totalAmount >= minAmount) {
-          const largest = utxos.reduce((max, utxo) =>
-            utxo.satoshis > max.satoshis ? utxo : max
-          , utxos[0]);
-          return { utxo: largest, totalAmount, timedOut: false };
+        if (selected.length > 0 && totalAmount >= minAmount) {
+          return { utxos: selected, totalAmount, timedOut: false };
         }
       } catch (error) {
         // Log error but continue polling - transient errors shouldn't stop the wait
@@ -297,11 +294,11 @@ export class InsightClient {
     // Final check on timeout (with retry)
     try {
       const utxos = await this.getUTXOs(address, { onRetry });
-      const totalAmount = utxos.reduce((sum, utxo) => sum + utxo.satoshis, 0);
-      return { utxo: null, totalAmount, timedOut: true };
+      const { totalAmount } = spendable(utxos);
+      return { utxos: null, totalAmount, timedOut: true };
     } catch {
       // If final check fails, return last known amount
-      return { utxo: null, totalAmount: lastTotalAmount, timedOut: true };
+      return { utxos: null, totalAmount: lastTotalAmount, timedOut: true };
     }
   }
 

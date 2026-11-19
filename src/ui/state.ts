@@ -516,12 +516,12 @@ export function regenerateAllIdentityKeys(state: BridgeState): BridgeState {
   return { ...state, identityKeys };
 }
 
-export function setUtxoDetected(state: BridgeState, utxo: UTXO): BridgeState {
+export function setUtxoDetected(state: BridgeState, utxos: UTXO[]): BridgeState {
   return {
     ...state,
     step: 'building_transaction',
-    detectedUtxo: utxo,
-    depositAmount: BigInt(utxo.satoshis),
+    detectedUtxos: utxos,
+    depositAmount: utxos.reduce((sum, u) => sum + BigInt(u.satoshis), 0n),
   };
 }
 
@@ -843,7 +843,7 @@ export function setDepositVerificationFailed(
   return {
     ...state,
     step: 'detecting_deposit',
-    detectedUtxo: undefined,
+    detectedUtxos: undefined,
     depositAmount: undefined,
     depositTimedOut: true,
     detectedDepositAmount: undefined,

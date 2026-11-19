@@ -437,7 +437,8 @@ export interface BridgeState {
   /** Configurable identity keys */
   identityKeys: IdentityKeyConfig[];
   depositAddress?: string;
-  detectedUtxo?: UTXO;
+  /** Every coin the asset lock spends. */
+  detectedUtxos?: UTXO[];
   depositAmount?: bigint;
   signedTxHex?: string;
   /** Raw bytes of the signed asset lock tx — kept so the chainlock fallback can re-build proofs without re-parsing hex. */

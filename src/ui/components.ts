@@ -1824,12 +1824,8 @@ function buildErrorDiagnostics(state: BridgeState): Record<string, unknown> {
   if (state.depositAddress) diag.depositAddress = state.depositAddress;
   if (state.txid) diag.txid = state.txid;
   if (state.depositAmount !== undefined) diag.depositAmount = String(state.depositAmount);
-  if (state.detectedUtxo) {
-    diag.utxo = {
-      txid: state.detectedUtxo.txid,
-      vout: state.detectedUtxo.vout,
-      satoshis: state.detectedUtxo.satoshis,
-    };
+  if (state.detectedUtxos) {
+    diag.utxos = state.detectedUtxos.map(({ txid, vout, satoshis }) => ({ txid, vout, satoshis }));
   }
 
   // Identity context

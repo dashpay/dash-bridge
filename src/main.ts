@@ -9,7 +9,7 @@ import {
 import { extractErrorMessage } from './utils/errors.js';
 import { parseKeyBackup } from './utils/key-backup.js';
 import { deriveAssetLockKeyPair } from './crypto/hd.js';
-import { createAssetLockTransaction, serializeTransaction, calculateTxId } from './transaction/index.js';
+import { createAssetLockTransaction, serializeTransaction, calculateTxId, selectDepositUtxos } from './transaction/index.js';
 import { InsightClient, isAmbiguousBroadcastError } from './api/insight.js';
 import type { IslockService } from './api/islock.js';
 import { fetchNetworkStatus } from './api/network-status.js';
@@ -2771,18 +2771,22 @@ function showValidationError(message: string): void {
 }
 
 /**
- * Authenticate a detected deposit before anything is built or signed: its
- * value and script are re-derived from the raw previous transaction (see
- * InsightClient.getAuthenticatedUtxo). On failure nothing has been signed, so
- * return to the deposit step with a recheck prompt (keys stay in state) and
- * resolve null; the caller must stop.
+ * Authenticate every coin of a detected deposit before anything is built or
+ * signed: each value and script is re-derived from the raw previous
+ * transaction (see InsightClient.getAuthenticatedUtxo). On failure nothing has
+ * been signed, so return to the deposit step with a recheck prompt (keys stay
+ * in state) and resolve null; the caller must stop.
  */
 async function authenticateDeposit(
-  utxo: UTXO,
+  utxos: UTXO[],
   depositPublicKey: Uint8Array
-): Promise<AuthenticatedUtxo | null> {
+): Promise<AuthenticatedUtxo[] | null> {
   try {
-    return await insightClient.getAuthenticatedUtxo(utxo, depositPublicKey);
+    const authenticated: AuthenticatedUtxo[] = [];
+    for (const utxo of utxos) {
+      authenticated.push(await insightClient.getAuthenticatedUtxo(utxo, depositPublicKey));
+    }
+    return authenticated;
   } catch (error) {
     console.error('Deposit verification failed:', error);
     updateState(setDepositVerificationFailed(state, toError(error).message));
@@ -2828,7 +2832,7 @@ async function startTopUp() {
       updateState(setStep(state, 'detecting_deposit'));
       clearE2EMockAdvanceHook();
       await waitForE2EMockAdvance();
-      updateState(setUtxoDetected(state, createE2EMockUtxo()));
+      updateState(setUtxoDetected(state, [createE2EMockUtxo()]));
       await delay(120);
       updateState(setTransactionSigned(state, 'ab'.repeat(180)));
       await delay(120);
@@ -2877,21 +2881,21 @@ async function startTopUp() {
     );
 
     // Handle timeout - show recheck button with any detected amount
-    if (!depositResult.utxo) {
+    if (!depositResult.utxos) {
       updateState(setDepositTimedOut(state, true, depositResult.totalAmount));
       return;
     }
 
-    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
-    if (!utxo) return;
+    const utxos = await authenticateDeposit(depositResult.utxos, assetLockKeyPair.publicKey);
+    if (!utxos) return;
 
-    updateState(setUtxoDetected(state, utxo));
+    updateState(setUtxoDetected(state, utxos));
 
     // Step 3: Build transaction
     updateState(setStep(state, 'building_transaction'));
 
     const tx = createAssetLockTransaction(
-      utxo,
+      utxos,
       assetLockKeyPair.publicKey,
       BigInt(network.minFee)
     );
@@ -2901,7 +2905,7 @@ async function startTopUp() {
 
     const signedTx = await signTransaction(
       tx,
-      [utxo],
+      utxos,
       assetLockKeyPair.privateKey,
       assetLockKeyPair.publicKey
     );
@@ -2920,7 +2924,7 @@ async function startTopUp() {
     const islockSub = await islock.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
-      utxo
+      utxos[0]
     );
 
     // Step 6: Broadcast transaction
@@ -3000,20 +3004,20 @@ async function startSendToAddress() {
       3000
     );
 
-    if (!depositResult.utxo) {
+    if (!depositResult.utxos) {
       updateState(setDepositTimedOut(state, true, depositResult.totalAmount));
       return;
     }
 
-    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
-    if (!utxo) return;
-    updateState(setUtxoDetected(state, utxo));
+    const utxos = await authenticateDeposit(depositResult.utxos, assetLockKeyPair.publicKey);
+    if (!utxos) return;
+    updateState(setUtxoDetected(state, utxos));
 
     // Step 3: Build transaction
     updateState(setStep(state, 'building_transaction'));
 
     const tx = createAssetLockTransaction(
-      utxo,
+      utxos,
       assetLockKeyPair.publicKey,
       BigInt(network.minFee)
     );
@@ -3023,7 +3027,7 @@ async function startSendToAddress() {
 
     const signedTx = await signTransaction(
       tx,
-      [utxo],
+      utxos,
       assetLockKeyPair.privateKey,
       assetLockKeyPair.publicKey
     );
@@ -3039,7 +3043,7 @@ async function startSendToAddress() {
     const islockSub = await islock.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
-      utxo
+      utxos[0]
     );
 
     // Step 6: Broadcast transaction
@@ -3122,7 +3126,7 @@ async function startBridge() {
       downloadFundingKeyBackup(state);
       updateState(setStep(state, 'detecting_deposit'));
       await waitForE2EMockAdvance();
-      updateState(setUtxoDetected(state, createE2EMockUtxo()));
+      updateState(setUtxoDetected(state, [createE2EMockUtxo()]));
       await delay(120);
       updateState(setTransactionSigned(state, 'cd'.repeat(180)));
       await delay(120);
@@ -3176,21 +3180,21 @@ async function startBridge() {
     );
 
     // Handle timeout - show recheck button with any detected amount
-    if (!depositResult.utxo) {
+    if (!depositResult.utxos) {
       updateState(setDepositTimedOut(state, true, depositResult.totalAmount));
       return;
     }
 
-    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
-    if (!utxo) return;
+    const utxos = await authenticateDeposit(depositResult.utxos, assetLockKeyPair.publicKey);
+    if (!utxos) return;
 
-    updateState(setUtxoDetected(state, utxo));
+    updateState(setUtxoDetected(state, utxos));
 
     // Step 3: Build transaction
     updateState(setStep(state, 'building_transaction'));
 
     const tx = createAssetLockTransaction(
-      utxo,
+      utxos,
       assetLockKeyPair.publicKey,
       BigInt(network.minFee)
     );
@@ -3200,7 +3204,7 @@ async function startBridge() {
 
     const signedTx = await signTransaction(
       tx,
-      [utxo],
+      utxos,
       assetLockKeyPair.privateKey,
       assetLockKeyPair.publicKey
     );
@@ -3217,7 +3221,7 @@ async function startBridge() {
     const islockSub = await islock.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
-      utxo
+      utxos[0]
     );
 
     // Step 6: Broadcast transaction
@@ -3286,7 +3290,7 @@ async function recheckDeposit() {
   );
 
   // Handle timeout - show recheck button again with any detected amount
-  if (!depositResult.utxo) {
+  if (!depositResult.utxos) {
     updateState(setDepositTimedOut(state, true, depositResult.totalAmount));
     return;
   }
@@ -3296,16 +3300,16 @@ async function recheckDeposit() {
     const network = getNetwork(state.network);
     const assetLockKeyPair = state.assetLockKeyPair!;
 
-    const utxo = await authenticateDeposit(depositResult.utxo, assetLockKeyPair.publicKey);
-    if (!utxo) return;
+    const utxos = await authenticateDeposit(depositResult.utxos, assetLockKeyPair.publicKey);
+    if (!utxos) return;
 
-    updateState(setUtxoDetected(state, utxo));
+    updateState(setUtxoDetected(state, utxos));
 
     // Step 3: Build transaction
     updateState(setStep(state, 'building_transaction'));
 
     const tx = createAssetLockTransaction(
-      utxo,
+      utxos,
       assetLockKeyPair.publicKey,
       BigInt(network.minFee)
     );
@@ -3315,7 +3319,7 @@ async function recheckDeposit() {
 
     const signedTx = await signTransaction(
       tx,
-      [utxo],
+      utxos,
       assetLockKeyPair.privateKey,
       assetLockKeyPair.publicKey
     );
@@ -3332,7 +3336,7 @@ async function recheckDeposit() {
     const islockSub = await islock.subscribeForInstantSendLock(
       txid,
       assetLockKeyPair.publicKey,
-      utxo
+      utxos[0]
     );
 
     // Step 6: Broadcast transaction
@@ -4529,12 +4533,13 @@ async function requestFaucetFunds() {
       try {
         const utxos = await insightClient.getUTXOs(addressToCheck);
         const minAmount = state.minimumDeposit || 300000; // custom or 0.003 DASH minimum
-        const sufficientUtxo = utxos.find(u => u.satoshis >= minAmount);
+        const selected = selectDepositUtxos(utxos);
+        const selectedTotal = selected.reduce((sum, u) => sum + u.satoshis, 0);
         // Display-only progress hint: the polling flow authenticates the
         // deposit before signing. Skip it while the recheck prompt is up,
         // since no flow is running to move past 'building_transaction'.
-        if (sufficientUtxo && state.step === 'detecting_deposit' && !state.depositTimedOut) {
-          updateState(setUtxoDetected(state, sufficientUtxo));
+        if (selected.length > 0 && selectedTotal >= minAmount && state.step === 'detecting_deposit' && !state.depositTimedOut) {
+          updateState(setUtxoDetected(state, selected));
         }
       } catch {
         // Ignore - regular polling will catch it
