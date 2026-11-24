@@ -300,14 +300,14 @@ describe('deposit verification failure', () => {
       step: 'building_transaction',
       assetLockKeyPair: keyPair,
       depositAddress: 'yAddr',
-      detectedUtxo: { txid: 'a'.repeat(64), vout: 0, satoshis: 1, scriptPubKey: '', confirmations: 0 },
+      detectedUtxos: [{ txid: 'a'.repeat(64), vout: 0, satoshis: 1, scriptPubKey: '', confirmations: 0 }],
       depositAmount: 1n,
     };
     const failed = setDepositVerificationFailed(state, 'explorer disagrees');
     expect(failed.step).toBe('detecting_deposit');
     expect(failed.depositTimedOut).toBe(true);
     expect(failed.depositVerificationError).toBe('explorer disagrees');
-    expect(failed.detectedUtxo).toBeUndefined();
+    expect(failed.detectedUtxos).toBeUndefined();
     expect(failed.depositAmount).toBeUndefined();
     expect(failed.assetLockKeyPair).toBe(keyPair);
     expect(failed.depositAddress).toBe('yAddr');

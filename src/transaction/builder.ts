@@ -25,8 +25,8 @@ const TX_TYPE_ASSET_LOCK = 8;
 
 /**
  * Hard ceiling on the implicit fee (inputs minus outputs) of any asset lock
- * we build or sign. The configured fee is 1000 duffs; anything above this
- * means a bug or a misreported input value, never a legitimate fee.
+ * we build or sign. assetLockFee stays below it up to MAX_ASSET_LOCK_INPUTS;
+ * anything above means a bug or a misreported input value.
  */
 export const MAX_ASSET_LOCK_FEE = 10_000n;
 
@@ -79,43 +79,90 @@ export function calculateTxId(tx: AssetLockTransaction): string {
   return txidOfRawTransaction(serializeTransaction(tx));
 }
 
+/** Dash Core's default minimum relay fee: 1000 duffs per kB. */
+const MIN_RELAY_FEE_PER_BYTE = 1n;
+
 /**
- * Create an unsigned asset lock transaction
+ * Largest signed P2PKH input: 36 outpoint + 1 + 107 scriptSig + 4 sequence.
+ * The scriptSig bound assumes signHash's low-S DER signatures (at most 71 bytes).
+ */
+const MAX_P2PKH_INPUT_SIZE = 148n;
+
+/** Everything but the inputs: version 4, counts 2, OP_RETURN output 11, locktime 4, payload 37. */
+const ASSET_LOCK_BASE_SIZE = 58n;
+
+/**
+ * Most coins one asset lock spends, so its relay fee stays under
+ * MAX_ASSET_LOCK_FEE.
+ */
+export const MAX_ASSET_LOCK_INPUTS = 60;
+
+/**
+ * Fee for an asset lock spending `inputCount` coins: the configured fee, or
+ * the minimum relay fee for the signed size if that is higher.
+ */
+export function assetLockFee(inputCount: number, minFee: bigint): bigint {
+  const size = ASSET_LOCK_BASE_SIZE + BigInt(inputCount) * MAX_P2PKH_INPUT_SIZE;
+  const relayFee = size * MIN_RELAY_FEE_PER_BYTE;
+  return relayFee > minFee ? relayFee : minFee;
+}
+
+function outpointKey(utxo: UTXO): string {
+  return `${utxo.txid.toLowerCase()}:${utxo.vout}`;
+}
+
+/**
+ * Coins a deposit's asset lock spends: all distinct outpoints, or the largest
+ * MAX_ASSET_LOCK_INPUTS if there are more.
+ */
+export function selectDepositUtxos<T extends UTXO>(utxos: T[]): T[] {
+  const unique = new Map(utxos.map((u) => [outpointKey(u), u]));
+  return [...unique.values()].sort((a, b) => b.satoshis - a.satoshis).slice(0, MAX_ASSET_LOCK_INPUTS);
+}
+
+/**
+ * Create an unsigned asset lock transaction that spends every given UTXO and
+ * locks their total minus the fee (see assetLockFee).
  */
 export function createAssetLockTransaction(
-  utxo: AuthenticatedUtxo,
+  utxos: AuthenticatedUtxo[],
   assetLockPubKey: Uint8Array,
-  fee: bigint = 1000n
+  minFee: bigint = 1000n
 ): AssetLockTransaction {
-  if (fee <= 0n || fee > MAX_ASSET_LOCK_FEE) {
-    throw new Error(`Asset lock fee ${fee} is outside (0, ${MAX_ASSET_LOCK_FEE}] duffs`);
+  if (minFee <= 0n || minFee > MAX_ASSET_LOCK_FEE) {
+    throw new Error(`Asset lock fee ${minFee} is outside (0, ${MAX_ASSET_LOCK_FEE}] duffs`);
   }
-  if (!Number.isSafeInteger(utxo.satoshis) || utxo.satoshis <= 0) {
-    throw new Error('Invalid UTXO amount for asset lock');
+  if (utxos.length === 0 || utxos.length > MAX_ASSET_LOCK_INPUTS) {
+    throw new Error(`An asset lock spends 1 to ${MAX_ASSET_LOCK_INPUTS} UTXOs, got ${utxos.length}`);
+  }
+  const outpoints = new Set<string>();
+  for (const utxo of utxos) {
+    if (!Number.isSafeInteger(utxo.satoshis) || utxo.satoshis <= 0) {
+      throw new Error('Invalid UTXO amount for asset lock');
+    }
+    const outpoint = outpointKey(utxo);
+    if (outpoints.has(outpoint)) {
+      throw new Error(`UTXO ${outpoint} is listed twice`);
+    }
+    outpoints.add(outpoint);
   }
 
-  // Calculate values
-  const utxoAmount = BigInt(utxo.satoshis);
-  const lockAmount = utxoAmount - fee;
+  const fee = assetLockFee(utxos.length, minFee);
+  const lockAmount = utxos.reduce((sum, u) => sum + BigInt(u.satoshis), 0n) - fee;
 
   if (lockAmount <= 0n) {
     throw new Error('Insufficient funds for asset lock');
   }
 
-  // Create input from UTXO
   // TXID from Insight is in display order (big-endian), reverse for internal order
-  const txidBytes = reverseBytes(hexToBytes(utxo.txid));
-
-  const vin: CTxIn[] = [
-    {
-      prevout: {
-        txid: txidBytes,
-        n: utxo.vout,
-      } as COutPoint,
-      scriptSig: new Uint8Array(0), // Will be filled after signing
-      sequence: 0xffffffff,
-    },
-  ];
+  const vin: CTxIn[] = utxos.map((utxo) => ({
+    prevout: {
+      txid: reverseBytes(hexToBytes(utxo.txid)),
+      n: utxo.vout,
+    } as COutPoint,
+    scriptSig: new Uint8Array(0), // Will be filled after signing
+    sequence: 0xffffffff,
+  }));
 
   // Create burn output (OP_RETURN with the locked amount)
   const burnOutput: CTxOut = {
@@ -146,7 +193,7 @@ export function createAssetLockTransaction(
     extraPayload: serializeAssetLockPayload(payload),
   };
 
-  const actualFee = implicitFee(tx, [utxo]);
+  const actualFee = implicitFee(tx, utxos);
   if (actualFee !== fee) {
     throw new Error(`Asset lock fee mismatch: built ${actualFee}, expected ${fee} duffs`);
   }

@@ -99,7 +99,7 @@ describe('parseTransaction / txidOfRawTransaction on real testnet transactions',
   it('parses a self-built type 8 asset lock (special tx with payload)', () => {
     const { publicKey } = generateKeyPair();
     const utxo = { txid: 'ab'.repeat(32), vout: 0, satoshis: 500000, scriptPubKey: '', confirmations: 0 } as AuthenticatedUtxo;
-    const tx = createAssetLockTransaction(utxo, publicKey, 1000n);
+    const tx = createAssetLockTransaction([utxo], publicKey, 1000n);
     const parsed = parseTransaction(serializeTransaction(tx));
     expect(parsed.txType).toBe(8);
     expect(parsed.outputs).toEqual(tx.vout);
@@ -301,17 +301,17 @@ describe('asset lock fee bound', () => {
   } as AuthenticatedUtxo;
 
   it('locks exactly the input minus the configured fee', () => {
-    const tx = createAssetLockTransaction(utxo, keyPair.publicKey, 1000n);
+    const tx = createAssetLockTransaction([utxo], keyPair.publicKey, 1000n);
     expect(tx.vout.map((o) => o.value)).toEqual([449000n]);
   });
 
   it('rejects a fee outside the bound', () => {
-    expect(() => createAssetLockTransaction(utxo, keyPair.publicKey, 0n)).toThrow(/fee/);
-    expect(() => createAssetLockTransaction(utxo, keyPair.publicKey, MAX_ASSET_LOCK_FEE + 1n)).toThrow(/fee/);
+    expect(() => createAssetLockTransaction([utxo], keyPair.publicKey, 0n)).toThrow(/fee/);
+    expect(() => createAssetLockTransaction([utxo], keyPair.publicKey, MAX_ASSET_LOCK_FEE + 1n)).toThrow(/fee/);
   });
 
   it('refuses to sign when the UTXO value would leave an oversized implicit fee', async () => {
-    const tx = createAssetLockTransaction(utxo, keyPair.publicKey, 1000n);
+    const tx = createAssetLockTransaction([utxo], keyPair.publicKey, 1000n);
     const inflated = { ...utxo, satoshis: utxo.satoshis + Number(MAX_ASSET_LOCK_FEE) };
     await expect(signTransaction(tx, [inflated], keyPair.privateKey, keyPair.publicKey)).rejects.toThrow(
       /Refusing to sign/
@@ -319,14 +319,14 @@ describe('asset lock fee bound', () => {
   });
 
   it('refuses to sign with a UTXO that does not match the input', async () => {
-    const tx = createAssetLockTransaction(utxo, keyPair.publicKey, 1000n);
+    const tx = createAssetLockTransaction([utxo], keyPair.publicKey, 1000n);
     await expect(
       signTransaction(tx, [{ ...utxo, vout: 0 }], keyPair.privateKey, keyPair.publicKey)
     ).rejects.toThrow(/does not match/);
   });
 
   it('signs a well-formed asset lock', async () => {
-    const tx = createAssetLockTransaction(utxo, keyPair.publicKey, 1000n);
+    const tx = createAssetLockTransaction([utxo], keyPair.publicKey, 1000n);
     const signed = await signTransaction(tx, [utxo], keyPair.privateKey, keyPair.publicKey);
     expect(signed.vin[0].scriptSig.length).toBeGreaterThan(100);
   });
