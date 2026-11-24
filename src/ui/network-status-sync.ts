@@ -4,8 +4,12 @@ export interface NetworkStatusSyncDeps {
   getState(): BridgeState;
   /** Replace the app state without re-rendering. */
   setStateQuietly(state: BridgeState): void;
-  /** Replace the app state and re-render. */
-  updateState(state: BridgeState): void;
+  /**
+   * Replace the app state and redraw the indicator and banner in place. A full
+   * re-render here would wipe whatever the user is typing (WIF fields are never
+   * rendered back), since a verdict can change at any moment.
+   */
+  applyVerdict(state: BridgeState): void;
   /** Patch the visible indicator's tooltip in place. */
   refreshTooltip(status: NetworkStatus): void;
 }
@@ -30,10 +34,10 @@ function verdictKey(status: NetworkStatus): string {
 
 /**
  * Keeps `state.networkStatus` current. Every poll result is stored, so reads of
- * the state (and the next render) always see fresh numbers. A full re-render
- * happens only when the verdict or its reasons change, because that is all the
- * banner and the indicator label show; otherwise just the tooltip is patched in
- * place, which avoids re-rendering (and disturbing focus) every 30 seconds.
+ * the state (and the next render) always see fresh numbers. The indicator and
+ * banner are redrawn in place only when the verdict or its reasons change,
+ * because that is all they show; otherwise just the tooltip is patched. Neither
+ * path re-renders the flow, so typed input and focus are never disturbed.
  */
 export function createNetworkStatusSync(deps: NetworkStatusSyncDeps): NetworkStatusSync {
   let last: { network: string; status: NetworkStatus } | undefined;
@@ -49,7 +53,7 @@ export function createNetworkStatusSync(deps: NetworkStatusSyncDeps): NetworkSta
       // the state may have been replaced in between.
       const shown = state.networkStatus;
       if (!shown || verdictKey(shown) !== verdictKey(status)) {
-        deps.updateState({ ...state, networkStatus: status });
+        deps.applyVerdict({ ...state, networkStatus: status });
         return;
       }
       deps.setStateQuietly({ ...state, networkStatus: status });

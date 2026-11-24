@@ -6,7 +6,7 @@ vi.mock('./qrcode.js', () => ({
   generateQRCodeDataUrl: () => new Promise<string>(() => {}),
 }));
 
-import { refreshNetworkStatusTooltip, render } from './components.js';
+import { refreshNetworkStatusTooltip, refreshNetworkStatusView, render } from './components.js';
 import { createInitialState } from './state.js';
 import type { NetworkStatus } from '../types.js';
 
@@ -81,5 +81,39 @@ describe('network status indicator', () => {
     const container = renderWith();
     expect(() => refreshNetworkStatusTooltip(container, status())).not.toThrow();
     expect(container.querySelector('.net-status')).toBeNull();
+  });
+});
+
+describe('refreshNetworkStatusView', () => {
+  it('redraws the indicator and banner in place without touching typed input', () => {
+    const state = { ...createInitialState('testnet'), step: 'dpns_enter_identity' as const, mode: 'dpns' as const };
+    const container = document.createElement('div');
+    render(state, container);
+    const input = container.querySelector<HTMLInputElement>('#dpns-identity-id-input')!;
+    input.value = 'typed but not yet committed';
+
+    const stalled = status({ health: 'stalled', reasons: ['Platform has not produced a block in 20 min'] });
+    refreshNetworkStatusView(container, { ...state, networkStatus: stalled });
+
+    expect(container.querySelector('#dpns-identity-id-input')).toBe(input);
+    expect(input.value).toBe('typed but not yet committed');
+    expect(container.querySelectorAll('.net-status')).toHaveLength(1);
+    const banner = container.querySelector('.bridge-container > .net-status-banner')!;
+    expect(banner.textContent).toContain('Platform has not produced a block in 20 min');
+    expect(banner.previousElementSibling!.tagName).toBe('HEADER');
+
+    refreshNetworkStatusView(container, { ...state, networkStatus: status() });
+
+    expect(container.querySelector('.net-status-banner')).toBeNull();
+    expect(container.querySelectorAll('.net-status')).toHaveLength(1);
+    expect(container.querySelector('.net-status')!.textContent).toContain('Network healthy');
+    expect(input.value).toBe('typed but not yet committed');
+  });
+
+  it('does nothing when the flow UI is not rendered', () => {
+    const container = document.createElement('div');
+    container.innerHTML = '<p>embed notice</p>';
+    refreshNetworkStatusView(container, { ...createInitialState('testnet'), networkStatus: status() });
+    expect(container.innerHTML).toBe('<p>embed notice</p>');
   });
 });

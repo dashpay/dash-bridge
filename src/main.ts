@@ -51,6 +51,7 @@ import {
   removeIdentityKey,
   render,
   refreshNetworkStatusTooltip,
+  refreshNetworkStatusView,
   renderEmbedNotice,
   downloadKeyBackup,
   // DPNS state functions
@@ -416,7 +417,10 @@ const networkStatusSync = createNetworkStatusSync({
   setStateQuietly: (next) => {
     state = next;
   },
-  updateState: (next) => updateState(next),
+  applyVerdict: (next) => {
+    state = next;
+    refreshNetworkStatusView(document, next);
+  },
   refreshTooltip: (status) => refreshNetworkStatusTooltip(document, status),
 });
 
