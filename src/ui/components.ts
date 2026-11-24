@@ -68,6 +68,23 @@ export function refreshNetworkStatusTooltip(root: ParentNode, status: NetworkSta
 }
 
 /**
+ * Redraw the header indicator and the warning banner for `state.networkStatus`
+ * without re-rendering the rest of the page. No-op when the flow UI is not shown.
+ */
+export function refreshNetworkStatusView(root: ParentNode, state: BridgeState): void {
+  const header = root.querySelector('.bridge-container:not(.embed-notice) > header');
+  if (!header) return;
+
+  header.querySelector('.net-status')?.remove();
+  header.insertAdjacentHTML('beforeend', renderNetworkStatusIndicator(state));
+
+  const container = header.parentElement!;
+  container.querySelector(':scope > .net-status-banner')?.remove();
+  const banner = renderNetworkStatusBanner(state);
+  if (banner) (container.querySelector(':scope > .embed-banner') ?? header).after(banner);
+}
+
+/**
  * Compact header indicator: a colored dot + short label reflecting overall
  * network health. Hidden until the first status snapshot arrives. The full
  * `title` tooltip carries the underlying numbers.

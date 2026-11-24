@@ -29,9 +29,7 @@ async function advanceMockDeposit(page: Page) {
 
 /**
  * Load the app with external requests blocked, then wait for the first
- * network-status snapshot. That snapshot re-renders the page, which would
- * otherwise wipe typed input and DOM-only messages (upload status, validation
- * text) mid-test.
+ * network-status snapshot, so a test starts from a settled header.
  */
 async function openApp(page: Page) {
   await page.route(/^https?:\/\/(?!127\.0\.0\.1|localhost)/, (route) => route.abort());

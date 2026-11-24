@@ -17,7 +17,7 @@ const status = (overrides: Partial<NetworkStatus> = {}): NetworkStatus => ({
 
 function setup(network = 'testnet') {
   let state: BridgeState = createInitialState(network);
-  const updateState = vi.fn((next: BridgeState) => {
+  const applyVerdict = vi.fn((next: BridgeState) => {
     state = next;
   });
   const refreshTooltip = vi.fn();
@@ -26,12 +26,12 @@ function setup(network = 'testnet') {
     setStateQuietly: (next) => {
       state = next;
     },
-    updateState,
+    applyVerdict,
     refreshTooltip,
   });
   return {
     sync,
-    updateState,
+    applyVerdict,
     refreshTooltip,
     get state() {
       return state;
@@ -53,14 +53,14 @@ describe('createNetworkStatusSync', () => {
     const first = status();
     ctx.sync.apply('testnet', first);
 
-    expect(ctx.updateState).toHaveBeenCalledOnce();
+    expect(ctx.applyVerdict).toHaveBeenCalledOnce();
     expect(ctx.state.networkStatus).toBe(first);
     expect(ctx.refreshTooltip).not.toHaveBeenCalled();
   });
 
   it('keeps the state fresh and patches only the tooltip while the verdict is unchanged', () => {
     ctx.sync.apply('testnet', status());
-    ctx.updateState.mockClear();
+    ctx.applyVerdict.mockClear();
 
     // 8 polls with moving numbers and the same verdict (the case that stayed stuck).
     for (let i = 1; i <= 8; i++) {
@@ -75,33 +75,33 @@ describe('createNetworkStatusSync', () => {
     }
 
     expect(ctx.refreshTooltip).toHaveBeenCalledTimes(8);
-    expect(ctx.updateState).not.toHaveBeenCalled(); // no needless re-render
+    expect(ctx.applyVerdict).not.toHaveBeenCalled(); // no needless re-render
   });
 
   it('re-renders when the verdict or its reasons change', () => {
     ctx.sync.apply('testnet', status());
-    ctx.updateState.mockClear();
+    ctx.applyVerdict.mockClear();
 
     ctx.sync.apply('testnet', status({ health: 'degraded', reasons: ['Insight (Core) unreachable'] }));
-    expect(ctx.updateState).toHaveBeenCalledTimes(1);
+    expect(ctx.applyVerdict).toHaveBeenCalledTimes(1);
 
     ctx.sync.apply('testnet', status({ health: 'degraded', reasons: ['Platform (DAPI) status unreachable'] }));
-    expect(ctx.updateState).toHaveBeenCalledTimes(2);
+    expect(ctx.applyVerdict).toHaveBeenCalledTimes(2);
 
     ctx.sync.apply('testnet', status());
-    expect(ctx.updateState).toHaveBeenCalledTimes(3);
+    expect(ctx.applyVerdict).toHaveBeenCalledTimes(3);
     expect(ctx.refreshTooltip).not.toHaveBeenCalled();
   });
 
   it('renders again when an unchanged verdict arrives but the state lost its status', () => {
     ctx.sync.apply('testnet', status());
-    ctx.updateState.mockClear();
+    ctx.applyVerdict.mockClear();
     ctx.state = createInitialState('testnet'); // a reset that bypassed carryOver
 
     const fresh = status({ coreHeight: 1_578_300 });
     ctx.sync.apply('testnet', fresh);
 
-    expect(ctx.updateState).toHaveBeenCalledOnce();
+    expect(ctx.applyVerdict).toHaveBeenCalledOnce();
     expect(ctx.state.networkStatus).toBe(fresh);
     expect(ctx.refreshTooltip).not.toHaveBeenCalled();
   });
@@ -150,7 +150,7 @@ describe('createNetworkStatusSync', () => {
 
     ctx.sync.apply('testnet', status({ health: 'stalled', reasons: ['Latest Platform block is 20m old'] }));
 
-    expect(ctx.updateState).not.toHaveBeenCalled();
+    expect(ctx.applyVerdict).not.toHaveBeenCalled();
     expect(ctx.refreshTooltip).not.toHaveBeenCalled();
     expect(ctx.state.networkStatus).toBeUndefined();
     expect(ctx.sync.carryOver(createInitialState('mainnet')).networkStatus).toBeUndefined();
@@ -160,13 +160,13 @@ describe('createNetworkStatusSync', () => {
     ctx.sync.apply('testnet', status());
     const degraded = status({ health: 'degraded', reasons: ['Insight (Core) unreachable'] });
     ctx.sync.apply('testnet', degraded);
-    ctx.updateState.mockClear();
+    ctx.applyVerdict.mockClear();
     // A flow captured the state before the verdict changed and writes it back.
     ctx.state = { ...ctx.state, networkStatus: status() };
 
     ctx.sync.apply('testnet', degraded);
 
-    expect(ctx.updateState).toHaveBeenCalledOnce();
+    expect(ctx.applyVerdict).toHaveBeenCalledOnce();
     expect(ctx.state.networkStatus).toBe(degraded);
   });
 });
