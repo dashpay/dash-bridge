@@ -42,4 +42,12 @@ describe('extractErrorMessage', () => {
     expect(extractErrorMessage('plain string')).toBe('plain string');
     expect(extractErrorMessage(undefined)).toBe('undefined');
   });
+
+  it('truncates large serialized objects and survives throwing getters', () => {
+    const big = extractErrorMessage({ data: 'x'.repeat(1000) });
+    expect(big.length).toBe(301);
+    expect(big.endsWith('…')).toBe(true);
+    const freed = { get message(): string { throw new Error('null pointer passed to rust'); } };
+    expect(extractErrorMessage(freed)).toBe('Unknown error');
+  });
 });
