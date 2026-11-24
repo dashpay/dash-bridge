@@ -13,6 +13,7 @@ import {
 import { signDashMessage } from '../crypto/message-signing.js';
 import { wifToPrivateKey } from '../utils/wif.js';
 import { getNetwork } from '../config.js';
+import { extractErrorMessage } from '../utils/errors.js';
 import { buildLoginMessage, loginValidity, type LoginResult } from '../embed/login.js';
 import { isIdentityNotFoundError } from './identity-confirm.js';
 
@@ -96,7 +97,7 @@ export class LoginAttempts {
 
 /** User-facing reason an identity's keys could not be fetched. */
 export function describeLoginFetchError(error: unknown, network: string): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = extractErrorMessage(error);
   // A key lookup for an unknown identity may come back empty rather than fail.
   if (isIdentityNotFoundError(error) || message === 'Identity has no keys') {
     return `Identity not found on ${network}. Check the identity ID and network.`;

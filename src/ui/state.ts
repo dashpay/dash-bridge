@@ -31,6 +31,7 @@ import {
   generateIdentityKeyFromMnemonic,
 } from '../crypto/keys.js';
 import { generateNewMnemonic } from '../crypto/hd.js';
+import { extractErrorMessage } from '../utils/errors.js';
 import { createEmptyUsernameEntry, createUsernameEntry } from '../platform/dpns-utils.js';
 import { WithdrawalStatus } from '../platform/withdrawal-status.js';
 import {
@@ -112,10 +113,7 @@ const StepErrorCodes: Partial<Record<BridgeStep, string>> = {
 /** Coerce an unknown caught value into an Error */
 export function toError(value: unknown): Error {
   if (value instanceof Error) return value;
-  if (value && typeof value === 'object' && 'message' in value) {
-    return new Error(String((value as { message: unknown }).message));
-  }
-  return new Error(String(value));
+  return new Error(extractErrorMessage(value));
 }
 
 /**

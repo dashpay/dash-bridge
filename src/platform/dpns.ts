@@ -6,6 +6,7 @@ import {
   withConnectedPlatformSdk,
 } from './client.js';
 import { loadSdkModule } from './sdkModule.js';
+import { extractErrorMessage } from '../utils/errors.js';
 import {
   convertToHomographSafe,
   identityKeyFromRecord,
@@ -92,7 +93,7 @@ export async function checkMultipleAvailability(
           ...entry,
           isAvailable: false,
           status: 'taken',
-          validationError: error instanceof Error ? error.message : 'Check failed',
+          validationError: extractErrorMessage(error),
         });
       }
     }
@@ -152,7 +153,7 @@ export async function registerDpnsName(
       return {
         success: false,
         isContested: isContestedUsername(convertToHomographSafe(label)),
-        error: error instanceof Error ? error.message : String(error),
+        error: extractErrorMessage(error),
       };
     }
   }, retryOptions);
