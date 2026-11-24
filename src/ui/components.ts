@@ -72,7 +72,7 @@ export function refreshNetworkStatusTooltip(root: ParentNode, status: NetworkSta
  * without re-rendering the rest of the page. No-op when the flow UI is not shown.
  */
 export function refreshNetworkStatusView(root: ParentNode, state: BridgeState): void {
-  const header = root.querySelector('.bridge-container > header');
+  const header = root.querySelector('.bridge-container:not(.embed-notice) > header');
   if (!header) return;
 
   header.querySelector('.net-status')?.remove();

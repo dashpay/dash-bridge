@@ -406,8 +406,8 @@ async function preparePlatformForFunding(): Promise<void> {
 // ── Network-status polling ──────────────────────────────────────────────────
 // Periodically compares Core (Insight) height against Platform (DAPI) status
 // so the header can warn when Platform consensus stalls while Core keeps
-// moving. Re-renders only when the health verdict (or its reasons) changes, to
-// avoid disrupting the UI on every tick.
+// moving. The indicator and banner are redrawn in place, never by re-rendering
+// the flow, so typed input survives a verdict change.
 const NETWORK_STATUS_POLL_MS = 30_000;
 let networkStatusTimer: ReturnType<typeof setInterval> | undefined;
 let networkStatusGeneration = 0;

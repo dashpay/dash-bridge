@@ -6,7 +6,7 @@ vi.mock('./qrcode.js', () => ({
   generateQRCodeDataUrl: () => new Promise<string>(() => {}),
 }));
 
-import { refreshNetworkStatusTooltip, refreshNetworkStatusView, render } from './components.js';
+import { refreshNetworkStatusTooltip, refreshNetworkStatusView, render, renderEmbedNotice } from './components.js';
 import { createInitialState } from './state.js';
 import type { NetworkStatus } from '../types.js';
 
@@ -110,10 +110,15 @@ describe('refreshNetworkStatusView', () => {
     expect(input.value).toBe('typed but not yet committed');
   });
 
-  it('does nothing when the flow UI is not rendered', () => {
+  it('leaves a cancelled or expired embed notice alone', () => {
     const container = document.createElement('div');
-    container.innerHTML = '<p>embed notice</p>';
-    refreshNetworkStatusView(container, { ...createInitialState('testnet'), networkStatus: status() });
-    expect(container.innerHTML).toBe('<p>embed notice</p>');
+    renderEmbedNotice(container, { title: 'Request cancelled', message: 'You can close this window.' });
+    const before = container.innerHTML;
+
+    const stalled = status({ health: 'stalled', reasons: ['Platform has not produced a block in 20 min'] });
+    refreshNetworkStatusView(container, { ...createInitialState('testnet'), networkStatus: stalled });
+
+    expect(container.innerHTML).toBe(before);
+    expect(container.querySelector('.net-status, .net-status-banner')).toBeNull();
   });
 });
