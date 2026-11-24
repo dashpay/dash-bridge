@@ -27,6 +27,19 @@ async function advanceMockDeposit(page: Page) {
   await page.evaluate(() => (window as { __e2eMockAdvance?: () => void }).__e2eMockAdvance?.());
 }
 
+/**
+ * Load the app with external requests blocked, then wait for the first
+ * network-status snapshot. That snapshot re-renders the page, which would
+ * otherwise wipe typed input and DOM-only messages (upload status, validation
+ * text) mid-test.
+ */
+async function openApp(page: Page) {
+  await page.route(/^https?:\/\/(?!127\.0\.0\.1|localhost)/, (route) => route.abort());
+  await page.goto(MOCK_QUERY);
+  // Polling starts after the idle-time SDK warmup, which is slow on a cold dev server.
+  await expect(page.locator('.net-status')).toBeVisible({ timeout: 45_000 });
+}
+
 test.describe('Deterministic UI E2E (mock mode)', () => {
   test('an idle testnet page never calls digitalcash.dev, starts no evonode discovery and does not load the SDK for the health poll', async ({ page }) => {
     const digitalcashRequests: string[] = [];
@@ -299,7 +312,7 @@ test.describe('Deterministic UI E2E (mock mode)', () => {
   });
 
   test('withdraw flow validates inputs and completes with status tracking', async ({ page }) => {
-    await page.goto(MOCK_QUERY);
+    await openApp(page);
 
     await page.click('#mode-manage-btn');
     await page.click('#manage-action-withdraw-btn');
@@ -522,18 +535,6 @@ test.describe('Untrusted strings are never rendered as markup (mock mode)', () =
         identityKeys: [{ id: 1, purpose: 'AUTHENTICATION', securityLevel: 'HIGH', privateKeyWif }],
       })),
     };
-  }
-
-  /**
-   * Load the app with external requests blocked, then wait for the first
-   * network-status snapshot. That snapshot re-renders the page, which would
-   * otherwise wipe DOM-only messages (upload status, validation text) mid-test.
-   */
-  async function openApp(page: import('@playwright/test').Page) {
-    await page.route(/^https?:\/\/(?!127\.0\.0\.1|localhost)/, (route) => route.abort());
-    await page.goto(MOCK_QUERY);
-    // Polling starts after the idle-time SDK warmup, which is slow on a cold dev server.
-    await expect(page.locator('.net-status')).toBeVisible({ timeout: 45_000 });
   }
 
   async function expectNoInjection(page: import('@playwright/test').Page) {

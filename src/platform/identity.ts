@@ -353,7 +353,7 @@ export async function registerIdentity(
         console.warn(
           '[devnet] identities.create returned an error (expected when ' +
             'proof verification is unavailable); falling back to polling. Error:',
-          error instanceof Error ? error.message : error
+          extractErrorMessage(error)
         );
       }
 
@@ -716,10 +716,7 @@ export async function updateIdentity(
       return { success: true };
     } catch (error) {
       console.error('Identity update error:', error);
-      // WasmSdkError is not a standard Error, so check for message property
-      const errorMessage = (error && typeof error === 'object' && 'message' in error)
-        ? String((error as { message: unknown }).message)
-        : (error instanceof Error ? error.message : String(error));
+      const errorMessage = extractErrorMessage(error);
       return {
         success: false,
         error: errorMessage,

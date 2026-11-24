@@ -1422,7 +1422,7 @@ function setupEventListeners(container: HTMLElement) {
         const keys = await getIdentityPublicKeys(identityId, state.network);
         updateState(setDpnsIdentityFetched(state, keys));
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to fetch identity';
+        const message = extractErrorMessage(error);
         updateState(setDpnsIdentityFetchError(state, message));
       }
     };
@@ -1702,7 +1702,7 @@ function setupEventListeners(container: HTMLElement) {
         const keys = await getIdentityPublicKeys(identityId, state.network);
         updateState(setManageIdentityFetched(state, keys));
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to fetch identity';
+        const message = extractErrorMessage(error);
         updateState(setManageIdentityFetchError(state, message));
       }
     };
@@ -1934,7 +1934,7 @@ function setupEventListeners(container: HTMLElement) {
         } catch (error) {
           // If refetch fails, show error in UI
           console.error('Failed to refetch identity keys:', error);
-          const errorMsg = error instanceof Error ? error.message : 'Failed to refresh keys';
+          const errorMsg = extractErrorMessage(error);
           updateState(setManageIdentityFetchError(refreshedState, errorMsg));
         }
       }
@@ -2163,7 +2163,7 @@ function setupEventListeners(container: HTMLElement) {
       }
       updateState(finalState);
     } catch (error) {
-      updateState({ ...setDpnsIdentityFetchError(state, error instanceof Error ? error.message : String(error)), dpnsPrivateKeyWif: result.privateKeyWif });
+      updateState({ ...setDpnsIdentityFetchError(state, extractErrorMessage(error)), dpnsPrivateKeyWif: result.privateKeyWif });
     }
   });
 
@@ -2182,7 +2182,7 @@ function setupEventListeners(container: HTMLElement) {
       }
       updateState(finalState);
     } catch (error) {
-      updateState({ ...setManageIdentityFetchError(state, error instanceof Error ? error.message : String(error)), managePrivateKeyWif: result.privateKeyWif });
+      updateState({ ...setManageIdentityFetchError(state, extractErrorMessage(error)), managePrivateKeyWif: result.privateKeyWif });
     }
   });
 
@@ -2219,7 +2219,7 @@ function setupEventListeners(container: HTMLElement) {
       }
       updateState(finalState);
     } catch (error) {
-      updateState({ ...setContractIdentityFetchError(state, error instanceof Error ? error.message : String(error)), contractPrivateKeyWif: result.privateKeyWif });
+      updateState({ ...setContractIdentityFetchError(state, extractErrorMessage(error)), contractPrivateKeyWif: result.privateKeyWif });
     }
   });
 
@@ -2253,7 +2253,7 @@ function setupEventListeners(container: HTMLElement) {
       }
       updateState(finalState);
     } catch (error) {
-      updateState(setWithdrawIdentityFetchError(state, error instanceof Error ? error.message : String(error)));
+      updateState(setWithdrawIdentityFetchError(state, extractErrorMessage(error)));
     }
   }, 'TRANSFER');
 
@@ -2321,7 +2321,7 @@ function setupEventListeners(container: HTMLElement) {
       ]);
       updateState(setWithdrawIdentityFetched(state, keys, BigInt(identityState.balance)));
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to fetch identity';
+      const message = extractErrorMessage(error);
       updateState(setWithdrawIdentityFetchError(state, message));
     }
   });
@@ -2521,7 +2521,7 @@ function setupEventListeners(container: HTMLElement) {
         }
         updateState(setContractIdentityFetched(state, keys, balance));
       } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
+        const msg = extractErrorMessage(error);
         updateState(setContractIdentityFetchError(state, msg));
       }
     };
@@ -2554,7 +2554,7 @@ function setupEventListeners(container: HTMLElement) {
         }
         updateState(setContractKeyValidated(state, match.keyId, privateKeyWif));
       } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
+        const msg = extractErrorMessage(error);
         updateState(setContractKeyValidationError(state, msg));
       }
     };
@@ -2588,7 +2588,7 @@ function setupEventListeners(container: HTMLElement) {
           const { parsed, estimate } = await parseAndEstimateContract(json);
           updateState(setContractJson(state, raw, parsed, estimate, undefined));
         } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
+          const msg = extractErrorMessage(e);
           updateState(setContractJson(state, raw, undefined, undefined, msg));
         }
       }, 300);
@@ -3854,10 +3854,7 @@ async function startManageUpdate() {
 
   } catch (error) {
     console.error('Identity update error:', error);
-    // WasmSdkError is not a standard Error, so check for message property
-    const errorMessage = (error && typeof error === 'object' && 'message' in error)
-      ? String((error as { message: unknown }).message)
-      : (error instanceof Error ? error.message : String(error));
+    const errorMessage = extractErrorMessage(error);
     updateState(setManageComplete(state, {
       success: false,
       error: errorMessage,
