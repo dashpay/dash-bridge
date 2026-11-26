@@ -137,8 +137,9 @@ describe('contract token normalization', () => {
       localizedString: {
         type: 'object',
         properties: {
-          en: { type: 'string' },
+          en: { type: 'string', position: 0 },
         },
+        additionalProperties: false,
       },
     };
     const rawConfig = {

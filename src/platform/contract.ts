@@ -151,10 +151,14 @@ export async function publishContract(
     }
 
     const sdkModule = await loadSdkModule();
-    const { IdentitySigner, DataContract, PlatformVersion } = sdkModule;
+    const { IdentitySigner, DataContract } = sdkModule;
     const signer = new IdentitySigner();
     signer.addKeyFromWif(privateKeyWif);
-    const platformVersion = PlatformVersion.latest();
+    const status = await withRetry(() => sdk.system.status(), retryOptions);
+    const platformVersion: unknown = status.toJSON()?.version?.protocol?.drive?.current;
+    if (typeof platformVersion !== 'number' || !Number.isInteger(platformVersion) || platformVersion <= 0) {
+      throw new Error('Could not read the network protocol version');
+    }
 
     console.log('Creating data contract...');
     // Placeholder nonce mirrors the constructor path this replaced; SDK publish
