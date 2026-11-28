@@ -20,7 +20,6 @@ import {
   DASHPAY_APP_STORE_URL,
   DASHPAY_GOOGLE_PLAY_URL,
   getCurrentMobilePlatform,
-  getStoreUrl,
   shouldRecommendMobileApp,
 } from './mobile-app.js';
 import { privateKeyToWif } from '../utils/wif.js';
@@ -594,11 +593,9 @@ const EXTERNAL_LINK_ATTRS = 'target="_blank" rel="noopener noreferrer"';
 
 /** Lightweight, ungated nudge toward the DashPay app on the mainnet landing screen. */
 function renderMobileAppHint(): HTMLElement {
-  const storeUrl = getStoreUrl(getCurrentMobilePlatform());
-  const links = storeUrl
-    ? `<a href="${escapeAttr(storeUrl)}" ${EXTERNAL_LINK_ATTRS}>Get DashPay</a>`
-    : `<a href="${escapeAttr(DASHPAY_APP_STORE_URL)}" ${EXTERNAL_LINK_ATTRS}>App Store</a>
-       · <a href="${escapeAttr(DASHPAY_GOOGLE_PLAY_URL)}" ${EXTERNAL_LINK_ATTRS}>Google Play</a>`;
+  const appStore = `<a href="${escapeAttr(DASHPAY_APP_STORE_URL)}" ${EXTERNAL_LINK_ATTRS}>App Store</a>`;
+  const googlePlay = `<a href="${escapeAttr(DASHPAY_GOOGLE_PLAY_URL)}" ${EXTERNAL_LINK_ATTRS}>Google Play</a>`;
+  const links = getCurrentMobilePlatform() === 'android' ? `${googlePlay} · ${appStore}` : `${appStore} · ${googlePlay}`;
   const hint = document.createElement('p');
   hint.id = 'mobile-app-hint';
   hint.className = 'mobile-app-hint';
@@ -621,31 +618,29 @@ function getStoreQrDataUrl(url: string): Promise<string> {
   return dataUrl;
 }
 
-/** A store button, optionally with a QR code of the same link for scanning from a desktop. */
-function renderStoreButton({ id, label, url, qrAlt }: { id?: string; label: string; url: string; qrAlt?: string }): HTMLElement {
+/** A store button with a QR code of the same link, for installing on another phone. */
+function renderStoreButton({ id, label, url, qrAlt }: { id: string; label: string; url: string; qrAlt: string }): HTMLElement {
   const item = document.createElement('div');
   item.className = 'mobile-app-store';
 
-  if (qrAlt) {
-    const qrContainer = document.createElement('div');
-    qrContainer.className = 'mobile-app-qr';
-    qrContainer.innerHTML = '<div class="qr-loading">Loading...</div>';
-    item.appendChild(qrContainer);
-    getStoreQrDataUrl(url).then((dataUrl) => {
-      const img = document.createElement('img');
-      img.src = dataUrl;
-      img.alt = qrAlt;
-      img.width = 160;
-      img.height = 160;
-      qrContainer.replaceChildren(img);
-    }).catch((err) => {
-      console.error('QR code generation failed:', err);
-      qrContainer.innerHTML = '<div class="qr-error">QR failed</div>';
-    });
-  }
+  const qrContainer = document.createElement('div');
+  qrContainer.className = 'mobile-app-qr';
+  qrContainer.innerHTML = '<div class="qr-loading">Loading...</div>';
+  item.appendChild(qrContainer);
+  getStoreQrDataUrl(url).then((dataUrl) => {
+    const img = document.createElement('img');
+    img.src = dataUrl;
+    img.alt = qrAlt;
+    img.width = 160;
+    img.height = 160;
+    qrContainer.replaceChildren(img);
+  }).catch((err) => {
+    console.error('QR code generation failed:', err);
+    qrContainer.innerHTML = '<div class="qr-error">QR failed</div>';
+  });
 
   const link = document.createElement('a');
-  if (id) link.id = id;
+  link.id = id;
   link.className = 'primary-btn store-btn';
   link.href = url;
   link.target = '_blank';
@@ -681,28 +676,25 @@ function renderMobileAppRecommendedStep(state: BridgeState): HTMLElement {
 
   const ctas = document.createElement('div');
   ctas.className = `mobile-app-ctas ${platform}`;
-  if (platform === 'ios') {
-    ctas.appendChild(renderStoreButton({ id: 'mobile-app-primary-cta', label: 'Get DashPay on the App Store', url: DASHPAY_APP_STORE_URL }));
-  } else if (platform === 'android') {
-    ctas.appendChild(renderStoreButton({ id: 'mobile-app-primary-cta', label: 'Get DashPay on Google Play', url: DASHPAY_GOOGLE_PLAY_URL }));
-  } else {
-    const scan = document.createElement('p');
-    scan.className = 'mobile-app-scan';
-    scan.textContent = 'Scan with your phone to install DashPay';
-    ctas.appendChild(scan);
-    const stores = document.createElement('div');
-    stores.className = 'mobile-app-stores';
-    stores.appendChild(renderStoreButton({ id: 'mobile-app-app-store-btn', label: 'App Store (iPhone)', url: DASHPAY_APP_STORE_URL, qrAlt: 'App Store QR code for DashPay' }));
-    stores.appendChild(renderStoreButton({ id: 'mobile-app-google-play-btn', label: 'Google Play (Android)', url: DASHPAY_GOOGLE_PLAY_URL, qrAlt: 'Google Play QR code for DashPay' }));
-    ctas.appendChild(stores);
+  const scan = document.createElement('p');
+  scan.className = 'mobile-app-scan';
+  scan.textContent = platform === 'desktop'
+    ? 'Scan with your phone to install DashPay'
+    : 'Install DashPay on this phone, or scan a code with another phone';
+  ctas.appendChild(scan);
+  const appStore = { id: 'mobile-app-app-store-btn', label: 'App Store (iPhone)', url: DASHPAY_APP_STORE_URL, qrAlt: 'App Store QR code for DashPay' };
+  const googlePlay = { id: 'mobile-app-google-play-btn', label: 'Google Play (Android)', url: DASHPAY_GOOGLE_PLAY_URL, qrAlt: 'Google Play QR code for DashPay' };
+  const stores = document.createElement('div');
+  stores.className = 'mobile-app-stores';
+  for (const store of platform === 'android' ? [googlePlay, appStore] : [appStore, googlePlay]) {
+    stores.appendChild(renderStoreButton(store));
   }
-  if (platform !== 'ios') {
-    const apk = document.createElement('p');
-    apk.className = 'mobile-app-apk';
-    apk.innerHTML = `No Google Play? <a href="${escapeAttr(DASHPAY_ANDROID_APK_URL)}" ${EXTERNAL_LINK_ATTRS}>Download the Android APK from GitHub</a>
-      (pick <code>dashpay-wallet-&lt;version&gt;.apk</code>, not the <code>-testnet</code> one)`;
-    ctas.appendChild(apk);
-  }
+  ctas.appendChild(stores);
+  const apk = document.createElement('p');
+  apk.className = 'mobile-app-apk';
+  apk.innerHTML = `No Google Play? <a href="${escapeAttr(DASHPAY_ANDROID_APK_URL)}" ${EXTERNAL_LINK_ATTRS}>Download the Android APK from GitHub</a>
+    (pick <code>dashpay-wallet-&lt;version&gt;.apk</code>, not the <code>-testnet</code> one)`;
+  ctas.appendChild(apk);
   if (platform !== 'desktop') {
     const installed = document.createElement('p');
     installed.className = 'mobile-app-installed';

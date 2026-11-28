@@ -46,13 +46,6 @@ export function getCurrentMobilePlatform(): MobilePlatform {
   );
 }
 
-/** Store page for the platform's app; desktop has no single store. */
-export function getStoreUrl(platform: MobilePlatform): string | undefined {
-  if (platform === 'ios') return DASHPAY_APP_STORE_URL;
-  if (platform === 'android') return DASHPAY_GOOGLE_PLAY_URL;
-  return undefined;
-}
-
 const SMART_APP_BANNER_NAME = 'apple-itunes-app';
 
 /**

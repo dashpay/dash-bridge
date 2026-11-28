@@ -1,10 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, afterEach } from 'vitest';
 import {
-  DASHPAY_APP_STORE_URL,
-  DASHPAY_GOOGLE_PLAY_URL,
   detectMobilePlatform,
-  getStoreUrl,
   shouldRecommendMobileApp,
   syncSmartAppBanner,
 } from './mobile-app.js';
@@ -27,14 +24,6 @@ describe('detectMobilePlatform', () => {
     ['empty values', '', '', 0, 'desktop'],
   ] as const)('%s', (_name, ua, platform, touchPoints, expected) => {
     expect(detectMobilePlatform(ua, platform, touchPoints)).toBe(expected);
-  });
-});
-
-describe('getStoreUrl', () => {
-  it('maps each phone platform to its store and desktop to none', () => {
-    expect(getStoreUrl('ios')).toBe(DASHPAY_APP_STORE_URL);
-    expect(getStoreUrl('android')).toBe(DASHPAY_GOOGLE_PLAY_URL);
-    expect(getStoreUrl('desktop')).toBeUndefined();
   });
 });
 

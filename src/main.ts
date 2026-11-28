@@ -910,12 +910,12 @@ function updateState(newState: BridgeState) {
       }
     }
 
-    // On a phone, land on the store button when the DashPay recommendation first appears.
+    // On a phone, land on this phone's store button when the DashPay recommendation first appears.
     if (state.step === 'mobile_app_recommended' && previousStep !== 'mobile_app_recommended') {
       window.scrollTo(0, 0);
       if (getCurrentMobilePlatform() !== 'desktop') {
         // preventScroll keeps the "more secure" explanation in view on short screens.
-        document.getElementById('mobile-app-primary-cta')?.focus({ preventScroll: true });
+        document.querySelector<HTMLElement>('.mobile-app-store .store-btn')?.focus({ preventScroll: true });
       }
     }
   }
