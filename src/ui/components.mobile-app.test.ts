@@ -47,26 +47,16 @@ describe('DashPay app recommendation screen', () => {
     }
   });
 
-  it('offers both stores with QR codes on desktop', () => {
+  it.each([
+    ['desktop', [DASHPAY_APP_STORE_URL, DASHPAY_GOOGLE_PLAY_URL, DASHPAY_ANDROID_APK_URL]],
+    ['ios', [DASHPAY_APP_STORE_URL, DASHPAY_GOOGLE_PLAY_URL, DASHPAY_ANDROID_APK_URL]],
+    ['android', [DASHPAY_GOOGLE_PLAY_URL, DASHPAY_APP_STORE_URL, DASHPAY_ANDROID_APK_URL]],
+  ] as const)('offers both stores, each with a QR code and a button, on %s', (device, hrefs) => {
+    platform = device;
     const container = renderState('mainnet', { step: 'mobile_app_recommended' });
-    expect(storeHrefs(container)).toEqual([DASHPAY_APP_STORE_URL, DASHPAY_GOOGLE_PLAY_URL, DASHPAY_ANDROID_APK_URL]);
-    expect(container.querySelectorAll('.mobile-app-qr')).toHaveLength(2);
-    expect(container.querySelector('#mobile-app-primary-cta')).toBeNull();
-  });
-
-  it('leads with the App Store on iOS', () => {
-    platform = 'ios';
-    const container = renderState('mainnet', { step: 'mobile_app_recommended' });
-    expect(container.querySelector('#mobile-app-primary-cta')?.getAttribute('href')).toBe(DASHPAY_APP_STORE_URL);
-    expect(storeHrefs(container)).toEqual([DASHPAY_APP_STORE_URL]);
-    expect(container.querySelectorAll('.mobile-app-qr')).toHaveLength(0);
-  });
-
-  it('leads with Google Play on Android and offers the APK', () => {
-    platform = 'android';
-    const container = renderState('mainnet', { step: 'mobile_app_recommended' });
-    expect(container.querySelector('#mobile-app-primary-cta')?.getAttribute('href')).toBe(DASHPAY_GOOGLE_PLAY_URL);
-    expect(storeHrefs(container)).toEqual([DASHPAY_GOOGLE_PLAY_URL, DASHPAY_ANDROID_APK_URL]);
+    expect(storeHrefs(container)).toEqual(hrefs);
+    expect(container.querySelectorAll('.mobile-app-store .mobile-app-qr')).toHaveLength(2);
+    expect(container.querySelectorAll('.mobile-app-store .store-btn')).toHaveLength(2);
   });
 
   it('keeps Continue in browser disabled until the risk is acknowledged', () => {
@@ -91,10 +81,13 @@ describe('mainnet landing hint', () => {
     expect(renderState('testnet').querySelector('#mobile-app-hint')).toBeNull();
   });
 
-  it('links to the store for the current phone', () => {
-    platform = 'android';
+  it.each([
+    ['desktop', [DASHPAY_APP_STORE_URL, DASHPAY_GOOGLE_PLAY_URL]],
+    ['ios', [DASHPAY_APP_STORE_URL, DASHPAY_GOOGLE_PLAY_URL]],
+    ['android', [DASHPAY_GOOGLE_PLAY_URL, DASHPAY_APP_STORE_URL]],
+  ] as const)('links to both stores on %s, this phone\'s first', (device, hrefs) => {
+    platform = device;
     const hint = renderState('mainnet').querySelector('#mobile-app-hint')!;
-    const hrefs = Array.from(hint.querySelectorAll('a')).map((a) => a.getAttribute('href'));
-    expect(hrefs).toEqual([DASHPAY_GOOGLE_PLAY_URL]);
+    expect(Array.from(hint.querySelectorAll('a')).map((a) => a.getAttribute('href'))).toEqual(hrefs);
   });
 });

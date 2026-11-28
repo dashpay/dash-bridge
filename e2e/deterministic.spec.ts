@@ -825,7 +825,7 @@ test.describe('Mainnet DashPay app recommendation (mock mode)', () => {
     await expect(page.locator('#continue-btn')).toBeVisible();
   });
 
-  test('on an iPhone the App Store button is the focused primary action', async ({ browser }) => {
+  test('on an iPhone the App Store button leads and is focused, and both QR codes still show', async ({ browser }) => {
     const context = await browser.newContext({
       userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
       viewport: { width: 390, height: 844 },
@@ -837,10 +837,11 @@ test.describe('Mainnet DashPay app recommendation (mock mode)', () => {
     await page.goto(MAINNET_QUERY);
 
     await page.click('#mode-create-btn');
-    const cta = page.locator('#mobile-app-primary-cta');
+    const cta = page.locator('.mobile-app-store .store-btn').first();
     await expect(cta).toHaveAttribute('href', APP_STORE_URL);
     await expect(cta).toBeFocused();
-    await expect(page.locator('#mobile-app-google-play-btn')).toHaveCount(0);
+    await expect(page.locator('#mobile-app-google-play-btn')).toHaveAttribute('href', GOOGLE_PLAY_URL);
+    await expect(page.locator('.mobile-app-qr img')).toHaveCount(2);
     await context.close();
   });
 });
